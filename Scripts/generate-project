@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+required_version="2.46.0"
+if ! command -v xcodegen >/dev/null 2>&1; then
+    printf 'XcodeGen %s is required. Install it before generating the project.\n' "$required_version" >&2
+    exit 1
+fi
+
+actual_version="$(xcodegen --version | awk '{print $2}')"
+if [[ "$actual_version" != "$required_version" ]]; then
+    printf 'Expected XcodeGen %s, found %s\n' "$required_version" "$actual_version" >&2
+    exit 1
+fi
+
+xcodegen generate --spec project.yml

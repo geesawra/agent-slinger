@@ -1,0 +1,9 @@
+.build/
+DerivedData/
+*.xcresult
+.DS_Store
+
+# Regenerated from project.yml by Scripts/generate-project.
+Oesap.xcodeproj/
+xcuserdata/
+*.xcuserstate
