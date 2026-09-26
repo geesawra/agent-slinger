@@ -27,6 +27,29 @@ targets:
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Oesap/Transport/Crypto/Oesap-Bridging-Header.h
+    info:
+      path: Oesap-Info.plist
+      properties:
+        NSLocalNetworkUsageDescription: Oesap connects to a Paseo daemon on your local network when you choose a direct host connection.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+
+  OesapTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/OesapTests
+    dependencies:
+      - target: Oesap
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.oesap.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        TEST_TARGET_NAME: Oesap
 
   OesapUITests:
     type: bundle.ui-testing
@@ -54,6 +77,7 @@ schemes:
     test:
       config: Debug
       targets:
+        - OesapTests
         - OesapUITests
     profile:
       config: Release
