@@ -308,7 +308,7 @@ final class OesapModel {
       connectionState = .disconnected
       connectError = error.localizedDescription
       workspaceError =
-        "Reconnect failed. Your open thread and draft are still here. Try again when the host is reachable."
+        "Reconnect failed. Your open thread and draft stay in this app while it is open. Try again when the host is reachable."
     }
   }
 
@@ -778,8 +778,8 @@ final class OesapModel {
         if result.safeToRestart { pendingNewThreadIntents[scope] = nil }
         messageError =
           result.safeToRestart
-          ? "The host did not create a thread. Your draft is saved; check the agent setting and try again. \(result.error ?? "")"
-          : "Thread creation couldn’t be confirmed. Your first message is saved; retry will check the same request. \(result.error ?? "")"
+          ? "The host did not create a thread. Your draft stays in this app while it is open; check the agent setting and try again. \(result.error ?? "")"
+          : "Thread creation couldn’t be confirmed. Your first message stays in this app while it is open; retry will check the same request. \(result.error ?? "")"
         return nil
       }
       let currentDraft = drafts[draftKey] ?? ""
@@ -793,7 +793,7 @@ final class OesapModel {
       drafts[draftKey] = ""
       if !result.promptAccepted {
         messageError =
-          "The thread was created, but delivery of its first message wasn’t confirmed. Your draft is saved. Check the timeline before sending again. \(result.error ?? "")"
+          "The thread was created, but delivery of its first message wasn’t confirmed. Your draft stays in this app while it is open. Check the timeline before sending again. \(result.error ?? "")"
       }
       if let existingIndex = threads.firstIndex(where: { $0.id == thread.id }) {
         threads[existingIndex] = thread
@@ -811,7 +811,7 @@ final class OesapModel {
         selectedProjectID == projectID, connectedServerID == serverID
       else { return nil }
       messageError =
-        "Thread creation couldn’t be confirmed. Your first message is saved; retry will use the same request. \(error.localizedDescription)"
+        "Thread creation couldn’t be confirmed. Your first message stays in this app while it is open; retry will use the same request. \(error.localizedDescription)"
       return nil
     }
   }
@@ -840,7 +840,7 @@ final class OesapModel {
     } catch {
       guard connectionGeneration == generation else { return false }
       messageError =
-        "Delivery couldn’t be confirmed. Your draft is saved. Check the timeline before retrying to avoid sending it twice. \(error.localizedDescription)"
+        "Delivery couldn’t be confirmed. Your draft stays in this app while it is open. Check the timeline before retrying to avoid sending it twice. \(error.localizedDescription)"
       return false
     }
   }

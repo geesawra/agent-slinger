@@ -81,6 +81,7 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(idle.waitForExistence(timeout: 5))
     attachScreenshot(named: "All agents including idle")
 
+    XCTAssertTrue(scrollUntilHittable(failed, in: app))
     failed.tap()
     XCTAssertTrue(app.navigationBars["Fix release build"].waitForExistence(timeout: 5))
     XCTAssertTrue(app.staticTexts["Failed"].waitForExistence(timeout: 5))
@@ -459,7 +460,8 @@ final class OesapUITests: XCTestCase {
         "--demo-server-id=ui-test-\(UUID().uuidString.lowercased())",
       ]
     app.launch()
-    XCTAssertTrue(app.textFields["direct-endpoint"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars["Oesap"].waitForExistence(timeout: 5))
+    XCTAssertTrue(scrollUntilHittable(app.textFields["direct-endpoint"], in: app))
     return app
   }
 
@@ -548,7 +550,21 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(endpoint.waitForExistence(timeout: 5))
     endpoint.tap()
     endpoint.typeText("demo.paseo.local:6767")
-    app.toolbars.buttons["Done"].firstMatch.tapIfExists()
+    let keyboard = app.keyboards.firstMatch
+    let keyboardDone = app.buttons["connection-keyboard-done"]
+    XCTAssertTrue(keyboardDone.waitForExistence(timeout: 5))
+    let keyboardDoneHittable = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "isHittable == true"), object: keyboardDone)
+    XCTAssertEqual(
+      XCTWaiter.wait(for: [keyboardDoneHittable], timeout: 5), .completed,
+      "The keyboard Done button should become hittable.")
+    keyboardDone.tap()
+
+    let keyboardDismissed = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: keyboard)
+    XCTAssertEqual(
+      XCTWaiter.wait(for: [keyboardDismissed], timeout: 3), .completed,
+      "Dismiss the keyboard before connecting.")
   }
 
   private func attachScreenshot(named name: String) {
@@ -618,10 +634,4 @@ final class OesapUITests: XCTestCase {
   }
 
   private enum TimelineDirection { case earlier, later }
-}
-
-extension XCUIElement {
-  fileprivate func tapIfExists() {
-    if exists && isHittable { tap() }
-  }
 }

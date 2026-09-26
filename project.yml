@@ -22,6 +22,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oesap.app
         PRODUCT_NAME: Oesap
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTS_MACCATALYST: NO
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
@@ -31,6 +33,9 @@ targets:
     info:
       path: Oesap-Info.plist
       properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
         NSLocalNetworkUsageDescription: Oesap connects to a Paseo daemon on your local network when you choose a direct host connection.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

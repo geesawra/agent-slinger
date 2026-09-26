@@ -14,13 +14,16 @@ struct ChatComposerBar: View {
       if let error {
         HStack(alignment: .top, spacing: 8) {
           Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-          Text(error).font(.footnote).foregroundStyle(.secondary)
+          Text(error).font(.footnote).foregroundStyle(.primary)
           Spacer(minLength: 0)
           Button {
             clearError()
           } label: {
-            Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+              .frame(width: 44, height: 44)
+              .contentShape(Rectangle())
           }
+          .buttonStyle(.plain)
           .accessibilityLabel("Dismiss message error")
         }
         .padding(.horizontal, 16)
@@ -32,6 +35,7 @@ struct ChatComposerBar: View {
           .lineLimit(1...5)
           .submitLabel(.send)
           .focused(focus)
+          .accessibilityLabel("Message agent")
           .accessibilityIdentifier("chat-composer")
           .onSubmit(sendDraft)
           .padding(.horizontal, 14)
@@ -43,16 +47,19 @@ struct ChatComposerBar: View {
           .onChange(of: draft) { _, _ in clearError() }
 
         Button(action: sendDraft) {
-          if isSending {
-            ProgressView().frame(width: 38, height: 38)
-          } else {
-            Image(systemName: "arrow.up.circle.fill")
-              .font(.system(size: 34))
-              .symbolRenderingMode(.hierarchical)
+          Group {
+            if isSending {
+              ProgressView()
+            } else {
+              Image(systemName: "arrow.up.circle.fill")
+                .font(.system(size: 34))
+                .symbolRenderingMode(.hierarchical)
+            }
           }
+          .frame(minWidth: 44, minHeight: 44)
+          .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .frame(minWidth: 44, minHeight: 44)
         .foregroundStyle(.tint)
         .disabled(!canSend)
         .opacity(canSend ? 1 : 0.45)

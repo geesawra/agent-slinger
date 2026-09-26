@@ -41,7 +41,18 @@ struct OesapApp: App {
 
   var body: some Scene {
     WindowGroup {
-      WorkspaceRootView(model: model)
+      #if DEBUG
+        WorkspaceRootView(model: model)
+          .preferredColorScheme(uiTestDarkMode ? .dark : nil)
+      #else
+        WorkspaceRootView(model: model)
+      #endif
     }
   }
+
+  #if DEBUG
+    private var uiTestDarkMode: Bool {
+      ProcessInfo.processInfo.arguments.contains("--ui-test-dark-mode")
+    }
+  #endif
 }

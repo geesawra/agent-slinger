@@ -38,6 +38,8 @@ struct ContextUsageIndicator: View {
   let usage: RemoteContextUsage?
   var isLoading = false
 
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
   private var fraction: Double? {
     guard let fraction = usage?.fractionUsed, fraction.isFinite else { return nil }
     return fraction
@@ -45,7 +47,14 @@ struct ContextUsageIndicator: View {
 
   var body: some View {
     VStack(spacing: 3) {
-      if let fraction {
+      if dynamicTypeSize.isAccessibilitySize {
+        Text("Context")
+          .font(.caption.weight(.medium))
+          .foregroundStyle(Color.primary.opacity(0.75))
+        Text(statusValue)
+          .font(.body.weight(.semibold))
+          .multilineTextAlignment(.trailing)
+      } else if let fraction {
         Gauge(value: visualFraction(fraction), in: 0...1) {
           Text("Context")
         } currentValueLabel: {
@@ -60,7 +69,7 @@ struct ContextUsageIndicator: View {
           .font(.caption2.weight(.medium))
         Text("Loading")
           .font(.caption2)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       } else {
         Image(systemName: "chart.bar.xaxis")
           .font(.title3)
@@ -70,16 +79,23 @@ struct ContextUsageIndicator: View {
           .font(.caption2.weight(.medium))
         Text("Unavailable")
           .font(.caption2)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
     }
-    .frame(minWidth: 64, minHeight: 64)
+    .frame(
+      minWidth: dynamicTypeSize.isAccessibilitySize ? 88 : 64,
+      minHeight: dynamicTypeSize.isAccessibilitySize ? 44 : 64
+    )
     .contentShape(Rectangle())
     .accessibilityElement(children: .ignore)
     .accessibilityLabel("Last reported context usage")
     .accessibilityValue(
       fraction.map { "\(fractionPercentLabel($0)) used" }
         ?? (isLoading ? "Loading" : "Unavailable"))
+  }
+
+  private var statusValue: String {
+    fraction.map { "\(fractionPercentLabel($0)) used" } ?? (isLoading ? "Loading" : "Unavailable")
   }
 }
 
@@ -95,7 +111,7 @@ private struct UsageValueRow: View {
       if dynamicTypeSize.isAccessibilitySize {
         VStack(alignment: .leading, spacing: 3) {
           Text(verbatim: label)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.75))
           Text(verbatim: value)
             .multilineTextAlignment(.leading)
         }
@@ -147,7 +163,7 @@ private struct UsageListContent: View {
           HStack(spacing: 12) {
             ProgressView()
             Text("Loading provider usage…")
-              .foregroundStyle(.secondary)
+              .foregroundStyle(Color.primary.opacity(0.75))
           }
         }
       } else if displayedProviders.isEmpty {
@@ -162,10 +178,10 @@ private struct UsageListContent: View {
         Section {
           Text("Host report fetched \(fetchedAt.formatted(date: .abbreviated, time: .shortened))")
             .font(.footnote)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.75))
           Text("Paseo may return cached usage data.")
             .font(.footnote)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.75))
         }
       }
     }
@@ -209,7 +225,7 @@ private struct UsageListContent: View {
         HStack(spacing: 10) {
           ProgressView()
           Text("Loading context usage…")
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.75))
         }
       }
 
@@ -232,31 +248,30 @@ private struct UsageListContent: View {
         if usage.fractionUsed == nil || !(usage.fractionUsed?.isFinite ?? false) {
           Text("A percentage needs both a used count and a positive context-window size.")
             .font(.footnote)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.75))
         } else if let fraction = usage.fractionUsed, fraction > 1 {
           Text("Reported use is above the reported context window.")
             .font(.footnote)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.75))
         }
       } else if !model.loadingContextUsage {
         Text("No context usage has been reported for this thread.")
           .font(.subheadline)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
 
       if let error = model.contextUsageError {
         Label {
-          Text(verbatim: error)
+          Text(verbatim: error).foregroundStyle(.primary)
         } icon: {
-          Image(systemName: "exclamationmark.triangle.fill")
+          Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
         }
         .font(.footnote)
-        .foregroundStyle(.orange)
       }
 
       Text("This is the host’s last report and may be from an earlier turn.")
         .font(.footnote)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(Color.primary.opacity(0.75))
     } header: {
       Text("Last reported context")
     }
@@ -264,16 +279,19 @@ private struct UsageListContent: View {
 
   private var offlineSection: some View {
     Section {
-      Label("Host disconnected", systemImage: "wifi.exclamationmark")
-        .font(.headline)
-        .foregroundStyle(.orange)
+      Label {
+        Text("Host disconnected").foregroundStyle(.primary)
+      } icon: {
+        Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
+      }
+      .font(.headline)
       Text(
         displayedProviders.isEmpty
           ? "Reconnect to load provider usage."
           : "Showing the last reported provider usage. Reconnect to refresh it."
       )
       .font(.subheadline)
-      .foregroundStyle(.secondary)
+      .foregroundStyle(Color.primary.opacity(0.75))
       Button("Reconnect") { Task { await model.reconnect() } }
         .disabled(model.connectionState.isBusy || !model.hasSavedConnection)
     }
@@ -293,7 +311,7 @@ private struct UsageListContent: View {
               ?? "Paseo may serve cached results; check the host report time below."
           )
           .font(.footnote)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
         }
         Spacer(minLength: 4)
         retryButton
@@ -309,7 +327,7 @@ private struct UsageListContent: View {
           systemImage: "chart.bar.xaxis",
           description: Text(
             model.providerUsageError ?? "This Paseo host doesn’t report provider quota data."
-          )
+          ).foregroundStyle(Color.primary.opacity(0.75))
         )
         .listRowSeparator(.hidden)
       } else if let error = contextThread == nil ? model.providerUsageError : contextError {
@@ -317,7 +335,7 @@ private struct UsageListContent: View {
           ContentUnavailableView(
             "Provider usage unavailable",
             systemImage: "exclamationmark.triangle",
-            description: Text(verbatim: error)
+            description: Text(verbatim: error).foregroundStyle(Color.primary.opacity(0.75))
           )
           retryButton
         }
@@ -326,7 +344,7 @@ private struct UsageListContent: View {
         ContentUnavailableView(
           emptyProviderTitle,
           systemImage: "chart.bar.xaxis",
-          description: Text(emptyProviderDescription)
+          description: Text(emptyProviderDescription).foregroundStyle(Color.primary.opacity(0.75))
         )
         .listRowSeparator(.hidden)
       }
@@ -373,9 +391,12 @@ private struct ProviderUsageSection: View {
 
   var body: some View {
     Section {
-      Label(statusLabel, systemImage: statusSymbol)
-        .font(.subheadline.weight(.medium))
-        .foregroundStyle(statusColor)
+      Label {
+        Text(statusLabel).foregroundStyle(.primary)
+      } icon: {
+        Image(systemName: statusSymbol).foregroundStyle(statusColor)
+      }
+      .font(.subheadline.weight(.medium))
 
       if let planLabel = provider.planLabel {
         usageValue("Plan", value: planLabel)
@@ -402,12 +423,11 @@ private struct ProviderUsageSection: View {
 
       if let error = provider.error {
         Label {
-          Text(verbatim: error)
+          Text(verbatim: error).foregroundStyle(.primary)
         } icon: {
-          Image(systemName: "exclamationmark.triangle.fill")
+          Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
         }
         .font(.footnote)
-        .foregroundStyle(.red)
       }
 
       if provider.windows.isEmpty && provider.balances.isEmpty && provider.details.isEmpty
@@ -415,18 +435,18 @@ private struct ProviderUsageSection: View {
       {
         Text("This provider hasn’t reported quota details.")
           .font(.subheadline)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
 
       if let fetchedAt = provider.fetchedAt {
         Text("Host report fetched \(fetchedAt.formatted(date: .abbreviated, time: .shortened))")
           .font(.footnote)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
       if let nextRefreshAt = provider.nextRefreshAt {
         Text("Next refresh \(nextRefreshAt.formatted(date: .abbreviated, time: .shortened))")
           .font(.footnote)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
     } header: {
       Text(verbatim: provider.displayName)
@@ -501,7 +521,7 @@ private struct ProviderUsageWindowRow: View {
       if window.remainingPct == nil && window.usedPct == nil {
         Text("Percentage not reported")
           .font(.footnote)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
 
       if let resetsAt = window.resetsAt {
@@ -547,7 +567,7 @@ private struct ProviderUsageBalanceRow: View {
       if balance.remaining == nil && balance.used == nil && balance.limit == nil {
         Text("Balance not reported")
           .font(.footnote)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
       if let resetsAt = balance.resetsAt {
         usageValue(

@@ -5,6 +5,7 @@ struct ToolCallCard: View {
   let rowID: String
   @Binding var isExpanded: Bool
 
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @State private var presentedSection: RemoteToolCallSection?
 
   var body: some View {
@@ -13,7 +14,7 @@ struct ToolCallCard: View {
         if hasNoDetails {
           Text("This tool has not provided additional details.")
             .font(.subheadline)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.75))
         }
 
         if let command = call.command, !command.isEmpty {
@@ -39,12 +40,13 @@ struct ToolCallCard: View {
         }
 
         if let exitCode = call.exitCode {
-          Label(
-            "Exit code \(exitCode)",
-            systemImage: exitCode == 0 ? "checkmark.circle" : "xmark.circle"
-          )
+          Label {
+            Text("Exit code \(exitCode)").foregroundStyle(.primary)
+          } icon: {
+            Image(systemName: exitCode == 0 ? "checkmark.circle" : "xmark.circle")
+              .foregroundStyle(exitCode == 0 ? Color.green : Color.red)
+          }
           .font(.subheadline)
-          .foregroundStyle(exitCode == 0 ? Color.green : Color.red)
         }
 
         ForEach(call.sections) { section in
@@ -68,45 +70,15 @@ struct ToolCallCard: View {
       .multilineTextAlignment(.leading)
     } label: {
       VStack(alignment: .leading, spacing: 8) {
-        HStack(alignment: .top, spacing: 10) {
-          Image(systemName: call.status.symbol)
-            .font(.title3.weight(.semibold))
-            .foregroundStyle(call.status.color)
-            .frame(width: 26)
-            .accessibilityHidden(true)
-
-          VStack(alignment: .leading, spacing: 3) {
-            Text(verbatim: call.title.isEmpty ? call.name : call.title)
-              .font(.headline)
-              .foregroundStyle(.primary)
-              .lineLimit(2)
-              .fixedSize(horizontal: false, vertical: true)
-            if call.name.localizedCaseInsensitiveCompare(call.title) != .orderedSame {
-              Text(verbatim: call.name)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-          }
-
-          Spacer(minLength: 4)
-
-          Text(verbatim: call.status.label)
-            .lineLimit(1)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(call.status.color)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 6)
-            .background(call.status.color.opacity(0.12), in: Capsule())
-        }
+        callHeader
 
         if let summary = call.summary, !summary.isEmpty,
           summary != call.command
         {
           Text(verbatim: summary)
             .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .lineLimit(3)
+            .foregroundStyle(Color.primary.opacity(0.75))
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 3)
             .fixedSize(horizontal: false, vertical: true)
         }
 
@@ -125,8 +97,8 @@ struct ToolCallCard: View {
             Text(verbatim: cwd)
           }
           .font(.caption)
-          .foregroundStyle(.secondary)
-          .lineLimit(2)
+          .foregroundStyle(Color.primary.opacity(0.75))
+          .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
           .textSelection(.enabled)
         }
       }
@@ -147,6 +119,56 @@ struct ToolCallCard: View {
     }
   }
 
+  @ViewBuilder
+  private var callHeader: some View {
+    if dynamicTypeSize.isAccessibilitySize {
+      VStack(alignment: .leading, spacing: 8) {
+        callTitle
+        callStatusBadge
+      }
+    } else {
+      HStack(alignment: .top, spacing: 10) {
+        callStatusIcon
+        callTitle
+        Spacer(minLength: 4)
+        callStatusBadge
+      }
+    }
+  }
+
+  private var callStatusIcon: some View {
+    Image(systemName: call.status.symbol)
+      .font(.title3.weight(.semibold))
+      .foregroundStyle(call.status.color)
+      .frame(width: 26)
+      .accessibilityHidden(true)
+  }
+
+  private var callTitle: some View {
+    VStack(alignment: .leading, spacing: 3) {
+      Text(verbatim: call.title.isEmpty ? call.name : call.title)
+        .font(.headline)
+        .foregroundStyle(.primary)
+        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+        .fixedSize(horizontal: false, vertical: true)
+      if call.name.localizedCaseInsensitiveCompare(call.title) != .orderedSame {
+        Text(verbatim: call.name)
+          .font(.caption)
+          .foregroundStyle(Color.primary.opacity(0.75))
+          .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+      }
+    }
+  }
+
+  private var callStatusBadge: some View {
+    Text(verbatim: call.status.label)
+      .font(.caption.weight(.semibold))
+      .foregroundStyle(.primary)
+      .padding(.horizontal, 9)
+      .padding(.vertical, 6)
+      .background(call.status.color.opacity(0.12), in: Capsule())
+  }
+
   private var hasNoDetails: Bool {
     (call.command?.isEmpty ?? true)
       && (call.cwd?.isEmpty ?? true)
@@ -165,6 +187,8 @@ private struct ToolCallSectionCard: View {
   private let previewCharacterLimit = 1_800
   private let previewLineLimit = 12
 
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
   private var boundedPreview: (text: String, hasMore: Bool) {
     let end =
       section.content.index(
@@ -182,24 +206,25 @@ private struct ToolCallSectionCard: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 7) {
-      HStack(alignment: .firstTextBaseline, spacing: 8) {
-        Text(verbatim: section.title.isEmpty ? "Details" : section.title)
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(.secondary)
-          .lineLimit(2)
-          .multilineTextAlignment(.leading)
-        if let language = section.language, !language.isEmpty {
-          Text(verbatim: language)
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+      Group {
+        if dynamicTypeSize.isAccessibilitySize {
+          VStack(alignment: .leading, spacing: 3) {
+            sectionHeading
+            sectionLanguage
+          }
+        } else {
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            sectionHeading
+            sectionLanguage
+          }
         }
       }
 
       if let path = section.path, !path.isEmpty {
         Text(verbatim: path)
           .font(.system(.caption, design: .monospaced))
-          .foregroundStyle(.secondary)
-          .lineLimit(3)
+          .foregroundStyle(Color.primary.opacity(0.75))
+          .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 3)
           .multilineTextAlignment(.leading)
           .textSelection(.enabled)
           .fixedSize(horizontal: false, vertical: true)
@@ -212,7 +237,7 @@ private struct ToolCallSectionCard: View {
       if !location.isEmpty {
         Text(location)
           .font(.caption2)
-          .foregroundStyle(.tertiary)
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
 
       switch section.kind {
@@ -237,6 +262,8 @@ private struct ToolCallSectionCard: View {
             systemImage: "arrow.up.left.and.arrow.down.right"
           )
           .font(.subheadline.weight(.medium))
+          .frame(minHeight: 44)
+          .contentShape(Rectangle())
         }
         .buttonStyle(.bordered)
         .accessibilityIdentifier("tool-call-full-\(callID)-\(section.id)")
@@ -244,6 +271,23 @@ private struct ToolCallSectionCard: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .multilineTextAlignment(.leading)
+  }
+
+  private var sectionHeading: some View {
+    Text(verbatim: section.title.isEmpty ? "Details" : section.title)
+      .font(.caption.weight(.semibold))
+      .foregroundStyle(Color.primary.opacity(0.75))
+      .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+      .multilineTextAlignment(.leading)
+  }
+
+  @ViewBuilder
+  private var sectionLanguage: some View {
+    if let language = section.language, !language.isEmpty {
+      Text(verbatim: language)
+        .font(.caption2)
+        .foregroundStyle(Color.primary.opacity(0.75))
+    }
   }
 }
 
@@ -290,11 +334,7 @@ private struct ToolDiffBlock: View {
     .background(.background.opacity(0.78), in: RoundedRectangle(cornerRadius: 10))
   }
 
-  private func color(for line: Substring) -> Color {
-    if line.hasPrefix("+") { return .green }
-    if line.hasPrefix("-") { return .red }
-    return .primary
-  }
+  private func color(for _: Substring) -> Color { .primary }
 
   private func backgroundColor(for line: Substring) -> Color {
     if line.hasPrefix("+") { return .green.opacity(0.08) }
@@ -325,7 +365,7 @@ private struct ToolCallFullSectionSheet: View {
           if let path = section.path, !path.isEmpty {
             Text(verbatim: path)
               .font(.system(.caption, design: .monospaced))
-              .foregroundStyle(.secondary)
+              .foregroundStyle(Color.primary.opacity(0.75))
               .lineLimit(3)
               .textSelection(.enabled)
           }
@@ -347,13 +387,17 @@ private struct ToolCallFullSectionSheet: View {
           }
 
           if let lastRange = visibleRanges.last, lastRange.upperBound < section.content.endIndex {
-            Button(
-              section.title.localizedCaseInsensitiveCompare("output") == .orderedSame
-                ? "Load more output" : "Load more details"
-            ) {
+            Button {
               visibleRanges.append(
                 contentsOf: Self.nextRanges(
                   in: section.content, startingAt: lastRange.upperBound, count: rangesPerPage))
+            } label: {
+              Text(
+                section.title.localizedCaseInsensitiveCompare("output") == .orderedSame
+                  ? "Load more output" : "Load more details"
+              )
+              .frame(minHeight: 44)
+              .contentShape(Rectangle())
             }
             .buttonStyle(.bordered)
             .accessibilityIdentifier("tool-call-load-more-output")

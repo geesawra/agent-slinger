@@ -8,6 +8,7 @@ struct NewChatView: View {
 
   @FocusState private var composerFocused: Bool
   @State private var hasInitiallyFocusedComposer = false
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   private var project: RemoteProject? { model.projects.first { $0.id == projectID } }
   private var draftKey: String { model.newThreadDraftKey(for: projectID) }
   private var configuration: RemoteAgentConfiguration? {
@@ -35,7 +36,7 @@ struct NewChatView: View {
               if let subtitle = project.subtitle {
                 Text(subtitle)
                   .font(.subheadline)
-                  .foregroundStyle(.secondary)
+                  .foregroundStyle(Color.primary.opacity(0.75))
                   .lineLimit(2)
               }
             }
@@ -90,9 +91,11 @@ struct NewChatView: View {
         VStack(alignment: .leading, spacing: 4) {
           Text("This host can’t start threads from Oesap yet.")
             .font(.subheadline.weight(.semibold))
-          Text("Update Paseo on the host to enable new threads. Your draft will stay here.")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+          Text(
+            "Update Paseo on the host to enable new threads. Your draft stays here while the app is open."
+          )
+          .font(.footnote)
+          .foregroundStyle(Color.primary.opacity(0.75))
         }
       } icon: {
         Image(systemName: "exclamationmark.triangle.fill")
@@ -103,48 +106,37 @@ struct NewChatView: View {
       .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
       .accessibilityIdentifier("new-thread-unsupported")
     } else if configuration != nil {
-      HStack(alignment: .top, spacing: 12) {
-        Image(systemName: "cpu")
-          .foregroundStyle(.tint)
-          .padding(.top, 2)
-          .accessibilityHidden(true)
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Project Agent")
-            .font(.subheadline.weight(.semibold))
-          Text(
-            verbatim: configuredModelLabel.map { "\(configuredProviderLabel) · \($0)" }
-              ?? "\(configuredProviderLabel) · Provider default"
-          )
-          .font(.subheadline)
-          Text("Saved on this iPhone")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+      Group {
+        if dynamicTypeSize.isAccessibilitySize {
+          VStack(alignment: .leading, spacing: 8) {
+            configuredAgentDetails
+            editAgentButton(expanded: true)
+          }
+        } else {
+          HStack(alignment: .top, spacing: 12) {
+            configuredAgentDetails
+            Spacer(minLength: 8)
+            editAgentButton(expanded: false)
+          }
         }
-        Spacer(minLength: 8)
-        Button("Edit", action: openAgentSettings)
-          .font(.subheadline.weight(.medium))
-          .accessibilityIdentifier("new-thread-edit-agent")
       }
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(14)
       .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
     } else {
-      HStack(alignment: .top, spacing: 12) {
-        Image(systemName: "person.crop.circle.badge.questionmark")
-          .foregroundStyle(.orange)
-          .padding(.top, 2)
-          .accessibilityHidden(true)
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Set up this project’s Agent")
-            .font(.subheadline.weight(.semibold))
-          Text("Choose a provider in Project Agent settings before starting a thread.")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+      Group {
+        if dynamicTypeSize.isAccessibilitySize {
+          VStack(alignment: .leading, spacing: 8) {
+            setupAgentDetails
+            setupAgentButton(expanded: true)
+          }
+        } else {
+          HStack(alignment: .top, spacing: 12) {
+            setupAgentDetails
+            Spacer(minLength: 8)
+            setupAgentButton(expanded: false)
+          }
         }
-        Spacer(minLength: 8)
-        Button("Set up", action: openAgentSettings)
-          .font(.subheadline.weight(.medium))
-          .accessibilityIdentifier("new-thread-setup-agent")
       }
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(14)
@@ -153,6 +145,63 @@ struct NewChatView: View {
   }
 
   private var connectionStatusCard: some View {
+    Group {
+      if dynamicTypeSize.isAccessibilitySize {
+        VStack(alignment: .leading, spacing: 8) {
+          connectionStatusDetails
+          if !model.connectionState.isBusy { reconnectButton(expanded: true) }
+        }
+      } else {
+        HStack(alignment: .top, spacing: 12) {
+          connectionStatusDetails
+          Spacer(minLength: 8)
+          if !model.connectionState.isBusy { reconnectButton(expanded: false) }
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(14)
+    .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+  }
+
+  private var configuredAgentDetails: some View {
+    HStack(alignment: .top, spacing: 12) {
+      Image(systemName: "cpu")
+        .foregroundStyle(.tint)
+        .padding(.top, 2)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 4) {
+        Text("Project Agent")
+          .font(.subheadline.weight(.semibold))
+        Text(
+          verbatim: configuredModelLabel.map { "\(configuredProviderLabel) · \($0)" }
+            ?? "\(configuredProviderLabel) · Provider default"
+        )
+        .font(.subheadline)
+        Text("Saved on this iPhone")
+          .font(.caption)
+          .foregroundStyle(Color.primary.opacity(0.75))
+      }
+    }
+  }
+
+  private var setupAgentDetails: some View {
+    HStack(alignment: .top, spacing: 12) {
+      Image(systemName: "person.crop.circle.badge.questionmark")
+        .foregroundStyle(.orange)
+        .padding(.top, 2)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 4) {
+        Text("Set up this project’s Agent")
+          .font(.subheadline.weight(.semibold))
+        Text("Choose a provider in Project Agent settings before starting a thread.")
+          .font(.footnote)
+          .foregroundStyle(Color.primary.opacity(0.75))
+      }
+    }
+  }
+
+  private var connectionStatusDetails: some View {
     HStack(alignment: .top, spacing: 12) {
       if model.connectionState.isBusy {
         ProgressView()
@@ -168,21 +217,44 @@ struct NewChatView: View {
         Text(connectionStatusTitle)
           .font(.subheadline.weight(.semibold))
           .accessibilityIdentifier("new-thread-connection-title")
-        Text("Your draft will stay here. Reconnect to start a thread.")
+        Text("Your draft stays here while the app is open. Reconnect to start a thread.")
           .font(.footnote)
-          .foregroundStyle(.secondary)
-      }
-      Spacer(minLength: 8)
-      if !model.connectionState.isBusy {
-        Button("Reconnect") { Task { await model.reconnect() } }
-          .font(.subheadline.weight(.medium))
-          .disabled(!model.hasSavedConnection)
-          .accessibilityIdentifier("new-thread-reconnect")
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(14)
-    .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+  }
+
+  private func editAgentButton(expanded: Bool) -> some View {
+    Button(action: openAgentSettings) {
+      Text("Edit")
+        .frame(minWidth: 44, maxWidth: expanded ? .infinity : nil, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+    .font(.subheadline.weight(.medium))
+    .accessibilityIdentifier("new-thread-edit-agent")
+  }
+
+  private func setupAgentButton(expanded: Bool) -> some View {
+    Button(action: openAgentSettings) {
+      Text("Set up")
+        .frame(minWidth: 44, maxWidth: expanded ? .infinity : nil, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+    .font(.subheadline.weight(.medium))
+    .accessibilityIdentifier("new-thread-setup-agent")
+  }
+
+  private func reconnectButton(expanded: Bool) -> some View {
+    Button {
+      Task { await model.reconnect() }
+    } label: {
+      Text("Reconnect")
+        .frame(minWidth: 44, maxWidth: expanded ? .infinity : nil, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+    .font(.subheadline.weight(.medium))
+    .disabled(!model.hasSavedConnection)
+    .accessibilityIdentifier("new-thread-reconnect")
   }
 
   private var connectionStatusTitle: String {
@@ -263,8 +335,11 @@ struct AgentConfigurationView: View {
 
       if let error = model.agentConfigurationError {
         Section {
-          Label(error, systemImage: "exclamationmark.triangle.fill")
-            .foregroundStyle(.red)
+          Label {
+            Text(error).foregroundStyle(.primary)
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+          }
           Button("Try again") { Task { await model.refreshAgentOptions(projectID: projectID) } }
             .disabled(model.loadingAgentOptions)
         }
@@ -292,7 +367,7 @@ struct AgentConfigurationView: View {
         if let selectedProvider, !selectedProvider.available, let error = selectedProvider.error {
           Text(error)
             .font(.footnote)
-            .foregroundStyle(.orange)
+            .foregroundStyle(Color.primary.opacity(0.75))
         }
       }
 
@@ -321,8 +396,11 @@ struct AgentConfigurationView: View {
 
       if let saveError {
         Section {
-          Label(saveError, systemImage: "exclamationmark.triangle.fill")
-            .foregroundStyle(.red)
+          Label {
+            Text(saveError).foregroundStyle(.primary)
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+          }
         }
       }
 

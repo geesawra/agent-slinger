@@ -13,6 +13,7 @@ struct WorkspaceRootView: View {
   @Bindable var model: OesapModel
   @State private var path: [OesapRoute] = []
   @State private var confirmsDisconnect = false
+  @State private var showsPrivacyInformation = false
 
   var body: some View {
     NavigationStack(path: $path) {
@@ -43,6 +44,11 @@ struct WorkspaceRootView: View {
                 path.append(.usage)
               }
               .accessibilityIdentifier("host-usage-button")
+
+              Button("Privacy & Host Data", systemImage: "hand.raised") {
+                showsPrivacyInformation = true
+              }
+              .accessibilityIdentifier("privacy-information-workspace")
 
               Divider()
 
@@ -109,7 +115,12 @@ struct WorkspaceRootView: View {
       }
       Button("Cancel", role: .cancel) {}
     } message: {
-      Text("Your saved connection and credentials will be removed from this device.")
+      Text(
+        "Saved connection credentials will be removed, and unsent drafts will be discarded. Agents on your Paseo host will keep running."
+      )
+    }
+    .sheet(isPresented: $showsPrivacyInformation) {
+      PrivacyInformationView()
     }
     .tint(.accentColor)
   }
@@ -128,8 +139,11 @@ private struct ProjectListView: View {
 
       if let error = model.workspaceError {
         Section {
-          Label(error, systemImage: "exclamationmark.triangle.fill")
-            .foregroundStyle(.red)
+          Label {
+            Text(error).foregroundStyle(.primary)
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+          }
           Button("Reconnect") { Task { await model.reconnect() } }
             .disabled(model.connectionState.isBusy)
         }
@@ -150,7 +164,7 @@ private struct ProjectListView: View {
         )
         .listRowSeparator(.hidden)
       } else {
-        Section("Projects") {
+        Section {
           ForEach(model.projects) { project in
             Button {
               onOpenProject(project)
@@ -165,7 +179,10 @@ private struct ProjectListView: View {
                 VStack(alignment: .leading, spacing: 4) {
                   Text(project.name).font(.headline).foregroundStyle(.primary)
                   if let subtitle = project.subtitle {
-                    Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                    Text(subtitle)
+                      .font(.subheadline)
+                      .foregroundStyle(Color.primary.opacity(0.75))
+                      .lineLimit(1)
                   }
                 }
                 Spacer(minLength: 8)
@@ -178,6 +195,8 @@ private struct ProjectListView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("project-\(project.id)")
           }
+        } header: {
+          Text("Projects").foregroundStyle(Color.primary.opacity(0.75))
         }
       }
     }
@@ -218,8 +237,11 @@ private struct ThreadListView: View {
 
       if let error = model.workspaceError {
         Section {
-          Label(error, systemImage: "exclamationmark.triangle.fill")
-            .foregroundStyle(.red)
+          Label {
+            Text(error).foregroundStyle(.primary)
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+          }
           Button("Reconnect") { Task { await model.reconnect() } }
             .disabled(model.connectionState.isBusy)
         }
@@ -233,14 +255,42 @@ private struct ThreadListView: View {
           }
         }
       } else if model.threads.isEmpty && model.workspaceError == nil {
-        ContentUnavailableView(
-          "No agent threads",
-          systemImage: "bubble.left.and.bubble.right",
-          description: Text("Start an agent on this project in Paseo to see its thread here.")
-        )
-        .listRowSeparator(.hidden)
+        if model.connectionState != .connected {
+          ContentUnavailableView(
+            "No agent threads",
+            systemImage: "bubble.left.and.bubble.right",
+            description: Text("Reconnect to load this project’s agent threads.")
+          )
+          .listRowSeparator(.hidden)
+        } else if !model.canCreateThreads {
+          ContentUnavailableView(
+            "No agent threads",
+            systemImage: "bubble.left.and.bubble.right",
+            description: Text(
+              "This Paseo host can’t start threads from Oesap yet. Update Paseo on the host to enable new threads."
+            )
+          )
+          .accessibilityIdentifier("empty-threads-unsupported")
+          .listRowSeparator(.hidden)
+        } else {
+          ContentUnavailableView {
+            Label("No agent threads", systemImage: "bubble.left.and.bubble.right")
+          } description: {
+            Text("Start a new thread in Oesap to begin working with an agent on this project.")
+          } actions: {
+            Button(action: onNewThread) {
+              Label("New thread", systemImage: "plus")
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("empty-threads-new-thread-button")
+          }
+          .accessibilityIdentifier("empty-threads-supported")
+          .listRowSeparator(.hidden)
+        }
       } else {
-        Section("Agent threads") {
+        Section {
           ForEach(model.threads) { thread in
             Button {
               onOpenThread(thread)
@@ -250,6 +300,8 @@ private struct ThreadListView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("thread-\(thread.id)")
           }
+        } header: {
+          Text("Agent threads").foregroundStyle(Color.primary.opacity(0.75))
         }
       }
     }
@@ -285,53 +337,95 @@ private struct ThreadListView: View {
 private struct ThreadRow: View {
   let thread: RemoteThread
 
-  var body: some View {
-    HStack(alignment: .top, spacing: 12) {
-      Image(systemName: thread.state.symbol)
-        .font(.title3)
-        .foregroundStyle(thread.requiresAttention ? .orange : .secondary)
-        .frame(width: 28)
-        .accessibilityHidden(true)
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-      VStack(alignment: .leading, spacing: 5) {
-        HStack(alignment: .firstTextBaseline) {
-          Text(thread.title).font(.headline).foregroundStyle(.primary)
-          Spacer(minLength: 8)
-          if thread.requiresAttention {
-            Text("Attention")
-              .font(.caption.weight(.semibold))
-              .padding(.horizontal, 8)
-              .padding(.vertical, 4)
-              .background(.orange.opacity(0.14), in: Capsule())
-              .foregroundStyle(.orange)
-          }
+  var body: some View {
+    Group {
+      if dynamicTypeSize.isAccessibilitySize {
+        VStack(alignment: .leading, spacing: 5) {
+          Text(thread.title)
+            .font(.headline)
+            .foregroundStyle(.primary)
+          if thread.requiresAttention { attentionBadge }
+          statusMetadata
+          attentionReason
         }
-        HStack(spacing: 6) {
-          Text(thread.state.label)
-          if let provider = thread.provider {
-            Text("·")
-            Text(provider)
+      } else {
+        HStack(alignment: .top, spacing: 12) {
+          Image(systemName: thread.state.symbol)
+            .font(.title3)
+            .foregroundStyle(thread.requiresAttention ? .orange : .secondary)
+            .frame(width: 28)
+            .accessibilityHidden(true)
+
+          VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline) {
+              Text(thread.title).font(.headline).foregroundStyle(.primary)
+              Spacer(minLength: 8)
+              if thread.requiresAttention { attentionBadge }
+            }
+            statusMetadata
+            attentionReason
           }
-          if let model = thread.model {
-            Text("·")
-            Text(model)
-          }
-        }
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-        if thread.requiresAttention, let reason = thread.attentionReason {
-          Text(reason).font(.footnote).foregroundStyle(.orange)
+
+          Image(systemName: "chevron.right")
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.top, 4)
+            .accessibilityHidden(true)
         }
       }
-
-      Image(systemName: "chevron.right")
-        .font(.footnote.weight(.semibold))
-        .foregroundStyle(.tertiary)
-        .padding(.top, 4)
     }
     .padding(.vertical, 5)
     .contentShape(Rectangle())
     .accessibilityElement(children: .combine)
+  }
+
+  private var attentionBadge: some View {
+    Text("Attention")
+      .font(.caption.weight(.semibold))
+      .padding(.horizontal, 8)
+      .padding(.vertical, 4)
+      .background(.orange.opacity(0.14), in: Capsule())
+      .foregroundStyle(.primary)
+  }
+
+  @ViewBuilder
+  private var statusMetadata: some View {
+    if dynamicTypeSize.isAccessibilitySize {
+      VStack(alignment: .leading, spacing: 2) {
+        Text(thread.state.label)
+          .foregroundStyle(.primary)
+        if let provider = thread.provider {
+          Text(provider).foregroundStyle(Color.primary.opacity(0.75))
+        }
+        if let model = thread.model {
+          Text(model).foregroundStyle(Color.primary.opacity(0.75))
+        }
+      }
+      .font(.subheadline)
+    } else {
+      HStack(spacing: 12) {
+        Text(thread.state.label).foregroundStyle(.primary)
+        if let provider = thread.provider {
+          Text(provider).foregroundStyle(Color.primary.opacity(0.75))
+        }
+        if let model = thread.model {
+          Text(model).foregroundStyle(Color.primary.opacity(0.75))
+        }
+      }
+      .font(.subheadline)
+    }
+  }
+
+  @ViewBuilder
+  private var attentionReason: some View {
+    if thread.requiresAttention, let reason = thread.attentionReason {
+      Text(reason)
+        .font(.footnote)
+        .foregroundStyle(.primary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
   }
 }
 
@@ -346,9 +440,11 @@ private struct ConnectionStatusRow: View {
           .padding(.top, 2)
         VStack(alignment: .leading, spacing: 5) {
           Text("Host connection lost").font(.headline)
-          Text("Your open timeline and unsent drafts stay available while you reconnect.")
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
+          Text(
+            "Your open timeline and unsent drafts stay here while this app is open. Reconnect to restore live updates."
+          )
+          .font(.subheadline)
+          .foregroundStyle(Color.primary.opacity(0.75))
           Button("Reconnect") { Task { await model.reconnect() } }
             .disabled(model.connectionState.isBusy || !model.hasSavedConnection)
             .padding(.top, 3)

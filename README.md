@@ -51,3 +51,11 @@ test suite. Passing `--demo` to the app enables deterministic local UI data and
 does not connect to a remote host. Pass `--demo-tools` from Xcode's launch
 arguments to inspect realistic shell, read, edit, and failed-tool cards, then
 send a prompt to see a running shell row update in place.
+
+## MVP review
+
+The [Apple UI/UX review](docs/apple-ui-ux-review.md) records accessibility
+findings, validation, and outstanding release requirements. It is a HIG and
+release-readiness review, not submission certification. The
+[Paseo mobile comparison](docs/paseo-mobile-gap-review.md) prioritizes possible
+next features; notifications are excluded from this review and roadmap.

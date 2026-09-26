@@ -4,7 +4,9 @@ struct ConnectionSetupView: View {
   @Bindable var model: OesapModel
   @State private var connection = RemoteConnection.empty
   @State private var connectingTask: Task<Void, Never>?
+  @State private var showsPrivacyInformation = false
   @FocusState private var focusedField: Field?
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   private enum Field: Hashable {
     case endpoint
@@ -15,17 +17,19 @@ struct ConnectionSetupView: View {
   var body: some View {
     Form {
       Section {
-        Picker("Connection method", selection: $connection.method) {
-          ForEach(RemoteConnection.Method.allCases) { method in
-            Text(method.rawValue).tag(method)
-          }
+        if dynamicTypeSize.isAccessibilitySize {
+          connectionMethodPicker.pickerStyle(.menu)
+        } else {
+          connectionMethodPicker.pickerStyle(.segmented)
         }
-        .pickerStyle(.segmented)
-        .accessibilityIdentifier("connection-method")
+        Button("Privacy & Host Data") { showsPrivacyInformation = true }
+          .foregroundStyle(Color.primary)
+          .accessibilityIdentifier("privacy-information-connection")
       } header: {
-        Text("Connect to Paseo")
+        Text("Connect to Paseo").foregroundStyle(Color.primary.opacity(0.75))
       } footer: {
         Text("Connect to a Paseo instance to browse its projects and agent threads.")
+          .foregroundStyle(Color.primary.opacity(0.75))
       }
 
       if connection.method == .direct {
@@ -46,16 +50,18 @@ struct ConnectionSetupView: View {
             .focused($focusedField, equals: .password)
             .accessibilityIdentifier("direct-password")
         } header: {
-          Text("Direct connection")
+          Text("Direct connection").foregroundStyle(Color.primary.opacity(0.75))
         } footer: {
           if connection.usesTLS {
             Text(
               "Enter host:port without ws:// or wss://. TLS is on by default. For a private VPN host, use its IP address if needed."
             )
+            .foregroundStyle(Color.primary.opacity(0.75))
           } else {
             Text(
               "Without TLS, messages and the password are sent unencrypted. Use only on a private LAN or VPN host without TLS; use its IP address for a private VPN connection."
             )
+            .foregroundStyle(Color.primary.opacity(0.75))
           }
         }
       } else {
@@ -69,11 +75,12 @@ struct ConnectionSetupView: View {
             .accessibilityIdentifier("pairing-link")
           Text("Create a relay pairing link in Paseo, then paste it here.")
             .font(.footnote)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.primary.opacity(0.75))
         } header: {
-          Text("Relay pairing")
+          Text("Relay pairing").foregroundStyle(Color.primary.opacity(0.75))
         } footer: {
           Text("Traffic is relayed and encrypted end-to-end to the paired host.")
+            .foregroundStyle(Color.primary.opacity(0.75))
         }
       }
 
@@ -95,9 +102,12 @@ struct ConnectionSetupView: View {
 
       if let error = model.connectError {
         Section {
-          Label(error, systemImage: "exclamationmark.triangle.fill")
-            .foregroundStyle(.red)
-            .accessibilityIdentifier("connection-error")
+          Label {
+            Text(error).foregroundStyle(.primary)
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+          }
+          .accessibilityIdentifier("connection-error")
         }
       }
 
@@ -119,6 +129,7 @@ struct ConnectionSetupView: View {
           .fontWeight(.semibold)
         }
         .disabled(model.connectionState.isBusy || !hasConnectionInput)
+        .tint(Color.primary)
         .accessibilityIdentifier("connect-button")
 
         if model.connectionState.isBusy {
@@ -130,9 +141,29 @@ struct ConnectionSetupView: View {
         }
       }
     }
+    .scrollDismissesKeyboard(.interactively)
+    .toolbar {
+      ToolbarItemGroup(placement: .keyboard) {
+        Spacer()
+        Button("Done") { focusedField = nil }
+          .accessibilityIdentifier("connection-keyboard-done")
+      }
+    }
     .navigationTitle("Oesap")
     .navigationBarTitleDisplayMode(.large)
+    .sheet(isPresented: $showsPrivacyInformation) {
+      PrivacyInformationView()
+    }
     .task { await model.refreshSavedConnectionState() }
+  }
+
+  private var connectionMethodPicker: some View {
+    Picker("Connection method", selection: $connection.method) {
+      ForEach(RemoteConnection.Method.allCases) { method in
+        Text(method.rawValue).tag(method)
+      }
+    }
+    .accessibilityIdentifier("connection-method")
   }
 
   private var hasConnectionInput: Bool {

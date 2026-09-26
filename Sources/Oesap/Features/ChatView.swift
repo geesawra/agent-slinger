@@ -181,13 +181,12 @@ struct ChatView: View {
           viewportHeight = viewport.size.height
           await model.watchTimeline(threadID: threadID)
         }
-        .confirmationDialog(
+        .alert(
           permissionChoice ? "Allow this agent request?" : "Deny this agent request?",
           isPresented: Binding(
             get: { permissionToConfirm != nil },
             set: { if !$0 { permissionToConfirm = nil } }
           ),
-          titleVisibility: .visible,
           presenting: permissionToConfirm
         ) { permission in
           Button(
@@ -240,32 +239,59 @@ private struct AgentStatusCard: View {
 
   private var statusInformation: some View {
     HStack(alignment: .top, spacing: 12) {
-      Image(systemName: thread.state.symbol)
-        .font(.title2)
-        .foregroundStyle(thread.requiresAttention ? Color.orange : Color.accentColor)
-        .frame(width: 34)
-        .accessibilityHidden(true)
+      if !dynamicTypeSize.isAccessibilitySize {
+        Image(systemName: thread.state.symbol)
+          .font(.title2)
+          .foregroundStyle(thread.requiresAttention ? Color.orange : Color.accentColor)
+          .frame(width: 34)
+          .accessibilityHidden(true)
+      }
       VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 8) {
-          Text(thread.state.label).font(.headline)
-          if thread.requiresAttention {
-            Label("Attention", systemImage: "hand.raised.fill")
+        if dynamicTypeSize.isAccessibilitySize {
+          VStack(alignment: .leading, spacing: 4) {
+            Text(thread.state.label).font(.headline)
+            if thread.requiresAttention {
+              Label {
+                Text("Attention").foregroundStyle(.primary)
+              } icon: {
+                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+              }
               .font(.caption.weight(.semibold))
-              .foregroundStyle(.orange)
+            }
+          }
+        } else {
+          HStack(spacing: 8) {
+            Text(thread.state.label).font(.headline)
+            if thread.requiresAttention {
+              Label {
+                Text("Attention").foregroundStyle(.primary)
+              } icon: {
+                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+              }
+              .font(.caption.weight(.semibold))
+            }
           }
         }
         if let reason = thread.attentionReason {
-          Text(verbatim: reason).font(.subheadline).foregroundStyle(.secondary)
+          Text(verbatim: reason)
+            .font(.subheadline)
+            .foregroundStyle(Color.primary.opacity(0.75))
         }
-        HStack(spacing: 6) {
-          if let provider = thread.provider { Text(verbatim: provider) }
-          if let model = thread.model {
-            Text("·")
-            Text(verbatim: model)
+        if dynamicTypeSize.isAccessibilitySize {
+          VStack(alignment: .leading, spacing: 3) {
+            if let provider = thread.provider { Text(verbatim: provider) }
+            if let model = thread.model { Text(verbatim: model) }
           }
+          .font(.footnote)
+          .foregroundStyle(Color.primary.opacity(0.75))
+        } else {
+          HStack(spacing: 12) {
+            if let provider = thread.provider { Text(verbatim: provider) }
+            if let model = thread.model { Text(verbatim: model) }
+          }
+          .font(.footnote)
+          .foregroundStyle(Color.primary.opacity(0.75))
         }
-        .font(.footnote)
-        .foregroundStyle(.secondary)
       }
     }
   }
@@ -287,13 +313,17 @@ private struct ConnectionBanner: View {
       Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
       VStack(alignment: .leading, spacing: 4) {
         Text("Live connection paused").font(.subheadline.weight(.semibold))
-        Text("Your draft is saved. Reconnect to restore the timeline.")
+        Text("Your draft stays here while the app is open. Reconnect to restore the timeline.")
           .font(.footnote)
-          .foregroundStyle(.secondary)
-        Button("Reconnect") { Task { await model.reconnect() } }
-          .font(.subheadline.weight(.semibold))
-          .disabled(model.connectionState.isBusy || !model.hasSavedConnection)
-          .padding(.top, 2)
+          .foregroundStyle(Color.primary.opacity(0.75))
+        Button {
+          Task { await model.reconnect() }
+        } label: {
+          Text("Reconnect").frame(minHeight: 44).contentShape(Rectangle())
+        }
+        .font(.subheadline.weight(.semibold))
+        .disabled(model.connectionState.isBusy || !model.hasSavedConnection)
+        .padding(.top, 2)
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
@@ -307,38 +337,39 @@ private struct PermissionCard: View {
   let isResponding: Bool
   var onChoose: (Bool) -> Void
 
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      Label("Agent needs your attention", systemImage: "hand.raised.fill")
-        .font(.headline)
-        .foregroundStyle(.orange)
+      Label {
+        Text("Agent needs your attention").foregroundStyle(.primary)
+      } icon: {
+        Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+      }
+      .font(.headline)
       Text(permission.title).font(.subheadline.weight(.medium))
       if let detail = permission.detail {
-        Text(detail).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
+        Text(detail)
+          .font(.footnote)
+          .foregroundStyle(Color.primary.opacity(0.75))
+          .textSelection(.enabled)
       }
       Text("Request type: \(permission.kind)")
         .font(.caption)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(Color.primary.opacity(0.75))
       if !permission.supportsSimpleDecision {
         Text("This request needs a structured response. Review and answer it in Paseo.")
           .font(.footnote)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(Color.primary.opacity(0.75))
+      } else if dynamicTypeSize.isAccessibilitySize {
+        VStack(alignment: .leading, spacing: 8) {
+          denyButton
+          allowButton
+        }
       } else {
         HStack {
-          Button(permission.denyLabel ?? "Deny", role: .destructive) { onChoose(false) }
-            .buttonStyle(.bordered)
-            .disabled(isResponding)
-          Button {
-            onChoose(true)
-          } label: {
-            if isResponding {
-              ProgressView()
-            } else {
-              Text(permission.allowLabel ?? "Review and allow")
-            }
-          }
-          .buttonStyle(.borderedProminent)
-          .disabled(isResponding)
+          denyButton
+          allowButton
         }
       }
     }
@@ -346,6 +377,38 @@ private struct PermissionCard: View {
     .padding(14)
     .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     .accessibilityElement(children: .contain)
+  }
+
+  private var denyButton: some View {
+    Button(role: .destructive) {
+      onChoose(false)
+    } label: {
+      Text(permission.denyLabel ?? "Deny")
+        .frame(minHeight: 44)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    .buttonStyle(.bordered)
+    .disabled(isResponding)
+    .accessibilityIdentifier("permission-deny-\(permission.id)")
+  }
+
+  private var allowButton: some View {
+    Button {
+      onChoose(true)
+    } label: {
+      Group {
+        if isResponding {
+          ProgressView()
+        } else {
+          Text(permission.allowLabel ?? "Review and allow")
+        }
+      }
+      .frame(minHeight: 44)
+      .fixedSize(horizontal: false, vertical: true)
+    }
+    .buttonStyle(.borderedProminent)
+    .disabled(isResponding)
+    .accessibilityIdentifier("permission-allow-\(permission.id)")
   }
 }
 
@@ -358,24 +421,24 @@ private struct MessageBubble: View {
       VStack(alignment: .leading, spacing: 5) {
         Text(message.author.label)
           .font(.caption.weight(.semibold))
-          .foregroundStyle(
-            message.author == .user ? Color.white.opacity(0.78) : Color(uiColor: .secondaryLabel))
+          .foregroundStyle(Color.primary.opacity(0.75))
         Text(message.text)
           .font(.body)
           .textSelection(.enabled)
-          .foregroundStyle(message.author == .user ? Color.white : Color.primary)
+          .foregroundStyle(.primary)
         if let timestamp = message.timestamp {
           Text(timestamp, style: .time)
             .font(.caption2)
-            .foregroundStyle(
-              message.author == .user ? Color.white.opacity(0.72) : Color(uiColor: .tertiaryLabel))
+            .foregroundStyle(Color.primary.opacity(0.75))
         }
       }
       .padding(.horizontal, 14)
       .padding(.vertical, 11)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(
-        message.author == .user ? Color.accentColor : Color(uiColor: .secondarySystemBackground),
+        message.author == .user
+          ? Color(uiColor: .secondarySystemBackground)
+          : Color(uiColor: .tertiarySystemBackground),
         in: RoundedRectangle(cornerRadius: 16, style: .continuous)
       )
       if message.author != .user { Spacer(minLength: 30) }
@@ -401,13 +464,16 @@ private struct InlineNotice: View {
   let tint: Color
 
   var body: some View {
-    Label(text, systemImage: symbol)
-      .font(.subheadline)
-      .foregroundStyle(tint)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(12)
-      .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-      .accessibilityElement(children: .combine)
+    Label {
+      Text(text).foregroundStyle(.primary)
+    } icon: {
+      Image(systemName: symbol).foregroundStyle(tint)
+    }
+    .font(.subheadline)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(12)
+    .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .accessibilityElement(children: .combine)
   }
 }
 

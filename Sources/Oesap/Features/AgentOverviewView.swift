@@ -5,6 +5,7 @@ struct AgentOverviewView: View {
   var onOpenThread: (String) -> Void
 
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @State private var filter = AgentOverviewFilter.active
   @State private var navigationError: String?
 
@@ -84,10 +85,9 @@ struct AgentOverviewView: View {
                   Text(verbatim: error)
                     .accessibilityIdentifier("overview-project-error-\(group.project.id)")
                 } icon: {
-                  Image(systemName: "exclamationmark.triangle.fill")
+                  Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
                 }
                 .font(.subheadline)
-                .foregroundStyle(.red)
               }
               ForEach(threads) { thread in
                 Button {
@@ -105,8 +105,11 @@ struct AgentOverviewView: View {
 
       if let navigationError {
         Section {
-          Label(navigationError, systemImage: "exclamationmark.triangle.fill")
-            .foregroundStyle(.red)
+          Label {
+            Text(navigationError).foregroundStyle(.primary)
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+          }
           Button("Refresh overview") { Task { await model.refreshAgentOverview() } }
         }
       }
@@ -173,27 +176,50 @@ struct AgentOverviewView: View {
 
   private var refreshStatus: some View {
     Section {
-      HStack(alignment: .top, spacing: 10) {
-        Image(systemName: "exclamationmark.triangle.fill")
-          .foregroundStyle(.orange)
-          .padding(.top, 2)
-          .accessibilityHidden(true)
-        VStack(alignment: .leading, spacing: 3) {
-          Text(
-            hasProjectErrors ? "Some project states are unavailable" : "Agent status is unavailable"
-          )
-          .font(.subheadline.weight(.semibold))
-          Text(refreshStatusDescription)
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+      if dynamicTypeSize.isAccessibilitySize {
+        VStack(alignment: .leading, spacing: 8) {
+          refreshStatusDetails
+          retryAgentOverviewButton(expanded: true)
         }
-        Spacer(minLength: 4)
-        Button("Retry") { Task { await model.refreshAgentOverview() } }
-          .font(.subheadline.weight(.medium))
-          .disabled(model.loadingAgentOverview)
-          .accessibilityIdentifier("retry-agent-overview")
+      } else {
+        HStack(alignment: .top, spacing: 10) {
+          refreshStatusDetails
+          Spacer(minLength: 4)
+          retryAgentOverviewButton(expanded: false)
+        }
       }
     }
+  }
+
+  private var refreshStatusDetails: some View {
+    HStack(alignment: .top, spacing: 10) {
+      Image(systemName: "exclamationmark.triangle.fill")
+        .foregroundStyle(.orange)
+        .padding(.top, 2)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(
+          hasProjectErrors ? "Some project states are unavailable" : "Agent status is unavailable"
+        )
+        .font(.subheadline.weight(.semibold))
+        Text(refreshStatusDescription)
+          .font(.footnote)
+          .foregroundStyle(Color.primary.opacity(0.75))
+      }
+    }
+  }
+
+  private func retryAgentOverviewButton(expanded: Bool) -> some View {
+    Button {
+      Task { await model.refreshAgentOverview() }
+    } label: {
+      Text("Retry")
+        .frame(minWidth: 44, maxWidth: expanded ? .infinity : nil, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+    .font(.subheadline.weight(.medium))
+    .disabled(model.loadingAgentOverview)
+    .accessibilityIdentifier("retry-agent-overview")
   }
 
   private var refreshStatusDescription: String {
@@ -205,9 +231,12 @@ struct AgentOverviewView: View {
 
   private var offlineStatus: some View {
     Section {
-      Label("Host disconnected", systemImage: "wifi.exclamationmark")
-        .font(.headline)
-        .foregroundStyle(.orange)
+      Label {
+        Text("Host disconnected").foregroundStyle(.primary)
+      } icon: {
+        Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
+      }
+      .font(.headline)
       Text(
         model.agentOverviewGroups.isEmpty
           ? "Reconnect to load agent status for this host."
@@ -273,6 +302,8 @@ private enum AgentOverviewFilter: String, CaseIterable, Identifiable {
 private struct AgentOverviewRow: View {
   let thread: RemoteThread
 
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
   private var stateLabel: String {
     if thread.state == .failed { return "Failed" }
     if thread.requiresAttention || thread.state == .waiting { return "Needs attention" }
@@ -293,40 +324,81 @@ private struct AgentOverviewRow: View {
   }
 
   var body: some View {
-    HStack(alignment: .top, spacing: 12) {
-      Image(systemName: stateSymbol)
-        .font(.title3)
-        .foregroundStyle(stateColor)
-        .frame(width: 28)
-        .accessibilityHidden(true)
-
-      VStack(alignment: .leading, spacing: 5) {
-        Text(thread.title)
-          .font(.headline)
-          .foregroundStyle(.primary)
-        Text(verbatim: metadata)
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-        Text(stateLabel)
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(stateColor)
-        if let reason = thread.attentionReason, thread.requiresAttention {
-          Text(verbatim: reason)
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+    Group {
+      if dynamicTypeSize.isAccessibilitySize {
+        VStack(alignment: .leading, spacing: 5) {
+          Text(thread.title)
+            .font(.headline)
+            .foregroundStyle(.primary)
+          providerMetadata
+          stateInformation
+        }
+      } else {
+        HStack(alignment: .top, spacing: 12) {
+          Image(systemName: stateSymbol)
+            .font(.title3)
+            .foregroundStyle(stateColor)
+            .frame(width: 28)
+            .accessibilityHidden(true)
+          VStack(alignment: .leading, spacing: 5) {
+            Text(thread.title)
+              .font(.headline)
+              .foregroundStyle(.primary)
+            providerMetadata
+            stateInformation
+          }
+          Spacer(minLength: 8)
+          Image(systemName: "chevron.right")
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.top, 4)
+            .accessibilityHidden(true)
         }
       }
-
-      Spacer(minLength: 8)
-      Image(systemName: "chevron.right")
-        .font(.footnote.weight(.semibold))
-        .foregroundStyle(.tertiary)
-        .padding(.top, 4)
-        .accessibilityHidden(true)
     }
     .padding(.vertical, 5)
     .contentShape(Rectangle())
     .accessibilityElement(children: .combine)
+  }
+
+  @ViewBuilder
+  private var providerMetadata: some View {
+    if dynamicTypeSize.isAccessibilitySize {
+      VStack(alignment: .leading, spacing: 2) {
+        if let provider = thread.provider {
+          Text(verbatim: provider)
+            .foregroundStyle(Color.primary.opacity(0.75))
+        }
+        if let model = thread.model {
+          Text(verbatim: model)
+            .foregroundStyle(Color.primary.opacity(0.75))
+        }
+      }
+      .font(.subheadline)
+    } else {
+      Text(verbatim: metadata)
+        .font(.subheadline)
+        .foregroundStyle(Color.primary.opacity(0.75))
+    }
+  }
+
+  private var stateInformation: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      HStack(alignment: .firstTextBaseline, spacing: 6) {
+        Image(systemName: stateSymbol)
+          .foregroundStyle(stateColor)
+          .accessibilityHidden(true)
+        Text(stateLabel)
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(.primary)
+      }
+      if let reason = thread.attentionReason, thread.requiresAttention {
+        Text(verbatim: reason)
+          .font(.footnote)
+          .foregroundStyle(Color.primary.opacity(0.75))
+      }
+    }
+    .fixedSize(horizontal: false, vertical: true)
   }
 
   private var metadata: String {
