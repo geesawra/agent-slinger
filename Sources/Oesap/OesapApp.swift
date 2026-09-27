@@ -10,6 +10,8 @@ struct OesapApp: App {
       let factory: any OesapConnectionFactory
       if arguments.contains("--demo-tools") {
         factory = DemoToolCallConnectionFactory()
+      } else if arguments.contains("--demo-agent-control") {
+        factory = DemoConnectionFactory(mode: .agentControl)
       } else if arguments.contains("--demo-failure") {
         factory = DemoConnectionFactory(mode: .failure)
       } else if arguments.contains("--demo-empty") {

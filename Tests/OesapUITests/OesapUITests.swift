@@ -26,12 +26,65 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(sendButton.waitForExistence(timeout: 5))
     XCTAssertTrue(sendButton.isEnabled)
     sendButton.tap()
+    chooseRunningSendAction(app, "Steer when supported")
 
     XCTAssertTrue(
       app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
     XCTAssertTrue(
       app.descendants(matching: .any)["message-demo-reply-0"].waitForExistence(timeout: 5))
     XCTAssertNotEqual(composer.value as? String, "Show the app status")
+  }
+
+  func testCancellingStopKeepsAgentRunningAndPreservesDraft() {
+    let (app, timeline, stop) = openAgentControlChat()
+    let composer = app.descendants(matching: .any)["chat-composer"]
+    XCTAssertTrue(composer.waitForExistence(timeout: 5))
+    composer.tap()
+    composer.typeText("Keep this draft if I cancel Stop")
+
+    XCTAssertTrue(scrollToTimelineStartUntilHittable(stop, in: timeline))
+    stop.tap()
+    let alert = app.alerts["Stop this agent?"]
+    XCTAssertTrue(alert.waitForExistence(timeout: 5))
+    XCTAssertTrue(waitUntilHittable(alert.buttons["Stop agent"]))
+    let cancel = alert.buttons["Cancel"]
+    XCTAssertTrue(waitUntilHittable(cancel))
+    cancel.tap()
+
+    XCTAssertTrue(app.staticTexts["Running"].waitForExistence(timeout: 5))
+    XCTAssertEqual(composer.value as? String, "Keep this draft if I cancel Stop")
+  }
+
+  func testConfirmingStopUpdatesAuthoritativeAgentState() {
+    let (app, timeline, stop) = openAgentControlChat()
+    XCTAssertTrue(scrollToTimelineStartUntilHittable(stop, in: timeline))
+    stop.tap()
+
+    let alert = app.alerts["Stop this agent?"]
+    XCTAssertTrue(alert.waitForExistence(timeout: 5))
+    let confirm = alert.buttons["Stop agent"]
+    XCTAssertTrue(waitUntilHittable(confirm))
+    confirm.tap()
+
+    XCTAssertTrue(app.staticTexts["Idle"].waitForExistence(timeout: 5))
+    let receipt = app.descendants(matching: .any)[
+      "agent-action-status-demo-agent-running"
+    ]
+    XCTAssertTrue(waitForLabel(receipt, containing: "Agent stopped.", timeout: 5))
+  }
+
+  func testSteerChoiceSendsAndShowsHostReceipt() {
+    let (app, _, _) = openAgentControlChat()
+    let prompt = "Continue this active turn without restarting"
+    sendRunningPrompt(prompt, using: "Steer when supported", in: app)
+    assertAcceptedRunningPrompt(prompt, in: app)
+  }
+
+  func testInterruptChoiceSendsAndShowsHostReceipt() {
+    let (app, _, _) = openAgentControlChat()
+    let prompt = "Replace the active turn with this task"
+    sendRunningPrompt(prompt, using: "Interrupt and send", in: app)
+    assertAcceptedRunningPrompt(prompt, in: app)
   }
 
   func testConnectionFailureIsVisible() {
@@ -275,6 +328,7 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(sendButton.waitForExistence(timeout: 5))
     XCTAssertTrue(sendButton.isEnabled)
     sendButton.tap()
+    chooseRunningSendAction(app, "Steer when supported")
 
     XCTAssertTrue(
       app.staticTexts.containing(
@@ -354,6 +408,7 @@ final class OesapUITests: XCTestCase {
     let sendButton = app.buttons["send-message"]
     XCTAssertTrue(sendButton.isEnabled)
     sendButton.tap()
+    chooseRunningSendAction(app, "Interrupt and send")
 
     let completedCard = app.buttons.matching(
       NSPredicate(
@@ -471,6 +526,104 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(scrollUntilHittable(connectButton, in: app))
     connectButton.tap()
     XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
+  }
+
+  private func chooseRunningSendAction(_ app: XCUIApplication, _ action: String) {
+    let sendSheet = app.navigationBars["Send to running agent?"]
+    XCTAssertTrue(sendSheet.waitForExistence(timeout: 5), "A running-send choice should be shown.")
+    let choice = app.buttons[runningSendActionIdentifier(action)]
+    XCTAssertTrue(choice.waitForExistence(timeout: 5))
+    XCTAssertTrue(scrollUntilHittable(choice, in: app))
+    XCTAssertTrue(waitUntilHittable(choice))
+    choice.tap()
+  }
+
+  private func runningSendActionIdentifier(_ action: String) -> String {
+    switch action {
+    case "Steer when supported": return "agent-send-steer"
+    case "Interrupt and send": return "agent-send-interrupt"
+    default:
+      XCTFail("Unexpected running-send action: \(action)")
+      return ""
+    }
+  }
+
+  private func openAgentControlChat() -> (XCUIApplication, XCUIElement, XCUIElement) {
+    let app = launchDemo(arguments: ["--demo-agent-control"])
+    connect(app)
+    let project = app.buttons["project-demo-project"]
+    XCTAssertTrue(scrollUntilHittable(project, in: app))
+    project.tap()
+    let thread = app.buttons["thread-demo-agent-running"]
+    XCTAssertTrue(scrollUntilHittable(thread, in: app))
+    thread.tap()
+    let timeline = app.scrollViews["chat-timeline-scroll"]
+    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+    let stop = app.buttons["agent-stop-demo-agent-running"]
+    XCTAssertTrue(stop.waitForExistence(timeout: 5))
+    return (app, timeline, stop)
+  }
+
+  private func scrollToTimelineStartUntilHittable(
+    _ element: XCUIElement,
+    in timeline: XCUIElement,
+    maxSwipes: Int = 20
+  ) -> Bool {
+    for _ in 0..<maxSwipes {
+      if element.exists && element.isHittable { return true }
+      timeline.swipeDown()
+    }
+    return element.exists && element.isHittable
+  }
+
+  private func sendRunningPrompt(_ prompt: String, using action: String, in app: XCUIApplication) {
+    let composer = app.descendants(matching: .any)["chat-composer"]
+    XCTAssertTrue(composer.waitForExistence(timeout: 5))
+    composer.tap()
+    composer.typeText(prompt)
+    let send = app.buttons["send-message"]
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertTrue(send.isEnabled)
+    send.tap()
+
+    let sendSheet = app.navigationBars["Send to running agent?"]
+    XCTAssertTrue(sendSheet.waitForExistence(timeout: 5))
+    let choice = app.buttons[runningSendActionIdentifier(action)]
+    XCTAssertTrue(choice.waitForExistence(timeout: 5))
+    XCTAssertTrue(scrollUntilHittable(choice, in: app))
+    XCTAssertTrue(waitUntilHittable(choice))
+    choice.tap()
+  }
+
+  private func assertAcceptedRunningPrompt(_ prompt: String, in app: XCUIApplication) {
+    let sentPrompt = app.staticTexts.containing(
+      NSPredicate(format: "label CONTAINS %@", prompt)
+    ).firstMatch
+    XCTAssertTrue(sentPrompt.waitForExistence(timeout: 5))
+
+    let receipt = app.descendants(matching: .any)[
+      "agent-message-status-demo-agent-running"
+    ]
+    XCTAssertTrue(waitForLabel(receipt, containing: "Message accepted by host.", timeout: 5))
+  }
+
+  private func waitForLabel(
+    _ element: XCUIElement,
+    containing text: String,
+    timeout: TimeInterval
+  ) -> Bool {
+    let label = element.staticTexts.containing(
+      NSPredicate(format: "label CONTAINS[cd] %@", text)
+    ).firstMatch
+    let expectation = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == true"), object: label)
+    return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+  }
+
+  private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+    let predicate = NSPredicate(format: "isHittable == true")
+    let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+    return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
   }
 
   private func openHostUsage(_ app: XCUIApplication) {

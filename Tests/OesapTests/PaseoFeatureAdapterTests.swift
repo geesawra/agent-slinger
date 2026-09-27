@@ -3,6 +3,27 @@ import XCTest
 @testable import Oesap
 
 final class PaseoFeatureAdapterTests: XCTestCase {
+  func testAgentControlForwardsIntentAndMapsStopSnapshot() async throws {
+    let client = AdapterTestClient()
+    let adapter = PaseoRemoteServiceAdapter(client: client)
+    let supportsReceipts = await adapter.supportsAgentRequestReceipts()
+    XCTAssertTrue(supportsReceipts)
+
+    try await adapter.send(
+      agentID: "agent-1", text: "Keep going", messageID: "immutable-id", behavior: .steer)
+    let sent = await client.recordedSend()
+    XCTAssertEqual(sent?.agentID, "agent-1")
+    XCTAssertEqual(sent?.text, "Keep going")
+    XCTAssertEqual(sent?.messageID, "immutable-id")
+    XCTAssertEqual(sent?.behavior, .steer)
+
+    let snapshot = try await adapter.stop(agentID: "agent-1")
+    XCTAssertEqual(snapshot?.id, "agent-1")
+    XCTAssertEqual(snapshot?.state, .idle)
+    XCTAssertTrue(snapshot?.requiresAttention == true)
+    XCTAssertEqual(snapshot?.attentionReason, "Review")
+  }
+
   func testHistoryWatermarkDropsBufferedOverlapAndKeepsLaterLiveMessage() async throws {
     let client = AdapterTestClient()
     let adapter = PaseoRemoteServiceAdapter(client: client)
@@ -483,6 +504,14 @@ final class PaseoFeatureAdapterTests: XCTestCase {
 }
 
 private actor AdapterTestClient: PaseoService {
+  struct SentIntent: Sendable {
+    let agentID: String
+    let text: String
+    let messageID: String
+    let behavior: PaseoActiveTurnBehavior
+  }
+
+  private var sentIntent: SentIntent?
   private var continuation: AsyncThrowingStream<PaseoTimelineEvent, Error>.Continuation?
   private var threadPages: [PaseoPage<PaseoThread>] = []
   private var sourceTermination: AsyncStream<Void>?
@@ -574,6 +603,19 @@ private actor AdapterTestClient: PaseoService {
   }
 
   func send(agentID: String, text: String) async throws {}
+  func supportsAgentRequestReceipts() async -> Bool { true }
+  func send(
+    agentID: String, text: String, messageID: String,
+    activeTurnBehavior: PaseoActiveTurnBehavior
+  ) async throws {
+    sentIntent = SentIntent(
+      agentID: agentID, text: text, messageID: messageID, behavior: activeTurnBehavior)
+  }
+  func recordedSend() -> SentIntent? { sentIntent }
+  func cancelAgent(agentID: String) async throws -> PaseoAgentControlSnapshot? {
+    PaseoAgentControlSnapshot(
+      id: agentID, status: "idle", requiresAttention: true, attentionReason: "Review")
+  }
   func pendingPermissions() async throws -> [PaseoPermissionRequest] { [] }
 
   func answerPermission(agentID: String, requestID: String, decision: PaseoPermissionDecision)

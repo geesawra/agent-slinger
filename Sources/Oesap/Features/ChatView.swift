@@ -1,15 +1,70 @@
 import SwiftUI
 
+private enum AgentActionSheet: Identifiable {
+  case send(threadID: String, text: String, revision: Int)
+  case uncertainSend(threadID: String)
+
+  var id: String {
+    switch self {
+    case .send(let threadID, _, let revision): "send-\(threadID)-\(revision)"
+    case .uncertainSend(let threadID): "uncertain-\(threadID)"
+    }
+  }
+
+  var title: String {
+    switch self {
+    case .send(_, _, _): "Send to running agent?"
+    case .uncertainSend(_): "Check the previous send"
+    }
+  }
+
+  var message: String {
+    switch self {
+    case .send:
+      "Steer when supported. The host may interrupt and restart the turn if steering is unavailable."
+    case .uncertainSend:
+      "This only clears Oesap’s local resend safeguard. It doesn’t cancel or remove the original message, and the host may still deliver it. Your draft stays here; sending it again could create a duplicate."
+    }
+  }
+}
+
+private enum AgentActionConfirmation: Identifiable {
+  case stop(threadID: String, revision: Int)
+  case permission(RemotePermission, allow: Bool)
+
+  var id: String {
+    switch self {
+    case .stop(let threadID, let revision): "stop-\(threadID)-\(revision)"
+    case .permission(let permission, let allow): "permission-\(permission.id)-\(allow)"
+    }
+  }
+
+  var title: String {
+    switch self {
+    case .stop: "Stop this agent?"
+    case .permission(_, let allow): allow ? "Allow this agent request?" : "Deny this agent request?"
+    }
+  }
+
+  var message: String {
+    switch self {
+    case .stop: "Stop the current run? Your thread and draft will stay available."
+    case .permission(let permission, _):
+      [permission.title, permission.detail].compactMap { $0 }.joined(separator: "\n\n")
+    }
+  }
+}
+
 struct ChatView: View {
   @Bindable var model: OesapModel
   let threadID: String
-  @State private var permissionToConfirm: RemotePermission?
-  @State private var permissionChoice = true
   @State private var showsUsageDetails = false
   @FocusState private var composerFocused: Bool
   @State private var viewportHeight: CGFloat = 0
   @State private var isNearBottom = true
   @State private var expandedToolCallIDs: Set<String> = []
+  @State private var actionSheet: AgentActionSheet?
+  @State private var actionConfirmation: AgentActionConfirmation?
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var thread: RemoteThread? { model.threads.first { $0.id == threadID } }
@@ -39,12 +94,27 @@ struct ChatView: View {
               ConnectionBanner(model: model)
             }
 
+            if model.connectionState == .connected && !model.agentControlAvailable(for: threadID) {
+              InlineNotice(
+                text:
+                  "This host has no stable identity. Sending messages and stopping agents are unavailable.",
+                symbol: "exclamationmark.triangle.fill", tint: .orange)
+            }
+
             if let thread {
               AgentStatusCard(
                 thread: thread,
                 contextUsage: model.contextUsage(for: threadID),
                 isLoadingContextUsage: model.loadingContextUsage,
-                onShowUsage: { showsUsageDetails = true }
+                isStopPending: model.isStopRequestPending(threadID),
+                isStopEnabled: model.agentControlAvailable(for: threadID)
+                  && !model.isSendingAgentMessage(for: threadID),
+                onShowUsage: { showsUsageDetails = true },
+                onStop: {
+                  actionConfirmation = .stop(
+                    threadID: threadID,
+                    revision: model.threadStateRevision(for: threadID))
+                }
               )
             }
 
@@ -53,8 +123,7 @@ struct ChatView: View {
                 permission: permission,
                 isResponding: model.answeringPermissionID == permission.id,
                 onChoose: { allow in
-                  permissionChoice = allow
-                  permissionToConfirm = permission
+                  actionConfirmation = .permission(permission, allow: allow)
                 }
               )
             }
@@ -120,6 +189,43 @@ struct ChatView: View {
               ProgressView().frame(maxWidth: .infinity).padding(.vertical, 8)
             }
 
+            if let feedback = model.agentSendFeedback(for: threadID) {
+              AgentActionStatus(
+                feedback: feedback,
+                identifier: "agent-message-status-\(threadID)",
+                canRetry: model.canRetryAgentMessage(for: threadID),
+                requiresReview: model.requiresAgentMessageReview(for: threadID),
+                isConnected: model.connectionState == .connected,
+                onRetry: { Task { _ = await model.retryAgentMessage(threadID: threadID) } },
+                onReview: {
+                  composerFocused = false
+                  actionSheet = .uncertainSend(threadID: threadID)
+                },
+                onRefresh: nil
+              )
+              .id("agent-message-status-\(threadID)")
+            }
+            if let feedback = model.agentStopFeedback(for: threadID) {
+              AgentActionStatus(
+                feedback: feedback,
+                identifier: "agent-action-status-\(threadID)",
+                canRetry: false,
+                requiresReview: false,
+                isConnected: model.connectionState == .connected,
+                onRetry: nil,
+                onReview: nil,
+                onRefresh: feedback.phase == .stopWaiting
+                  ? {
+                    Task {
+                      if let projectID = model.selectedProjectID {
+                        await model.refreshThreads(projectID: projectID)
+                      }
+                    }
+                  } : nil
+              )
+              .id("agent-action-status-\(threadID)")
+            }
+
             Color.clear
               .frame(height: 1)
               .id("timeline-bottom")
@@ -147,7 +253,25 @@ struct ChatView: View {
           let liveToolCallIDs = Set(model.messages.filter { $0.toolCall != nil }.map(\.id))
           expandedToolCallIDs.formIntersection(liveToolCallIDs)
         }
+        .onChange(of: model.agentSendFeedback(for: threadID)) { _, feedback in
+          if feedback != nil { proxy.scrollTo("agent-message-status-\(threadID)", anchor: .bottom) }
+        }
+        .onChange(of: model.agentStopFeedback(for: threadID)) { _, feedback in
+          if feedback != nil { proxy.scrollTo("agent-action-status-\(threadID)", anchor: .bottom) }
+        }
         .onChange(of: threadID) { _, _ in expandedToolCallIDs.removeAll() }
+        .onChange(of: model.selectedThreadID) { _, selectedID in
+          if selectedID != threadID {
+            actionConfirmation = nil
+            actionSheet = nil
+          }
+        }
+        .onChange(of: model.connectionState) { _, state in
+          if state != .connected {
+            actionConfirmation = nil
+            actionSheet = nil
+          }
+        }
         .onChange(of: model.messages.last) { _, newValue in
           guard isNearBottom, expandedToolCallIDs.isEmpty, let newValue else { return }
           if reduceMotion {
@@ -162,14 +286,14 @@ struct ChatView: View {
               get: { model.draft(for: threadID) },
               set: { model.setDraft($0, for: threadID) }
             ),
-            isSending: model.sendingMessage,
-            isConnected: model.connectionState == .connected,
-            error: model.messageError,
+            isSending: model.isSendingAgentMessage(for: threadID),
+            isConnected: model.agentControlAvailable(for: threadID),
+            error: nil,
             focus: $composerFocused,
-            send: { text in
-              Task { _ = await model.send(threadID: threadID, text: text) }
-            },
-            clearError: model.clearMessageError
+            send: submitThreadMessage,
+            clearError: {},
+            refocusAfterSend: thread?.state != .running
+              && !model.hasUncertainAgentMessage(for: threadID)
           )
         }
         .navigationTitle(thread?.title ?? "Agent thread")
@@ -177,29 +301,168 @@ struct ChatView: View {
         .sheet(isPresented: $showsUsageDetails) {
           UsageDetailsSheet(model: model, contextThreadID: threadID)
         }
+        .sheet(item: $actionSheet) { action in
+          AgentActionSheetView(
+            action: action,
+            canRetry: model.canRetryAgentMessage(for: threadID),
+            isConnected: model.connectionState == .connected,
+            onSteer: { confirmedThreadID, text, revision in
+              actionSheet = nil
+              composerFocused = false
+              Task {
+                _ = await model.send(
+                  threadID: confirmedThreadID, text: text, behavior: .steer,
+                  expectedStateRevision: revision, selectedDuringActiveTurn: true)
+              }
+            },
+            onInterrupt: { confirmedThreadID, text, revision in
+              actionSheet = nil
+              composerFocused = false
+              Task {
+                _ = await model.send(
+                  threadID: confirmedThreadID, text: text, behavior: .interrupt,
+                  expectedStateRevision: revision, selectedDuringActiveTurn: true)
+              }
+            },
+            onRetry: { confirmedThreadID in
+              actionSheet = nil
+              composerFocused = false
+              Task { _ = await model.retryAgentMessage(threadID: confirmedThreadID) }
+            },
+            onClearWarning: { confirmedThreadID in
+              model.discardUncertainAgentMessage(threadID: confirmedThreadID)
+              actionSheet = nil
+              composerFocused = false
+            }
+          )
+          .presentationDetents([.large])
+        }
         .task(id: "\(threadID)-\(model.timelineGeneration)") {
           viewportHeight = viewport.size.height
           await model.watchTimeline(threadID: threadID)
         }
         .alert(
-          permissionChoice ? "Allow this agent request?" : "Deny this agent request?",
+          actionConfirmation?.title ?? "Agent action",
           isPresented: Binding(
-            get: { permissionToConfirm != nil },
-            set: { if !$0 { permissionToConfirm = nil } }
+            get: { actionConfirmation != nil },
+            set: { if !$0 { actionConfirmation = nil } }
           ),
-          presenting: permissionToConfirm
-        ) { permission in
-          Button(
-            permissionChoice
-              ? (permission.allowLabel ?? "Allow") : (permission.denyLabel ?? "Deny"),
-            role: permissionChoice ? .none : .destructive
-          ) {
-            Task { await model.answerPermission(permission, allow: permissionChoice) }
-            permissionToConfirm = nil
+          presenting: actionConfirmation
+        ) { action in
+          switch action {
+          case .stop(let confirmedThreadID, let revision):
+            Button("Stop agent", role: .destructive) {
+              actionConfirmation = nil
+              Task {
+                await model.stopAgent(threadID: confirmedThreadID, expectedStateRevision: revision)
+              }
+            }
+            Button("Cancel", role: .cancel) { actionConfirmation = nil }
+          case .permission(let permission, let allow):
+            let label =
+              allow ? (permission.allowLabel ?? "Allow") : (permission.denyLabel ?? "Deny")
+            Button(label, role: allow ? nil : .destructive) {
+              actionConfirmation = nil
+              Task { await model.answerPermission(permission, allow: allow) }
+            }
+            Button("Cancel", role: .cancel) { actionConfirmation = nil }
           }
-          Button("Cancel", role: .cancel) { permissionToConfirm = nil }
-        } message: { permission in
-          Text([permission.title, permission.detail].compactMap { $0 }.joined(separator: "\n\n"))
+        } message: { action in
+          Text(action.message)
+        }
+      }
+    }
+  }
+
+  private func submitThreadMessage(_ text: String) {
+    guard let thread else { return }
+    if model.hasUncertainAgentMessage(for: threadID) {
+      actionSheet = .uncertainSend(threadID: threadID)
+      return
+    }
+    let revision = model.threadStateRevision(for: threadID)
+    if thread.state == .running {
+      actionSheet = .send(threadID: threadID, text: text, revision: revision)
+    } else {
+      Task {
+        _ = await model.send(
+          threadID: threadID, text: text, behavior: .interrupt,
+          expectedStateRevision: revision, selectedDuringActiveTurn: false)
+      }
+    }
+  }
+}
+
+private struct AgentActionSheetView: View {
+  let action: AgentActionSheet
+  let canRetry: Bool
+  let isConnected: Bool
+  var onSteer: (String, String, Int) -> Void
+  var onInterrupt: (String, String, Int) -> Void
+  var onRetry: (String) -> Void
+  var onClearWarning: (String) -> Void
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          Text(action.message)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        Section {
+          switch action {
+          case .send(let threadID, let text, let revision):
+            Button {
+              dismiss()
+              onSteer(threadID, text, revision)
+            } label: {
+              Text("Steer when supported")
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("agent-send-steer")
+            Button(role: .destructive) {
+              dismiss()
+              onInterrupt(threadID, text, revision)
+            } label: {
+              Text("Interrupt and send")
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("agent-send-interrupt")
+          case .uncertainSend(let threadID):
+            if canRetry {
+              Button {
+                dismiss()
+                onRetry(threadID)
+              } label: {
+                Text("Retry original")
+                  .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                  .contentShape(Rectangle())
+              }
+              .disabled(!isConnected)
+              .accessibilityIdentifier("agent-action-retry")
+            }
+            Button(role: .destructive) {
+              dismiss()
+              onClearWarning(threadID)
+            } label: {
+              Text("Clear send warning")
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("agent-action-clear-warning")
+          }
+        }
+      }
+      .accessibilityIdentifier("agent-action-options")
+      .navigationTitle(action.title)
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Cancel") { dismiss() }
+            .accessibilityIdentifier("agent-action-cancel")
         }
       }
     }
@@ -210,7 +473,10 @@ private struct AgentStatusCard: View {
   let thread: RemoteThread
   let contextUsage: RemoteContextUsage?
   let isLoadingContextUsage: Bool
+  let isStopPending: Bool
+  let isStopEnabled: Bool
   var onShowUsage: () -> Void
+  var onStop: () -> Void
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -292,6 +558,18 @@ private struct AgentStatusCard: View {
           .font(.footnote)
           .foregroundStyle(Color.primary.opacity(0.75))
         }
+        if thread.state == .running, !isStopPending {
+          Button(action: onStop) {
+            Text("Stop agent")
+              .foregroundStyle(Color(uiColor: .systemBackground))
+              .frame(minHeight: 44)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(Color(uiColor: .label))
+          .disabled(!isStopEnabled || isStopPending)
+          .accessibilityIdentifier("agent-stop-\(thread.id)")
+        }
       }
     }
   }
@@ -302,6 +580,79 @@ private struct AgentStatusCard: View {
     }
     .buttonStyle(.plain)
     .accessibilityIdentifier("context-usage-button")
+  }
+}
+
+private struct AgentActionStatus: View {
+  let feedback: RemoteAgentActionFeedback
+  let identifier: String
+  let canRetry: Bool
+  let requiresReview: Bool
+  let isConnected: Bool
+  let onRetry: (() -> Void)?
+  let onReview: (() -> Void)?
+  let onRefresh: (() -> Void)?
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+  var body: some View {
+    Group {
+      if dynamicTypeSize.isAccessibilitySize {
+        VStack(alignment: .leading, spacing: 8) { contents }
+      } else {
+        HStack(alignment: .center, spacing: 8) { contents }
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, 14)
+    .padding(.vertical, 6)
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier(identifier)
+  }
+
+  @ViewBuilder
+  private var contents: some View {
+    if feedback.phase == .sending || feedback.phase == .stopping {
+      ProgressView().accessibilityHidden(true)
+    }
+    Text(feedback.message)
+      .font(.footnote)
+      .foregroundStyle(.primary)
+      .fixedSize(horizontal: false, vertical: true)
+    if canRetry, let onRetry {
+      Button(action: onRetry) {
+        Text("Retry original")
+          .foregroundStyle(Color(uiColor: .label))
+          .frame(minHeight: 44)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.bordered)
+      .tint(Color(uiColor: .label))
+      .disabled(!isConnected)
+      .accessibilityIdentifier("agent-action-retry")
+    }
+    if requiresReview, let onReview {
+      Button(action: onReview) {
+        Text("Review send")
+          .foregroundStyle(Color(uiColor: .label))
+          .frame(minHeight: 44)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.bordered)
+      .tint(Color(uiColor: .label))
+      .accessibilityIdentifier("agent-action-review")
+    }
+    if let onRefresh {
+      Button(action: onRefresh) {
+        Text("Refresh status")
+          .foregroundStyle(Color(uiColor: .label))
+          .frame(minHeight: 44)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.bordered)
+      .tint(Color(uiColor: .label))
+      .disabled(!isConnected)
+      .accessibilityIdentifier("agent-stop-refresh")
+    }
   }
 }
 

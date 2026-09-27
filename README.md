@@ -30,6 +30,15 @@ Choose **New thread** to open a blank composer. The remote thread is created
 when the first message is sent, on hosts that advertise Paseo's
 `creationLifecycle` capability.
 
+In a running thread, **Stop** requests cancellation. Sending while the agent
+is active offers **Steer** (ask it to use the follow-up in the current turn)
+or **Interrupt** (replace that turn). A host or provider may fall back from
+Steer to interrupting, so check the resulting timeline. If delivery cannot
+be confirmed, Oesap keeps the draft and original message identity for review.
+Manual retry of that exact message is available only when the connected host
+advertises `agentRequestReceipts`; an unresolved in-flight receipt can still
+leave delivery uncertain.
+
 Choose **Agents** on the Projects screen for an overview grouped by project.
 It opens with active agents (starting, running, waiting for attention, or
 failed); switch to **All** to include idle and closed agents. This is a status

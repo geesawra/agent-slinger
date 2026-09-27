@@ -200,6 +200,37 @@ struct RemoteThread: Identifiable, Sendable, Equatable {
   var contextUsage: RemoteContextUsage? = nil
 }
 
+enum RemoteActiveTurnBehavior: String, Sendable, Equatable {
+  case interrupt
+  case steer
+}
+
+struct RemoteAgentControlSnapshot: Sendable, Equatable {
+  var id: String
+  var state: RemoteThread.State
+  var requiresAttention: Bool
+  var attentionReason: String?
+}
+
+struct RemoteAgentActionFeedback: Sendable, Equatable {
+  enum Phase: Sendable, Equatable {
+    case sending
+    case accepted
+    case sendUncertain
+    case stopping
+    case stopWaiting
+    case stopped
+    case failed
+  }
+
+  var phase: Phase
+  var message: String
+  var canRetrySend: Bool = false
+  var requiresUncertaintyReview: Bool = false
+
+  var isBusy: Bool { phase == .sending || phase == .stopping }
+}
+
 struct RemoteMessage: Identifiable, Sendable, Equatable {
   enum Author: Sendable, Equatable {
     case user
@@ -314,6 +345,11 @@ protocol OesapRemoteService: Sendable {
   func history(agentID: String, before cursor: RemoteTimelineCursor?) async throws -> RemoteTimeline
   func events(agentID: String) async throws -> AsyncThrowingStream<RemoteTimelineUpdate, Error>
   func send(agentID: String, text: String) async throws
+  func supportsAgentRequestReceipts() async -> Bool
+  func send(
+    agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
+  ) async throws
+  func stop(agentID: String) async throws -> RemoteAgentControlSnapshot?
   func pendingPermissions() async throws -> [RemotePermission]
   func answerPermission(_ permission: RemotePermission, allow: Bool) async throws
   func disconnect() async
@@ -330,6 +366,15 @@ extension OesapRemoteService {
   func agentProviders(cwd: String) async throws -> [RemoteAgentProvider] { [] }
   func createThread(_ intent: RemoteNewThreadIntent) async throws -> RemoteNewThreadResult {
     throw RemoteServiceError.unavailable("This host does not support new thread creation.")
+  }
+  func supportsAgentRequestReceipts() async -> Bool { false }
+  func send(
+    agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
+  ) async throws {
+    throw RemoteServiceError.unavailable("Explicit active-turn send behavior is not supported.")
+  }
+  func stop(agentID: String) async throws -> RemoteAgentControlSnapshot? {
+    throw RemoteServiceError.unavailable("Stopping agents is not supported by this service.")
   }
 }
 
@@ -366,6 +411,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       case usageUnsupported
       case usageUnavailable
       case usageFailure
+      case agentControl
     }
 
     private let mode: Mode
@@ -389,7 +435,8 @@ enum RemoteServiceError: LocalizedError, Sendable {
         overviewFailure: mode == .overviewFailure,
         usageSupported: mode != .usageUnsupported,
         usageUnavailable: mode == .usageUnavailable,
-        usageFailure: mode == .usageFailure)
+        usageFailure: mode == .usageFailure,
+        agentControlSupported: mode == .agentControl)
       currentService = service
       return service
     }
@@ -416,19 +463,23 @@ enum RemoteServiceError: LocalizedError, Sendable {
     private let usageSupported: Bool
     private let usageUnavailable: Bool
     private let usageFailure: Bool
+    private let agentControlSupported: Bool
     private var continuations:
       [String: AsyncThrowingStream<RemoteTimelineUpdate, Error>.Continuation] = [:]
     private var sentMessages: [String: [RemoteMessage]] = [:]
+    private var acceptedMessageIDs: [String: Set<String>] = [:]
     private var createdThreads: [RemoteThread] = []
     private var creations: [String: RemoteNewThreadResult] = [:]
     private var resolvedPermissions: Set<String> = []
+    private var stoppedAgents: Set<String> = []
     private var closed = false
 
     init(
       isEmpty: Bool = false, failsSending: Bool = false,
       creationSupported: Bool = true, overviewEmpty: Bool = false,
       overviewFailure: Bool = false, usageSupported: Bool = true,
-      usageUnavailable: Bool = false, usageFailure: Bool = false
+      usageUnavailable: Bool = false, usageFailure: Bool = false,
+      agentControlSupported: Bool = false
     ) {
       self.isEmpty = isEmpty
       self.failsSending = failsSending
@@ -438,6 +489,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       self.usageSupported = usageSupported
       self.usageUnavailable = usageUnavailable
       self.usageFailure = usageFailure
+      self.agentControlSupported = agentControlSupported
     }
 
     func serverID() async -> String? {
@@ -603,7 +655,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
           title: "Build the iOS app",
           provider: "codex",
           model: "gpt-6-sol",
-          state: .running,
+          state: stoppedAgents.contains("demo-agent-running") ? .idle : .running,
           requiresAttention: false,
           attentionReason: nil,
           contextUsage: RemoteContextUsage(usedTokens: 64_000, maxTokens: 200_000)
@@ -669,11 +721,26 @@ enum RemoteServiceError: LocalizedError, Sendable {
       }
     }
 
+    func supportsAgentRequestReceipts() async -> Bool { agentControlSupported }
+
     func send(agentID: String, text: String) async throws {
+      try await send(
+        agentID: agentID, text: text, messageID: UUID().uuidString.lowercased(),
+        behavior: .interrupt)
+    }
+
+    func send(
+      agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
+    ) async throws {
       try ensureConnected()
       if failsSending {
         throw RemoteServiceError.connectionLost("The demo could not confirm delivery.")
       }
+      if acceptedMessageIDs[agentID, default: []].contains(messageID) { return }
+      acceptedMessageIDs[agentID, default: []].insert(messageID)
+      stoppedAgents.remove(agentID)
+      continuations[agentID]?.yield(
+        .threadState(.running, requiresAttention: false, reason: nil))
       let index = sentMessages[agentID, default: []].count
       let timestamp = Date(timeIntervalSince1970: 1_780_000_100 + Double(index))
       let userMessage = RemoteMessage(
@@ -688,6 +755,21 @@ enum RemoteServiceError: LocalizedError, Sendable {
       )
       sentMessages[agentID, default: []].append(reply)
       continuations[agentID]?.yield(.message(reply, cursor: nil, isDelta: false))
+    }
+
+    func stop(agentID: String) async throws -> RemoteAgentControlSnapshot? {
+      try ensureConnected()
+      guard agentControlSupported else {
+        throw RemoteServiceError.unavailable("The demo host does not support agent control.")
+      }
+      guard agentID == "demo-agent-running" else {
+        throw RemoteServiceError.unavailable("The demo agent was not found.")
+      }
+      stoppedAgents.insert(agentID)
+      continuations[agentID]?.yield(
+        .threadState(.idle, requiresAttention: false, reason: nil))
+      return RemoteAgentControlSnapshot(
+        id: agentID, state: .idle, requiresAttention: false, attentionReason: nil)
     }
 
     func pendingPermissions() async throws -> [RemotePermission] {

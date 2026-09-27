@@ -28,6 +28,7 @@ final class OesapModel {
   private(set) var loadingOlderMessages = false
   private(set) var timelineHasOlder = false
   private(set) var sendingMessage = false
+  private(set) var agentRequestReceiptsSupported = false
   private(set) var canCreateThreads = false
   private(set) var agentProviders: [RemoteAgentProvider] = []
   private(set) var loadingAgentOptions = false
@@ -60,8 +61,23 @@ final class OesapModel {
   @ObservationIgnored private let agentConfigurationStore: AgentConfigurationStore
   @ObservationIgnored private var service: (any OesapRemoteService)?
   @ObservationIgnored private var connectedServerID: String?
+  @ObservationIgnored private var agentControlServerID: String?
   @ObservationIgnored private var pendingNewThreadIntents: [String: RemoteNewThreadIntent] = [:]
   @ObservationIgnored private var pendingNewThreadResults: [String: RemoteNewThreadResult] = [:]
+  private struct PendingAgentMessage {
+    let messageID: String
+    let text: String
+    let draftText: String
+    let behavior: RemoteActiveTurnBehavior
+    let receiptSupport: Bool
+  }
+
+  private var agentActionFeedback: [String: RemoteAgentActionFeedback] = [:]
+  private var agentSendFeedback: [String: RemoteAgentActionFeedback] = [:]
+  @ObservationIgnored private var pendingAgentMessages: [String: PendingAgentMessage] = [:]
+  @ObservationIgnored private var agentSendTokens: [String: UUID] = [:]
+  @ObservationIgnored private var agentStopTokens: [String: UUID] = [:]
+  @ObservationIgnored private var threadStateRevisions: [String: Int] = [:]
   private var drafts: [String: String] = [:]
   @ObservationIgnored private var connectionObservationTask: Task<Void, Never>?
   @ObservationIgnored private var connectionGeneration = 0
@@ -176,9 +192,11 @@ final class OesapModel {
 
   func connect(_ connection: RemoteConnection) async {
     guard !connectionState.isBusy else { return }
+    prepareAgentActionsForConnectionChange()
     let generation = invalidateConnection()
     service = nil
     connectedServerID = nil
+    agentRequestReceiptsSupported = false
     canCreateThreads = false
     agentProviders = []
     loadingAgentOptions = false
@@ -203,6 +221,7 @@ final class OesapModel {
       let serverID = await connectedService.serverID()
       let supportsNewThreads = await connectedService.supportsNewThreads()
       let supportsProviderUsage = await connectedService.supportsProviderUsage()
+      let supportsAgentRequestReceipts = await connectedService.supportsAgentRequestReceipts()
       guard connectionGeneration == generation else {
         await connectedService.disconnect()
         return
@@ -213,8 +232,13 @@ final class OesapModel {
       }
       service = connectedService
       connectedServerID = serverID
+      if agentControlServerID != nil && agentControlServerID != serverID {
+        clearAgentControlState()
+      }
+      agentControlServerID = serverID
       canCreateThreads = supportsNewThreads
       providerUsageSupported = supportsProviderUsage
+      agentRequestReceiptsSupported = supportsAgentRequestReceipts
       connectionState = .connected
       hasSavedConnection = true
       timelineGeneration += 1
@@ -232,6 +256,7 @@ final class OesapModel {
       connectedServerID = nil
       canCreateThreads = false
       providerUsageSupported = false
+      agentRequestReceiptsSupported = false
       connectionState = .disconnected
       connectError = error.localizedDescription
       await refreshSavedConnectionState()
@@ -240,7 +265,8 @@ final class OesapModel {
 
   func reconnect() async {
     guard !connectionState.isBusy else { return }
-    let priorServerID = connectedServerID
+    let priorServerID = agentControlServerID ?? connectedServerID
+    prepareAgentActionsForConnectionChange()
     let generation = invalidateConnection()
     service = nil
     canCreateThreads = false
@@ -268,6 +294,7 @@ final class OesapModel {
       let serverID = await connectedService.serverID()
       let supportsNewThreads = await connectedService.supportsNewThreads()
       let supportsProviderUsage = await connectedService.supportsProviderUsage()
+      let supportsAgentRequestReceipts = await connectedService.supportsAgentRequestReceipts()
       guard connectionGeneration == generation else {
         await connectedService.disconnect()
         return
@@ -282,9 +309,12 @@ final class OesapModel {
         clearAgentOverview()
         clearProviderUsage()
         clearCachedContextUsage()
+        clearAgentControlState()
       }
       service = connectedService
       connectedServerID = serverID
+      agentControlServerID = serverID
+      agentRequestReceiptsSupported = supportsAgentRequestReceipts
       canCreateThreads = supportsNewThreads
       providerUsageSupported = supportsProviderUsage
       connectionState = .connected
@@ -305,6 +335,7 @@ final class OesapModel {
       service = nil
       canCreateThreads = false
       providerUsageSupported = false
+      agentRequestReceiptsSupported = false
       connectionState = .disconnected
       connectError = error.localizedDescription
       workspaceError =
@@ -317,10 +348,12 @@ final class OesapModel {
     let previousService = service
     service = nil
     connectedServerID = nil
+    agentControlServerID = nil
     canCreateThreads = false
     agentProviders = []
     pendingNewThreadIntents.removeAll()
     pendingNewThreadResults.removeAll()
+    clearAgentControlState()
     clearAgentOverview()
     clearProviderUsage()
     connectionState = .disconnected
@@ -334,6 +367,7 @@ final class OesapModel {
     loadingContextUsage = false
     loadingOlderMessages = false
     sendingMessage = false
+    agentRequestReceiptsSupported = false
     answeringPermissionID = nil
     historyMayBeIncomplete = false
     drafts.removeAll()
@@ -626,6 +660,7 @@ final class OesapModel {
     projectSelectionGeneration += 1
     selectedProjectID = projectID
     UserDefaults.standard.set(projectID, forKey: Self.selectedProjectKey)
+    recordThreadSnapshots(group.threads)
     threads = group.threads
     loadingThreads = false
     agentProviders = []
@@ -641,7 +676,7 @@ final class OesapModel {
   func refreshThreads(projectID: String) async {
     await loadThreads(
       projectID: projectID, generation: connectionGeneration,
-      selectionGeneration: projectSelectionGeneration)
+      selectionGeneration: projectSelectionGeneration, reconcileStopWait: true)
   }
 
   func draft(for threadID: String) -> String {
@@ -650,6 +685,64 @@ final class OesapModel {
 
   func setDraft(_ value: String, for threadID: String) {
     drafts[threadID] = value
+  }
+
+  func agentActionFeedback(for threadID: String) -> RemoteAgentActionFeedback? {
+    guard let key = agentControlKey(for: threadID) else { return nil }
+    if let stopFeedback = agentActionFeedback[key] { return stopFeedback }
+    return agentSendFeedback[key]
+  }
+
+  func agentSendFeedback(for threadID: String) -> RemoteAgentActionFeedback? {
+    guard let key = agentControlKey(for: threadID) else { return nil }
+    return agentSendFeedback[key]
+  }
+
+  func agentStopFeedback(for threadID: String) -> RemoteAgentActionFeedback? {
+    guard let key = agentControlKey(for: threadID) else { return nil }
+    return agentActionFeedback[key]
+  }
+
+  func isSendingAgentMessage(for threadID: String) -> Bool {
+    agentSendFeedback(for: threadID)?.phase == .sending
+  }
+
+  func isStoppingAgent(_ threadID: String) -> Bool {
+    agentActionFeedback(for: threadID)?.phase == .stopping
+  }
+
+  func isStopRequestPending(_ threadID: String) -> Bool {
+    guard let key = agentControlKey(for: threadID) else { return false }
+    let phase = agentActionFeedback[key]?.phase
+    return phase == .stopping || phase == .stopWaiting
+  }
+
+  func hasUncertainAgentMessage(for threadID: String) -> Bool {
+    guard let key = agentControlKey(for: threadID), pendingAgentMessages[key] != nil else {
+      return false
+    }
+    return agentSendFeedback[key]?.phase == .sendUncertain
+  }
+
+  func canRetryAgentMessage(for threadID: String) -> Bool {
+    guard let key = agentControlKey(for: threadID),
+      let pending = pendingAgentMessages[key], pending.receiptSupport,
+      agentRequestReceiptsSupported
+    else { return false }
+    return agentSendFeedback[key]?.phase == .sendUncertain
+  }
+
+  func requiresAgentMessageReview(for threadID: String) -> Bool {
+    hasUncertainAgentMessage(for: threadID)
+  }
+
+  func threadStateRevision(for threadID: String) -> Int {
+    guard let key = agentControlKey(for: threadID) else { return 0 }
+    return threadStateRevisions[key, default: 0]
+  }
+
+  func agentControlAvailable(for threadID: String) -> Bool {
+    connectionState == .connected && agentControlKey(for: threadID) != nil
   }
 
   func newThreadDraftKey(for projectID: String) -> String {
@@ -824,24 +917,141 @@ final class OesapModel {
   }
 
   func send(threadID: String, text: String) async -> Bool {
+    await send(
+      threadID: threadID, text: text, behavior: .interrupt,
+      expectedStateRevision: threadStateRevision(for: threadID), selectedDuringActiveTurn: false)
+  }
+
+  @discardableResult
+  func send(
+    threadID: String, text: String, behavior: RemoteActiveTurnBehavior,
+    expectedStateRevision: Int, selectedDuringActiveTurn: Bool
+  ) async -> Bool {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty, !sendingMessage, connectionState == .connected,
-      let service
+    guard !trimmed.isEmpty, connectionState == .connected, let service,
+      selectedThreadID == threadID,
+      let key = agentControlKey(for: threadID)
     else { return false }
-    let generation = connectionGeneration
-    sendingMessage = true
-    messageError = nil
-    defer { if connectionGeneration == generation { sendingMessage = false } }
-    do {
-      try await service.send(agentID: threadID, text: trimmed)
-      guard connectionGeneration == generation else { return false }
-      if drafts[threadID] == text { drafts[threadID] = "" }
-      return true
-    } catch {
-      guard connectionGeneration == generation else { return false }
-      messageError =
-        "Delivery couldn’t be confirmed. Your draft stays in this app while it is open. Check the timeline before retrying to avoid sending it twice. \(error.localizedDescription)"
+    guard pendingAgentMessages[key] == nil else { return false }
+    guard agentStopTokens[key] == nil else { return false }
+    let currentState = threads.first(where: { $0.id == threadID })?.state
+    guard threadStateRevisions[key, default: 0] == expectedStateRevision,
+      (currentState == .running) == selectedDuringActiveTurn
+    else {
+      agentSendFeedback[key] = RemoteAgentActionFeedback(
+        phase: .failed,
+        message: "The agent state changed. Review its current state and send again.")
       return false
+    }
+
+    let intent = PendingAgentMessage(
+      messageID: UUID().uuidString.lowercased(), text: trimmed, draftText: text,
+      behavior: behavior, receiptSupport: agentRequestReceiptsSupported)
+    pendingAgentMessages[key] = intent
+    agentActionFeedback[key] = nil
+    let token = UUID()
+    agentSendTokens[key] = token
+    agentSendFeedback[key] = RemoteAgentActionFeedback(
+      phase: .sending, message: "Sending message…")
+    return await performAgentSend(
+      intent, threadID: threadID, key: key, token: token, service: service)
+  }
+
+  @discardableResult
+  func retryAgentMessage(threadID: String) async -> Bool {
+    guard connectionState == .connected, let service,
+      let key = agentControlKey(for: threadID),
+      let intent = pendingAgentMessages[key], intent.receiptSupport,
+      agentRequestReceiptsSupported,
+      agentSendFeedback[key]?.phase == .sendUncertain,
+      agentStopTokens[key] == nil
+    else { return false }
+    let token = UUID()
+    agentSendTokens[key] = token
+    agentSendFeedback[key] = RemoteAgentActionFeedback(
+      phase: .sending, message: "Retrying the original message…")
+    return await performAgentSend(
+      intent, threadID: threadID, key: key, token: token, service: service)
+  }
+
+  func discardUncertainAgentMessage(threadID: String) {
+    guard let key = agentControlKey(for: threadID),
+      pendingAgentMessages[key] != nil,
+      agentSendFeedback[key]?.phase == .sendUncertain
+    else { return }
+    pendingAgentMessages[key] = nil
+    agentSendTokens[key] = nil
+    agentSendFeedback[key] = nil
+  }
+
+  func stopAgent(threadID: String, expectedStateRevision: Int) async {
+    guard connectionState == .connected, selectedThreadID == threadID,
+      let service, let key = agentControlKey(for: threadID),
+      agentStopTokens[key] == nil, agentSendTokens[key] == nil,
+      let thread = threads.first(where: { $0.id == threadID }), thread.state == .running
+    else { return }
+    let stateRevision = threadStateRevisions[key, default: 0]
+    guard stateRevision == expectedStateRevision else {
+      agentActionFeedback[key] = RemoteAgentActionFeedback(
+        phase: .failed,
+        message: "The agent state changed. Review it and confirm Stop again.")
+      return
+    }
+    let generation = connectionGeneration
+    let serverID = connectedServerID
+    let token = UUID()
+    agentStopTokens[key] = token
+    agentActionFeedback[key] = RemoteAgentActionFeedback(
+      phase: .stopping, message: "Stopping agent…")
+    do {
+      let snapshot = try await service.stop(agentID: threadID)
+      guard agentStopTokens[key] == token else { return }
+      agentStopTokens[key] = nil
+      guard connectionGeneration == generation, connectedServerID == serverID else { return }
+      if threadStateRevisions[key, default: 0] != stateRevision {
+        if threads.first(where: { $0.id == threadID })?.state == .running {
+          agentActionFeedback[key] = RemoteAgentActionFeedback(
+            phase: .stopWaiting, message: "Stop requested; waiting for host state.")
+        } else if let state = threads.first(where: { $0.id == threadID })?.state,
+          Self.isKnownStoppedState(state)
+        {
+          agentActionFeedback[key] = RemoteAgentActionFeedback(
+            phase: .stopped, message: "Agent stopped.")
+        } else {
+          agentActionFeedback[key] = RemoteAgentActionFeedback(
+            phase: .stopWaiting, message: "Stop requested; waiting for host state.")
+        }
+        return
+      }
+      if let snapshot, snapshot.id != threadID {
+        agentActionFeedback[key] = RemoteAgentActionFeedback(
+          phase: .failed,
+          message: "The host response didn’t match this agent. Check its current state.")
+        return
+      }
+      guard let snapshot, snapshot.state != .running else {
+        agentActionFeedback[key] = RemoteAgentActionFeedback(
+          phase: .stopWaiting, message: "Stop requested; waiting for host state.")
+        return
+      }
+      guard snapshot.state == .idle || snapshot.state == .closed || snapshot.state == .failed
+      else {
+        agentActionFeedback[key] = RemoteAgentActionFeedback(
+          phase: .stopWaiting, message: "Stop requested; waiting for host state.")
+        return
+      }
+      updateThread(
+        threadID, state: snapshot.state,
+        requiresAttention: snapshot.requiresAttention, reason: snapshot.attentionReason)
+      agentActionFeedback[key] = RemoteAgentActionFeedback(
+        phase: .stopped, message: "Agent stopped.")
+    } catch {
+      guard agentStopTokens[key] == token else { return }
+      agentStopTokens[key] = nil
+      guard connectionGeneration == generation, connectedServerID == serverID else { return }
+      agentActionFeedback[key] = RemoteAgentActionFeedback(
+        phase: .failed,
+        message: "Stop couldn’t be confirmed. Review the agent state before trying again.")
     }
   }
 
@@ -1092,7 +1302,7 @@ final class OesapModel {
 
   private func loadThreads(
     projectID: String, generation: Int,
-    selectionGeneration: Int
+    selectionGeneration: Int, reconcileStopWait: Bool = false
   ) async {
     guard connectionGeneration == generation,
       projectSelectionGeneration == selectionGeneration,
@@ -1107,6 +1317,7 @@ final class OesapModel {
         projectSelectionGeneration == selectionGeneration,
         selectedProjectID == projectID
       else { return }
+      recordThreadSnapshots(loadedThreads, reconcileStopWait: reconcileStopWait)
       threads = loadedThreads
       loadingThreads = false
     } catch {
@@ -1163,6 +1374,7 @@ final class OesapModel {
         projectSelectionGeneration == selectionGeneration,
         self.selectedProjectID == selectedProjectID
       else { return }
+      recordThreadSnapshots(loadedThreads)
       threads = loadedThreads
     } catch {
       guard connectionGeneration == generation,
@@ -1183,6 +1395,114 @@ final class OesapModel {
     threads[index].state = state
     threads[index].requiresAttention = requiresAttention
     threads[index].attentionReason = reason
+    if let key = agentControlKey(for: threadID) {
+      threadStateRevisions[key, default: 0] += 1
+      if agentActionFeedback[key]?.phase == .stopWaiting {
+        if state == .running {
+          agentActionFeedback[key] = nil
+        } else if Self.isKnownStoppedState(state) {
+          agentActionFeedback[key] = RemoteAgentActionFeedback(
+            phase: .stopped, message: "Agent stopped.")
+        }
+      } else if agentActionFeedback[key]?.phase == .stopped, state == .running {
+        agentActionFeedback[key] = nil
+      }
+    }
+  }
+
+  private func recordThreadSnapshots(
+    _ snapshots: [RemoteThread], reconcileStopWait: Bool = false
+  ) {
+    for thread in snapshots {
+      guard let key = agentControlKey(for: thread.id) else { continue }
+      threadStateRevisions[key, default: 0] += 1
+      if reconcileStopWait && agentActionFeedback[key]?.phase == .stopWaiting {
+        if thread.state == .running {
+          agentActionFeedback[key] = nil
+        } else if Self.isKnownStoppedState(thread.state) {
+          agentActionFeedback[key] = RemoteAgentActionFeedback(
+            phase: .stopped, message: "Agent stopped.")
+        }
+      } else if agentActionFeedback[key]?.phase == .stopped, thread.state == .running {
+        agentActionFeedback[key] = nil
+      }
+    }
+  }
+
+  private func agentControlKey(for threadID: String) -> String? {
+    guard let serverID = agentControlServerID ?? connectedServerID,
+      !serverID.isEmpty, serverID != "unknown"
+    else { return nil }
+    return "\(serverID.utf8.count):\(serverID):\(threadID.utf8.count):\(threadID)"
+  }
+
+  private func clearAgentControlState() {
+    agentActionFeedback.removeAll()
+    agentSendFeedback.removeAll()
+    pendingAgentMessages.removeAll()
+    agentSendTokens.removeAll()
+    agentStopTokens.removeAll()
+    threadStateRevisions.removeAll()
+  }
+
+  private static func isKnownStoppedState(_ state: RemoteThread.State) -> Bool {
+    state == .idle || state == .closed || state == .failed
+  }
+
+  private func prepareAgentActionsForConnectionChange() {
+    for key in agentSendTokens.keys {
+      if let pending = pendingAgentMessages[key] {
+        agentSendFeedback[key] = RemoteAgentActionFeedback(
+          phase: .sendUncertain,
+          message: "Delivery couldn’t be confirmed. Check the timeline before sending again.",
+          canRetrySend: pending.receiptSupport && agentRequestReceiptsSupported,
+          requiresUncertaintyReview: !(pending.receiptSupport && agentRequestReceiptsSupported))
+      }
+    }
+    for key in agentStopTokens.keys {
+      agentActionFeedback[key] = RemoteAgentActionFeedback(
+        phase: .failed,
+        message: "Stop couldn’t be confirmed. Review the agent state before trying again.")
+    }
+    agentSendTokens.removeAll()
+    agentStopTokens.removeAll()
+  }
+
+  private func performAgentSend(
+    _ intent: PendingAgentMessage, threadID: String, key: String, token: UUID,
+    service: any OesapRemoteService
+  ) async -> Bool {
+    let hostID = agentControlServerID ?? connectedServerID
+    let generation = connectionGeneration
+    do {
+      try await service.send(
+        agentID: threadID, text: intent.text, messageID: intent.messageID,
+        behavior: intent.behavior)
+      guard agentSendTokens[key] == token,
+        pendingAgentMessages[key]?.messageID == intent.messageID,
+        connectionGeneration == generation,
+        (agentControlServerID ?? connectedServerID) == hostID
+      else { return false }
+      agentSendTokens[key] = nil
+      pendingAgentMessages[key] = nil
+      if drafts[threadID] == intent.draftText { drafts[threadID] = "" }
+      agentSendFeedback[key] = RemoteAgentActionFeedback(
+        phase: .accepted, message: "Message accepted by host.")
+      return true
+    } catch {
+      guard agentSendTokens[key] == token,
+        pendingAgentMessages[key]?.messageID == intent.messageID,
+        connectionGeneration == generation,
+        (agentControlServerID ?? connectedServerID) == hostID
+      else { return false }
+      agentSendTokens[key] = nil
+      agentSendFeedback[key] = RemoteAgentActionFeedback(
+        phase: .sendUncertain,
+        message: "Delivery couldn’t be confirmed. Check the timeline before sending again.",
+        canRetrySend: intent.receiptSupport && agentRequestReceiptsSupported,
+        requiresUncertaintyReview: !(intent.receiptSupport && agentRequestReceiptsSupported))
+      return false
+    }
   }
 
   private func startObservingConnection(_ service: any OesapRemoteService, generation: Int) {
@@ -1278,6 +1598,7 @@ final class OesapModel {
     replaceWorkspaceError: Bool = true
   ) async {
     guard connectionGeneration == generation else { return }
+    prepareAgentActionsForConnectionChange()
     let oldService = service
     let currentGeneration = invalidateConnection()
     service = nil

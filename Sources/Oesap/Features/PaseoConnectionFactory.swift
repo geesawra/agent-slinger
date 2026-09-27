@@ -133,6 +133,10 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     connectedInfo?.features["providerUsageList"] == true
   }
 
+  func supportsAgentRequestReceipts() async -> Bool {
+    await client.supportsAgentRequestReceipts()
+  }
+
   func providerUsage() async throws -> RemoteProviderUsageSnapshot {
     let snapshot = try await client.listProviderUsage()
     return RemoteProviderUsageSnapshot(
@@ -335,6 +339,27 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
 
   func send(agentID: String, text: String) async throws {
     try await client.send(agentID: agentID, text: text)
+  }
+
+  func send(
+    agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
+  ) async throws {
+    let activeTurnBehavior: PaseoActiveTurnBehavior =
+      switch behavior {
+      case .interrupt: .interrupt
+      case .steer: .steer
+      }
+    try await client.send(
+      agentID: agentID, text: text, messageID: messageID,
+      activeTurnBehavior: activeTurnBehavior)
+  }
+
+  func stop(agentID: String) async throws -> RemoteAgentControlSnapshot? {
+    guard let snapshot = try await client.cancelAgent(agentID: agentID) else { return nil }
+    return RemoteAgentControlSnapshot(
+      id: snapshot.id, state: Self.mapState(snapshot.status),
+      requiresAttention: snapshot.requiresAttention,
+      attentionReason: snapshot.attentionReason)
   }
 
   func pendingPermissions() async throws -> [RemotePermission] {

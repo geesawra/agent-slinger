@@ -127,13 +127,150 @@ final class AccessibilityUITests: XCTestCase {
     assertMinimumTapTarget(send, named: "Send message")
     attachScreenshot(named: "AX5 dark chat composer", app: app)
     send.tap()
+    chooseRunningSendAction(app, "Steer when supported")
     XCTAssertTrue(
       app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
   }
 
+  func testAX5DarkAgentStopAndRunningSendChoicesAreReachable() {
+    let app = launchDemo(accessibilitySize: true, darkMode: true, agentControl: true)
+    connect(app)
+    let project = app.buttons["project-demo-project"]
+    XCTAssertTrue(scrollUntilHittable(project, in: app))
+    project.tap()
+    let thread = app.buttons["thread-demo-agent-running"]
+    XCTAssertTrue(scrollUntilHittable(thread, in: app))
+    thread.tap()
+
+    let timeline = app.scrollViews["chat-timeline-scroll"]
+    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+    let stop = app.buttons["agent-stop-demo-agent-running"]
+    XCTAssertTrue(
+      scrollUntilVisibleAboveComposer(stop, in: timeline, app: app, whenMissing: .earlier),
+      "Stop should be reachable at accessibility text size.")
+    assertMinimumTapTarget(stop, named: "Stop agent")
+    attachScreenshot(named: "AX5 dark Stop control", app: app)
+    stop.tap()
+
+    let stopAlert = app.alerts["Stop this agent?"]
+    XCTAssertTrue(stopAlert.waitForExistence(timeout: 5))
+    XCTAssertTrue(waitUntilHittable(stopAlert.buttons["Stop agent"]))
+    let stopCancel = stopAlert.buttons["Cancel"]
+    XCTAssertTrue(waitUntilHittable(stopCancel))
+    attachScreenshot(named: "AX5 dark Stop confirmation", app: app)
+    stopCancel.tap()
+
+    let composer = app.descendants(matching: .any)["chat-composer"]
+    XCTAssertTrue(composer.waitForExistence(timeout: 5))
+    assertMinimumTapTarget(composer, named: "Message composer")
+    let prompt = "Check active-turn choices at large text size"
+    composer.tap()
+    composer.typeText(prompt)
+    let send = app.buttons["send-message"]
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertTrue(send.isEnabled)
+    assertMinimumTapTarget(send, named: "Send message")
+    send.tap()
+
+    let sendSheet = app.navigationBars["Send to running agent?"]
+    XCTAssertTrue(sendSheet.waitForExistence(timeout: 5))
+    let steer = app.buttons["agent-send-steer"]
+    let interrupt = app.buttons["agent-send-interrupt"]
+    XCTAssertTrue(scrollSheetActionFullyIntoView(steer, in: app))
+    XCTAssertTrue(waitUntilHittable(steer))
+    attachScreenshot(named: "AX5 dark steer choice", app: app)
+    XCTAssertTrue(scrollSheetActionFullyIntoView(interrupt, in: app))
+    XCTAssertTrue(waitUntilHittable(interrupt))
+    attachScreenshot(named: "AX5 dark interrupt choice", app: app)
+    let sendCancel = app.buttons["agent-action-cancel"]
+    XCTAssertTrue(waitUntilHittable(sendCancel))
+    sendCancel.tap()
+    XCTAssertEqual(composer.value as? String, prompt)
+  }
+
+  func testAX5DarkFailedRunningSendCanBeReviewedAndClearedWithoutLosingDraft() {
+    let app = launchDemo(
+      accessibilitySize: true, darkMode: true,
+      additionalArguments: ["--demo-send-failure"])
+    connect(app)
+    let project = app.buttons["project-demo-project"]
+    XCTAssertTrue(scrollUntilHittable(project, in: app))
+    project.tap()
+    let thread = app.buttons["thread-demo-agent-running"]
+    XCTAssertTrue(scrollUntilHittable(thread, in: app))
+    thread.tap()
+
+    let composer = app.descendants(matching: .any)["chat-composer"]
+    XCTAssertTrue(composer.waitForExistence(timeout: 5))
+    let prompt = "Keep this message available after an uncertain send"
+    composer.tap()
+    composer.typeText(prompt)
+    let send = app.buttons["send-message"]
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertTrue(send.isEnabled)
+    send.tap()
+
+    let sendSheet = app.navigationBars["Send to running agent?"]
+    XCTAssertTrue(sendSheet.waitForExistence(timeout: 5))
+    let steer = app.buttons["agent-send-steer"]
+    XCTAssertTrue(scrollSheetActionFullyIntoView(steer, in: app))
+    XCTAssertTrue(waitUntilHittable(steer))
+    steer.tap()
+
+    let timeline = app.scrollViews["chat-timeline-scroll"]
+    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+    let warning = app.staticTexts.containing(
+      NSPredicate(format: "label CONTAINS %@", "Delivery couldn’t be confirmed")
+    ).firstMatch
+    XCTAssertTrue(warning.waitForExistence(timeout: 5))
+    let review = app.buttons["agent-action-review"]
+    XCTAssertTrue(review.waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      scrollUntilVisibleAboveComposer(
+        review, in: timeline, app: app, whenMissing: .later),
+      "The failed-send warning and Review action should be reachable above the keyboard.")
+    XCTAssertTrue(waitUntilHittable(warning))
+    XCTAssertTrue(isFullyVisibleAboveComposer(warning, in: app))
+    attachScreenshot(named: "AX5 dark failed-send warning", app: app)
+    review.tap()
+
+    let reviewSheet = app.navigationBars["Check the previous send"]
+    XCTAssertTrue(reviewSheet.waitForExistence(timeout: 5))
+    let explanation = app.staticTexts.containing(
+      NSPredicate(format: "label CONTAINS %@", "host may still deliver it")
+    ).firstMatch
+    XCTAssertTrue(explanation.waitForExistence(timeout: 5))
+    let clearWarning = app.buttons["agent-action-clear-warning"]
+    XCTAssertTrue(scrollSheetActionFullyIntoView(clearWarning, in: app))
+    XCTAssertTrue(waitUntilHittable(clearWarning))
+    let cancel = app.buttons["agent-action-cancel"]
+    XCTAssertTrue(waitUntilHittable(cancel))
+    attachScreenshot(named: "AX5 dark uncertain-send review sheet", app: app)
+    cancel.tap()
+
+    XCTAssertEqual(composer.value as? String, prompt)
+    XCTAssertTrue(warning.waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      scrollUntilVisibleAboveComposer(review, in: timeline, app: app, whenMissing: .later))
+    review.tap()
+    let clearSheet = app.navigationBars["Check the previous send"]
+    XCTAssertTrue(clearSheet.waitForExistence(timeout: 5))
+    let clearWarningAfterCancel = app.buttons["agent-action-clear-warning"]
+    XCTAssertTrue(scrollSheetActionFullyIntoView(clearWarningAfterCancel, in: app))
+    XCTAssertTrue(waitUntilHittable(clearWarningAfterCancel))
+    clearWarningAfterCancel.tap()
+
+    let warningDismissed = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: warning)
+    XCTAssertEqual(XCTWaiter.wait(for: [warningDismissed], timeout: 5), .completed)
+    XCTAssertEqual(composer.value as? String, prompt)
+  }
+
   private func launchDemo(
     accessibilitySize: Bool = false,
-    darkMode: Bool = false
+    darkMode: Bool = false,
+    agentControl: Bool = false,
+    additionalArguments: [String] = []
   ) -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments = [
@@ -150,6 +287,10 @@ final class AccessibilityUITests: XCTestCase {
     if darkMode {
       app.launchArguments.append("--ui-test-dark-mode")
     }
+    if agentControl {
+      app.launchArguments.append("--demo-agent-control")
+    }
+    app.launchArguments += additionalArguments
     app.launch()
     return app
   }
@@ -271,6 +412,51 @@ final class AccessibilityUITests: XCTestCase {
       && element.frame.minY >= top && element.frame.maxY <= bottom
   }
 
+  private func isFullyVisibleAboveComposer(_ element: XCUIElement, in app: XCUIApplication) -> Bool
+  {
+    let top = app.navigationBars.firstMatch.frame.maxY + 8
+    let composer = app.descendants(matching: .any)["chat-composer"]
+    guard composer.exists else { return false }
+    let bottom = composer.frame.minY - 24
+    return element.exists && element.isHittable
+      && element.frame.minY >= top && element.frame.maxY <= bottom
+  }
+
+  private func scrollSheetActionFullyIntoView(
+    _ element: XCUIElement,
+    in app: XCUIApplication,
+    maxSwipes: Int = 16
+  ) -> Bool {
+    let options = app.descendants(matching: .any)["agent-action-options"]
+    let navigationBar = app.navigationBars.firstMatch
+    guard options.waitForExistence(timeout: 5), navigationBar.exists else { return false }
+
+    for _ in 0..<maxSwipes {
+      let top = navigationBar.frame.maxY + 8
+      let bottom = min(options.frame.maxY - 12, app.frame.maxY - 40)
+      if element.exists && element.isHittable
+        && element.frame.minY >= top && element.frame.maxY <= bottom
+      {
+        return true
+      }
+
+      guard element.exists else {
+        options.swipeUp()
+        continue
+      }
+      if element.frame.minY < top {
+        options.swipeDown()
+      } else {
+        options.swipeUp()
+      }
+    }
+
+    let top = navigationBar.frame.maxY + 8
+    let bottom = min(options.frame.maxY - 12, app.frame.maxY - 40)
+    return element.exists && element.isHittable
+      && element.frame.minY >= top && element.frame.maxY <= bottom
+  }
+
   private func scroll(_ direction: TimelineDirection, in scrollView: XCUIElement) {
     switch direction {
     case .earlier: scrollView.swipeDown()
@@ -313,6 +499,32 @@ final class AccessibilityUITests: XCTestCase {
       element.frame.width, 44, "\(name) should be at least 44 pt wide.", file: file, line: line)
     XCTAssertGreaterThanOrEqual(
       element.frame.height, 44, "\(name) should be at least 44 pt high.", file: file, line: line)
+  }
+
+  private func chooseRunningSendAction(_ app: XCUIApplication, _ action: String) {
+    let sendSheet = app.navigationBars["Send to running agent?"]
+    XCTAssertTrue(sendSheet.waitForExistence(timeout: 5), "A running-send choice should be shown.")
+    let choice = app.buttons[runningSendActionIdentifier(action)]
+    XCTAssertTrue(choice.waitForExistence(timeout: 5))
+    XCTAssertTrue(scrollSheetActionFullyIntoView(choice, in: app))
+    XCTAssertTrue(waitUntilHittable(choice))
+    choice.tap()
+  }
+
+  private func runningSendActionIdentifier(_ action: String) -> String {
+    switch action {
+    case "Steer when supported": return "agent-send-steer"
+    case "Interrupt and send": return "agent-send-interrupt"
+    default:
+      XCTFail("Unexpected running-send action: \(action)")
+      return ""
+    }
+  }
+
+  private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+    let predicate = NSPredicate(format: "isHittable == true")
+    let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+    return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
   }
 
   private func attachScreenshot(named name: String, app: XCUIApplication) {

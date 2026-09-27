@@ -163,6 +163,10 @@ public actor PaseoProtocolClient: PaseoService {
     serverInfo?.features["providerUsageList"] == true
   }
 
+  public func supportsAgentRequestReceipts() async -> Bool {
+    serverInfo?.features["agentRequestReceipts"] == true
+  }
+
   public func agentContextUsage(agentID: String) async throws -> PaseoAgentContextUsage {
     try requireConnected()
     guard !agentID.isEmpty else {
@@ -498,20 +502,80 @@ public actor PaseoProtocolClient: PaseoService {
   }
 
   public func send(agentID: String, text: String) async throws {
+    try await sendMessage(
+      agentID: agentID, text: text, messageID: UUID().uuidString.lowercased(),
+      activeTurnBehavior: nil)
+  }
+
+  public func send(
+    agentID: String, text: String, messageID: String,
+    activeTurnBehavior: PaseoActiveTurnBehavior
+  ) async throws {
+    guard !messageID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("The message ID must not be empty.")
+    }
+    try await sendMessage(
+      agentID: agentID, text: text, messageID: messageID,
+      activeTurnBehavior: activeTurnBehavior)
+  }
+
+  private func sendMessage(
+    agentID: String, text: String, messageID: String,
+    activeTurnBehavior: PaseoActiveTurnBehavior?
+  ) async throws {
     try requireConnected()
+    var fields: [String: PaseoJSONValue] = [
+      "agentId": .string(agentID), "text": .string(text), "messageId": .string(messageID),
+    ]
+    if let activeTurnBehavior {
+      fields["activeTurnBehavior"] = .string(activeTurnBehavior.rawValue)
+    }
     let payload = try await request(
       type: "send_agent_message_request",
-      fields: [
-        "agentId": .string(agentID), "text": .string(text),
-        "messageId": .string(UUID().uuidString.lowercased()),
-      ],
+      fields: fields,
       responseType: "send_agent_message_response",
-      operation: "message send"
+      operation: "message send", allowError: true
     )
-    guard payload["accepted"]?.boolValue == true else {
+    guard payload["agentId"]?.stringValue == agentID else {
+      throw PaseoProtocolError.malformedMessage("message send response had a mismatched agent id")
+    }
+    if let error = payload["error"]?.stringValue, !error.isEmpty {
+      throw PaseoProtocolError.requestRejected(error)
+    }
+    guard let accepted = payload["accepted"]?.boolValue else {
+      throw PaseoProtocolError.malformedMessage("message send response omitted acceptance")
+    }
+    guard accepted else {
       throw PaseoProtocolError.requestRejected(
         payload["error"]?.stringValue ?? "The host did not accept the message.")
     }
+  }
+
+  public func cancelAgent(agentID: String) async throws -> PaseoAgentControlSnapshot? {
+    try requireConnected()
+    let payload = try await request(
+      type: "cancel_agent_request", fields: ["agentId": .string(agentID)],
+      responseType: "cancel_agent_response", operation: "agent stop", allowError: true)
+    guard payload["agentId"]?.stringValue == agentID else {
+      throw PaseoProtocolError.malformedMessage("agent stop response had a mismatched agent id")
+    }
+    if let error = payload["error"]?.stringValue, !error.isEmpty {
+      throw PaseoProtocolError.requestRejected(error)
+    }
+    guard let agent = payload["agent"] else {
+      throw PaseoProtocolError.malformedMessage("agent stop response omitted its agent snapshot")
+    }
+    if agent == .null { return nil }
+    guard agent.objectValue != nil,
+      let id = agent["id"]?.stringValue, id == agentID,
+      let status = agent["status"]?.stringValue
+    else {
+      throw PaseoProtocolError.malformedMessage("agent stop response had an invalid agent snapshot")
+    }
+    return PaseoAgentControlSnapshot(
+      id: id, status: status,
+      requiresAttention: agent["requiresAttention"]?.boolValue ?? false,
+      attentionReason: agent["attentionReason"]?.stringValue)
   }
 
   public func pendingPermissions() async throws -> [PaseoPermissionRequest] {

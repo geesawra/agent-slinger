@@ -453,6 +453,25 @@ public enum PaseoPermissionDecision: Sendable, Equatable {
   case deny(actionID: String?, message: String?, interrupt: Bool?)
 }
 
+public enum PaseoActiveTurnBehavior: String, Sendable {
+  case interrupt
+  case steer
+}
+
+public struct PaseoAgentControlSnapshot: Sendable, Equatable {
+  public let id: String
+  public let status: String
+  public let requiresAttention: Bool
+  public let attentionReason: String?
+
+  public init(id: String, status: String, requiresAttention: Bool, attentionReason: String?) {
+    self.id = id
+    self.status = status
+    self.requiresAttention = requiresAttention
+    self.attentionReason = attentionReason
+  }
+}
+
 public enum PaseoProtocolError: Error, Sendable, Equatable, LocalizedError {
   case notConnected
   case disconnected(String)
@@ -481,6 +500,7 @@ public protocol PaseoService: Sendable {
   func listProjects() async throws -> [PaseoProject]
   func agentContextUsage(agentID: String) async throws -> PaseoAgentContextUsage
   func supportsProviderUsage() async -> Bool
+  func supportsAgentRequestReceipts() async -> Bool
   func listProviderUsage() async throws -> PaseoProviderUsageSnapshot
   func listProviders(cwd: String) async throws -> [PaseoProvider]
   func createAgent(_ intent: PaseoAgentCreationIntent) async throws -> PaseoAgentCreationResult
@@ -491,6 +511,11 @@ public protocol PaseoService: Sendable {
   func events(agentID: String, after cursor: PaseoTimelineCursor?) async throws
     -> AsyncThrowingStream<PaseoTimelineEvent, Error>
   func send(agentID: String, text: String) async throws
+  func send(
+    agentID: String, text: String, messageID: String,
+    activeTurnBehavior: PaseoActiveTurnBehavior
+  ) async throws
+  func cancelAgent(agentID: String) async throws -> PaseoAgentControlSnapshot?
   func pendingPermissions() async throws -> [PaseoPermissionRequest]
   func answerPermission(agentID: String, requestID: String, decision: PaseoPermissionDecision)
     async throws
@@ -502,6 +527,16 @@ extension PaseoService {
     throw PaseoProtocolError.unsupportedCapability("agent context usage")
   }
   public func supportsProviderUsage() async -> Bool { false }
+  public func supportsAgentRequestReceipts() async -> Bool { false }
+  public func send(
+    agentID: String, text: String, messageID: String,
+    activeTurnBehavior: PaseoActiveTurnBehavior
+  ) async throws {
+    throw PaseoProtocolError.unsupportedCapability("explicit agent message control")
+  }
+  public func cancelAgent(agentID: String) async throws -> PaseoAgentControlSnapshot? {
+    throw PaseoProtocolError.unsupportedCapability("agent cancellation")
+  }
   public func listProviderUsage() async throws -> PaseoProviderUsageSnapshot {
     throw PaseoProtocolError.unsupportedCapability("provider usage")
   }

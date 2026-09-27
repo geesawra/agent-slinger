@@ -8,6 +8,8 @@ struct ChatComposerBar: View {
   var focus: FocusState<Bool>.Binding
   var send: (String) -> Void
   var clearError: () -> Void
+  var refocusAfterSend = true
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   var body: some View {
     VStack(spacing: 0) {
@@ -32,7 +34,7 @@ struct ChatComposerBar: View {
 
       HStack(alignment: .bottom, spacing: 10) {
         TextField("Message agent…", text: $draft, axis: .vertical)
-          .lineLimit(1...5)
+          .lineLimit(dynamicTypeSize.isAccessibilitySize ? 1...2 : 1...5)
           .submitLabel(.send)
           .focused(focus)
           .accessibilityLabel("Message agent")
@@ -79,6 +81,6 @@ struct ChatComposerBar: View {
   private func sendDraft() {
     guard canSend else { return }
     send(draft)
-    focus.wrappedValue = true
+    focus.wrappedValue = refocusAfterSend
   }
 }

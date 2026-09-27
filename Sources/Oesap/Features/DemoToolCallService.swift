@@ -32,6 +32,12 @@
     private var toolCalls = DemoToolCallRemoteService.makeInitialToolCalls()
     private var closed = false
 
+    func serverID() async -> String? {
+      let prefix = "--demo-server-id="
+      return ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) })
+        .map { String($0.dropFirst(prefix.count)) } ?? "oesap-demo-tools-host"
+    }
+
     func connectionEvents() async -> AsyncStream<RemoteConnectionEvent> {
       AsyncStream { continuation in
         continuation.yield(
@@ -120,6 +126,12 @@
           cursor: nil,
           isDelta: false
         ))
+    }
+
+    func send(
+      agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
+    ) async throws {
+      try await send(agentID: agentID, text: text)
     }
 
     func pendingPermissions() async throws -> [RemotePermission] {

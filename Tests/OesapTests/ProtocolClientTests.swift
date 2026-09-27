@@ -361,6 +361,181 @@ final class ProtocolClientTests: XCTestCase {
     XCTAssertEqual(sequence.intValue, 12)
   }
 
+  func testExplicitSendPreservesIdentityAndBehaviorAndChecksAgentResponse() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(
+      client, transport: transport,
+      features: #"{"agentRequestReceipts":true}"#)
+    let supportsReceipts = await client.supportsAgentRequestReceipts()
+    XCTAssertTrue(supportsReceipts)
+
+    let first = Task {
+      try await client.send(
+        agentID: "agent-1", text: "Continue", messageID: "stable-message",
+        activeTurnBehavior: .steer)
+    }
+    let firstRequest = try await nextRequest(transport)
+    XCTAssertEqual(firstRequest.message["type"] as? String, "send_agent_message_request")
+    XCTAssertEqual(firstRequest.message["messageId"] as? String, "stable-message")
+    XCTAssertEqual(firstRequest.message["activeTurnBehavior"] as? String, "steer")
+    await transport.push(
+      sessionFrame(
+        type: "send_agent_message_response",
+        payload:
+          #"{"requestId":"unrelated-request","agentId":"agent-1","accepted":false,"error":"unrelated"}"#
+      ))
+    await transport.push(
+      sessionFrame(
+        type: "send_agent_message_response",
+        payload:
+          #"{"requestId":"\#(firstRequest.requestID)","agentId":"agent-1","accepted":true,"error":null}"#
+      ))
+    try await first.value
+
+    let second = Task {
+      try await client.send(
+        agentID: "agent-1", text: "Replace", messageID: "other-message",
+        activeTurnBehavior: .interrupt)
+    }
+    let secondRequest = try await nextRequest(transport)
+    XCTAssertNotEqual(secondRequest.requestID, firstRequest.requestID)
+    XCTAssertEqual(secondRequest.message["activeTurnBehavior"] as? String, "interrupt")
+    await transport.push(
+      sessionFrame(
+        type: "send_agent_message_response",
+        payload:
+          #"{"requestId":"\#(secondRequest.requestID)","agentId":"other-agent","accepted":true,"error":null}"#
+      ))
+    do {
+      try await second.value
+      XCTFail("A response for another agent must be rejected")
+    } catch let error as PaseoProtocolError {
+      XCTAssertEqual(error, .malformedMessage("message send response had a mismatched agent id"))
+    }
+
+    let rejected = Task {
+      try await client.send(
+        agentID: "agent-1", text: "Retry", messageID: "rejected-message",
+        activeTurnBehavior: .steer)
+    }
+    let rejectionRequest = try await nextRequest(transport)
+    await transport.push(
+      sessionFrame(
+        type: "send_agent_message_response",
+        payload:
+          #"{"requestId":"\#(rejectionRequest.requestID)","agentId":"agent-1","accepted":false,"error":"agent_request_key_conflict"}"#
+      ))
+    do {
+      try await rejected.value
+      XCTFail("The daemon rejected the send")
+    } catch let error as PaseoProtocolError {
+      XCTAssertEqual(error, .requestRejected("agent_request_key_conflict"))
+    }
+
+    let inconsistent = Task {
+      try await client.send(
+        agentID: "agent-1", text: "Another", messageID: "inconsistent-message",
+        activeTurnBehavior: .interrupt)
+    }
+    let inconsistentRequest = try await nextRequest(transport)
+    await transport.push(
+      sessionFrame(
+        type: "send_agent_message_response",
+        payload:
+          #"{"requestId":"\#(inconsistentRequest.requestID)","agentId":"agent-1","accepted":true,"error":"unexpected error"}"#
+      ))
+    do {
+      try await inconsistent.value
+      XCTFail("An error must not be ignored even when accepted is true")
+    } catch let error as PaseoProtocolError {
+      XCTAssertEqual(error, .requestRejected("unexpected error"))
+    }
+    await client.disconnect()
+  }
+
+  func testStopCorrelatesResponseAndHandlesSnapshotNullAndRefusal() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(client, transport: transport)
+    let supportsReceipts = await client.supportsAgentRequestReceipts()
+    XCTAssertFalse(supportsReceipts)
+
+    let stopping = Task { try await client.cancelAgent(agentID: "agent-1") }
+    let stopRequest = try await nextRequest(transport)
+    XCTAssertEqual(stopRequest.message["type"] as? String, "cancel_agent_request")
+    XCTAssertEqual(stopRequest.message["agentId"] as? String, "agent-1")
+    await transport.push(
+      sessionFrame(
+        type: "cancel_agent_response",
+        payload:
+          #"{"requestId":"\#(stopRequest.requestID)","agentId":"agent-1","agent":{"id":"agent-1","status":"idle","requiresAttention":true,"attentionReason":"Needs review"},"error":null}"#
+      ))
+    let stoppedSnapshot = try await stopping.value
+    XCTAssertEqual(
+      stoppedSnapshot,
+      PaseoAgentControlSnapshot(
+        id: "agent-1", status: "idle", requiresAttention: true,
+        attentionReason: "Needs review"))
+
+    let nullStop = Task { try await client.cancelAgent(agentID: "agent-1") }
+    let nullRequest = try await nextRequest(transport)
+    await transport.push(
+      sessionFrame(
+        type: "cancel_agent_response",
+        payload:
+          #"{"requestId":"\#(nullRequest.requestID)","agentId":"agent-1","agent":null,"error":null}"#
+      ))
+    let nullSnapshot = try await nullStop.value
+    XCTAssertNil(nullSnapshot)
+
+    let refusal = Task { try await client.cancelAgent(agentID: "agent-1") }
+    let refusalRequest = try await nextRequest(transport)
+    await transport.push(
+      sessionFrame(
+        type: "cancel_agent_response",
+        payload:
+          #"{"requestId":"\#(refusalRequest.requestID)","agentId":"agent-1","agent":null,"error":"cancel refused"}"#
+      ))
+    do {
+      _ = try await refusal.value
+      XCTFail("Stop refusal must surface")
+    } catch let error as PaseoProtocolError {
+      XCTAssertEqual(error, .requestRejected("cancel refused"))
+    }
+
+    let mismatch = Task { try await client.cancelAgent(agentID: "agent-1") }
+    let mismatchRequest = try await nextRequest(transport)
+    await transport.push(
+      sessionFrame(
+        type: "cancel_agent_response",
+        payload:
+          #"{"requestId":"\#(mismatchRequest.requestID)","agentId":"agent-1","agent":{"id":"other-agent","status":"idle"},"error":null}"#
+      ))
+    do {
+      _ = try await mismatch.value
+      XCTFail("A mismatched snapshot must be rejected")
+    } catch let error as PaseoProtocolError {
+      XCTAssertEqual(error, .malformedMessage("agent stop response had an invalid agent snapshot"))
+    }
+
+    let wrongAgent = Task { try await client.cancelAgent(agentID: "agent-1") }
+    let wrongAgentRequest = try await nextRequest(transport)
+    await transport.push(
+      sessionFrame(
+        type: "cancel_agent_response",
+        payload:
+          #"{"requestId":"\#(wrongAgentRequest.requestID)","agentId":"other-agent","agent":null,"error":null}"#
+      ))
+    do {
+      _ = try await wrongAgent.value
+      XCTFail("A response for another agent must be rejected")
+    } catch let error as PaseoProtocolError {
+      XCTAssertEqual(error, .malformedMessage("agent stop response had a mismatched agent id"))
+    }
+    await client.disconnect()
+  }
+
   private func connect(
     _ client: PaseoProtocolClient,
     transport: FixturePaseoTransport,

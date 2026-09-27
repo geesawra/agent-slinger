@@ -124,11 +124,12 @@ final class FeatureStateTests: XCTestCase {
     let factory = FakeConnectionFactory(connectServices: [failing])
     let model = OesapModel(connectionFactory: factory)
     await model.connect(.empty)
+    model.selectThread("thread-A")
     model.setDraft("first message", for: "thread-A")
     let failed = await model.send(threadID: "thread-A", text: "first message")
     XCTAssertFalse(failed)
     XCTAssertEqual(model.draft(for: "thread-A"), "first message")
-    XCTAssertNotNil(model.messageError)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
     await model.disconnect()
     XCTAssertEqual(model.draft(for: "thread-A"), "")
 
@@ -137,6 +138,7 @@ final class FeatureStateTests: XCTestCase {
     let nextFactory = FakeConnectionFactory(connectServices: [succeeding])
     let nextModel = OesapModel(connectionFactory: nextFactory)
     await nextModel.connect(.empty)
+    nextModel.selectThread("thread-A")
     nextModel.setDraft("original", for: "thread-A")
     let sending = Task { await nextModel.send(threadID: "thread-A", text: "original") }
     await gate.waitUntilEntered()
@@ -146,6 +148,294 @@ final class FeatureStateTests: XCTestCase {
     XCTAssertTrue(sent)
     XCTAssertEqual(nextModel.draft(for: "thread-A"), "newer draft")
     await nextModel.disconnect()
+  }
+
+  func testUncertainMessageRetryReplaysImmutableIntentAndPreservesEditedDraft() async throws {
+    let service = FakeRemoteService(failSendCalls: [1])
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    model.setDraft("Original text", for: "thread-A")
+    let first = await model.send(
+      threadID: "thread-A", text: "Original text", behavior: .steer,
+      expectedStateRevision: model.threadStateRevision(for: "thread-A"),
+      selectedDuringActiveTurn: false)
+    XCTAssertFalse(first)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    XCTAssertTrue(model.canRetryAgentMessage(for: "thread-A"))
+
+    model.setDraft("Edited draft", for: "thread-A")
+    let retried = await model.retryAgentMessage(threadID: "thread-A")
+    XCTAssertTrue(retried)
+    XCTAssertEqual(model.draft(for: "thread-A"), "Edited draft")
+    let sent = await service.sentMessages()
+    XCTAssertEqual(sent.count, 2)
+    XCTAssertEqual(sent[0], sent[1])
+    XCTAssertEqual(sent[0].behavior, .steer)
+    XCTAssertEqual(sent[0].text, "Original text")
+    XCTAssertFalse(model.hasUncertainAgentMessage(for: "thread-A"))
+    await model.disconnect()
+  }
+
+  func testReceiptCapabilityDowngradeDisablesUncertainRetry() async throws {
+    let first = FakeRemoteService(receiptSupport: true, failSendCalls: [1])
+    let second = FakeRemoteService(receiptSupport: false)
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [first], reconnectServices: [second]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    model.setDraft("Maybe delivered", for: "thread-A")
+    let firstAccepted = await model.send(threadID: "thread-A", text: "Maybe delivered")
+    XCTAssertFalse(firstAccepted)
+    XCTAssertTrue(model.canRetryAgentMessage(for: "thread-A"))
+
+    await model.reconnect()
+    XCTAssertEqual(model.connectionState, .connected)
+    XCTAssertFalse(model.canRetryAgentMessage(for: "thread-A"))
+    let retried = await model.retryAgentMessage(threadID: "thread-A")
+    XCTAssertFalse(retried)
+    let secondSends = await second.sentMessages()
+    XCTAssertTrue(secondSends.isEmpty)
+    XCTAssertEqual(model.draft(for: "thread-A"), "Maybe delivered")
+    await model.disconnect()
+  }
+
+  func testUncertainMessageIsNotReplayedAgainstDifferentHostWithSameThreadID() async throws {
+    let first = FakeRemoteService(failSendCalls: [1], serverIDValue: "host-A")
+    let second = FakeRemoteService(serverIDValue: "host-B")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [first], reconnectServices: [second]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let accepted = await model.send(threadID: "thread-A", text: "Host A only")
+    XCTAssertFalse(accepted)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    await model.reconnect()
+    XCTAssertEqual(model.connectionState, .connected)
+    XCTAssertFalse(model.hasUncertainAgentMessage(for: "thread-A"))
+    XCTAssertFalse(model.canRetryAgentMessage(for: "thread-A"))
+    let attempted = await model.retryAgentMessage(threadID: "thread-A")
+    XCTAssertFalse(attempted)
+    let secondSends = await second.sentMessages()
+    XCTAssertTrue(secondSends.isEmpty)
+    await model.disconnect()
+  }
+
+  func testUnverifiedHostIdentityDisablesAgentControlWithoutSending() async throws {
+    let unverifiedIDs: [String?] = [nil, "unknown", ""]
+    for hostID in unverifiedIDs {
+      let service = FakeRemoteService(initialThreadState: .running, serverIDValue: hostID)
+      let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+      await model.connect(.empty)
+      model.selectThread("thread-A")
+      XCTAssertFalse(model.agentControlAvailable(for: "thread-A"))
+
+      let sent = await model.send(
+        threadID: "thread-A", text: "Do not send", behavior: .steer,
+        expectedStateRevision: model.threadStateRevision(for: "thread-A"),
+        selectedDuringActiveTurn: true)
+      XCTAssertFalse(sent)
+      await model.stopAgent(
+        threadID: "thread-A", expectedStateRevision: model.threadStateRevision(for: "thread-A"))
+      let sends = await service.sentMessages()
+      let stops = await service.stopCallCount()
+      XCTAssertTrue(sends.isEmpty)
+      XCTAssertEqual(stops, 0)
+      await model.disconnect()
+    }
+  }
+
+  func testLateSendFromPriorConnectionCannotClearUncertainIntent() async throws {
+    let gate = TestGate()
+    let first = FakeRemoteService(sendGate: gate)
+    let second = FakeRemoteService()
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [first], reconnectServices: [second]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    model.setDraft("Original text", for: "thread-A")
+    let sending = Task { await model.send(threadID: "thread-A", text: "Original text") }
+    await gate.waitUntilEntered()
+    await model.reconnect()
+    XCTAssertEqual(model.connectionState, .connected)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    model.setDraft("Edited after reconnect", for: "thread-A")
+    await gate.open()
+    let oldAccepted = await sending.value
+    XCTAssertFalse(oldAccepted)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    XCTAssertEqual(model.draft(for: "thread-A"), "Edited after reconnect")
+    let secondSends = await second.sentMessages()
+    XCTAssertTrue(secondSends.isEmpty)
+    await model.disconnect()
+  }
+
+  func testSpontaneousConnectionLossTurnsInFlightSendUncertain() async throws {
+    let gate = TestGate()
+    let service = FakeRemoteService(sendGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    model.setDraft("In flight", for: "thread-A")
+    let sending = Task { await model.send(threadID: "thread-A", text: "In flight") }
+    await gate.waitUntilEntered()
+    await service.emitDisconnect("fixture socket loss")
+    let disconnected = await eventually { model.connectionState == .disconnected }
+    XCTAssertTrue(disconnected)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    XCTAssertFalse(model.isSendingAgentMessage(for: "thread-A"))
+    await gate.open()
+    let oldAccepted = await sending.value
+    XCTAssertFalse(oldAccepted)
+    XCTAssertEqual(model.draft(for: "thread-A"), "In flight")
+    await model.disconnect()
+  }
+
+  func testPendingThreadASendDoesNotBlockOrOverwriteThreadB() async throws {
+    let gate = TestGate()
+    let service = FakeRemoteService(
+      sendGate: gate, sendGateAgentID: "thread-A", failSendCalls: [1])
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    model.setDraft("A may be delivered", for: "thread-A")
+    let sendingA = Task { await model.send(threadID: "thread-A", text: "A may be delivered") }
+    await gate.waitUntilEntered()
+
+    await model.selectProject("B")
+    model.selectThread("thread-B")
+    model.setDraft("B sends now", for: "thread-B")
+    let sentB = await model.send(threadID: "thread-B", text: "B sends now")
+    XCTAssertTrue(sentB)
+    XCTAssertEqual(model.draft(for: "thread-B"), "")
+    XCTAssertEqual(model.agentSendFeedback(for: "thread-B")?.phase, .accepted)
+
+    await gate.open()
+    let sentA = await sendingA.value
+    XCTAssertFalse(sentA)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    XCTAssertEqual(model.draft(for: "thread-A"), "A may be delivered")
+    XCTAssertEqual(model.agentSendFeedback(for: "thread-B")?.phase, .accepted)
+    let calls = await service.sentMessages()
+    XCTAssertEqual(calls.map(\.agentID), ["thread-A", "thread-B"])
+    await model.disconnect()
+  }
+
+  func testUncertainSendCanStillBeReviewedAndDiscardedAfterStop() async throws {
+    let snapshot = RemoteAgentControlSnapshot(
+      id: "thread-A", state: .idle, requiresAttention: false, attentionReason: nil)
+    let service = FakeRemoteService(
+      failSendCalls: [1], stopSnapshot: snapshot, initialThreadState: .running)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    model.setDraft("Might have arrived", for: "thread-A")
+    let sent = await model.send(
+      threadID: "thread-A", text: "Might have arrived", behavior: .steer,
+      expectedStateRevision: model.threadStateRevision(for: "thread-A"),
+      selectedDuringActiveTurn: true)
+    XCTAssertFalse(sent)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+
+    await model.stopAgent(
+      threadID: "thread-A", expectedStateRevision: model.threadStateRevision(for: "thread-A"))
+    XCTAssertEqual(model.threads.first?.state, .idle)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    XCTAssertTrue(model.requiresAgentMessageReview(for: "thread-A"))
+    model.discardUncertainAgentMessage(threadID: "thread-A")
+    XCTAssertFalse(model.hasUncertainAgentMessage(for: "thread-A"))
+    XCTAssertEqual(model.draft(for: "thread-A"), "Might have arrived")
+    let later = await model.send(threadID: "thread-A", text: "Fresh intent")
+    XCTAssertTrue(later)
+    let calls = await service.sentMessages()
+    XCTAssertEqual(calls.count, 2)
+    XCTAssertNotEqual(calls[0].messageID, calls[1].messageID)
+    await model.disconnect()
+  }
+
+  func testStopNullResponseWaitsForAuthoritativeStateAndPreventsDuplicateRequest() async throws {
+    let gate = TestGate()
+    let service = FakeRemoteService(stopGate: gate, initialThreadState: .running)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let revision = model.threadStateRevision(for: "thread-A")
+    let stopping = Task {
+      await model.stopAgent(threadID: "thread-A", expectedStateRevision: revision)
+    }
+    await gate.waitUntilEntered()
+    await model.stopAgent(threadID: "thread-A", expectedStateRevision: revision)
+    let stopCount = await service.stopCallCount()
+    XCTAssertEqual(stopCount, 1)
+    await gate.open()
+    await stopping.value
+    XCTAssertEqual(model.agentActionFeedback(for: "thread-A")?.phase, .stopWaiting)
+    XCTAssertEqual(model.threads.first?.state, .running)
+    await model.disconnect()
+  }
+
+  func testStopRefusalAndStaleSnapshotDoNotClaimStopped() async throws {
+    let refusedService = FakeRemoteService(
+      stopError: RemoteServiceError.unavailable("refused"), initialThreadState: .running)
+    let refusedModel = OesapModel(
+      connectionFactory: FakeConnectionFactory(connectServices: [refusedService]))
+    await refusedModel.connect(.empty)
+    refusedModel.selectThread("thread-A")
+    await refusedModel.stopAgent(
+      threadID: "thread-A",
+      expectedStateRevision: refusedModel.threadStateRevision(for: "thread-A"))
+    XCTAssertEqual(refusedModel.agentActionFeedback(for: "thread-A")?.phase, .failed)
+    XCTAssertEqual(refusedModel.threads.first?.state, .running)
+    await refusedModel.disconnect()
+
+    let gate = TestGate()
+    let snapshot = RemoteAgentControlSnapshot(
+      id: "thread-A", state: .idle, requiresAttention: false, attentionReason: nil)
+    let service = FakeRemoteService(
+      stopGate: gate, stopSnapshot: snapshot, initialThreadState: .running)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let watching = Task { await model.watchTimeline(threadID: "thread-A") }
+    let subscribed = await eventually { await service.subscriptionCount() > 0 }
+    XCTAssertTrue(subscribed)
+    let revision = model.threadStateRevision(for: "thread-A")
+    let stopping = Task {
+      await model.stopAgent(threadID: "thread-A", expectedStateRevision: revision)
+    }
+    await gate.waitUntilEntered()
+    await service.emit(.threadState(.running, requiresAttention: false, reason: nil))
+    let liveEventApplied = await eventually {
+      model.threadStateRevision(for: "thread-A") > revision
+    }
+    XCTAssertTrue(liveEventApplied)
+    await gate.open()
+    await stopping.value
+    XCTAssertEqual(model.agentActionFeedback(for: "thread-A")?.phase, .stopWaiting)
+    XCTAssertEqual(model.threads.first?.state, .running)
+    watching.cancel()
+    await model.disconnect()
+    await watching.value
+  }
+
+  func testStopUsesMatchingTerminalSnapshot() async throws {
+    let snapshot = RemoteAgentControlSnapshot(
+      id: "thread-A", state: .idle, requiresAttention: true, attentionReason: "Review")
+    let service = FakeRemoteService(
+      stopSnapshot: snapshot, initialThreadState: .running)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    await model.stopAgent(
+      threadID: "thread-A", expectedStateRevision: model.threadStateRevision(for: "thread-A"))
+    XCTAssertEqual(model.threads.first?.state, .idle)
+    XCTAssertTrue(model.threads.first?.requiresAttention == true)
+    XCTAssertEqual(model.threads.first?.attentionReason, "Review")
+    XCTAssertEqual(model.agentActionFeedback(for: "thread-A")?.phase, .stopped)
+    await model.disconnect()
   }
 
   func testFirstMessageCreatesOnlyOnSendAndUsesConfiguredProjectAgent() async throws {
@@ -913,6 +1203,13 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
 }
 
 private actor FakeRemoteService: OesapRemoteService {
+  struct SentAgentMessage: Sendable, Equatable {
+    let agentID: String
+    let text: String
+    let messageID: String
+    let behavior: RemoteActiveTurnBehavior
+  }
+
   private let projectsValue: [RemoteProject]
   private let projectsError: Error?
   private let projectsAfterFirstCall: [RemoteProject]?
@@ -921,17 +1218,24 @@ private actor FakeRemoteService: OesapRemoteService {
   private let projectGateAtCall: Int
   private let threadGateForA: TestGate?
   private let sendGate: TestGate?
+  private let sendGateAgentID: String?
   private let historyGate: TestGate?
   private let historyText: String
   private let historyMessages: [RemoteMessage]?
   private let olderMessages: [RemoteMessage]?
   private let failsSending: Bool
+  private let receiptSupport: Bool
+  private let failSendCalls: Set<Int>
+  private let stopGate: TestGate?
+  private let stopSnapshot: RemoteAgentControlSnapshot?
+  private let stopError: Error?
+  private let initialThreadState: RemoteThread.State
   private let creationGate: TestGate?
   private let failFirstCreation: Bool
   private let failFirstCreationDefinitively: Bool
   private let promptAccepted: Bool
   private let threadErrorForB: Bool
-  private let serverIDValue: String
+  private let serverIDValue: String?
   private let usageSupported: Bool
   private let usageSnapshot: RemoteProviderUsageSnapshot?
   private let usageErrorCalls: Set<Int>
@@ -951,6 +1255,8 @@ private actor FakeRemoteService: OesapRemoteService {
   private var connectionContinuation: AsyncStream<RemoteConnectionEvent>.Continuation?
   private var pendingDisconnectReason: String?
   private var closed = false
+  private var sentAgentMessages: [SentAgentMessage] = []
+  private var stopCalls = 0
 
   init(
     projects: [RemoteProject] = [
@@ -961,13 +1267,18 @@ private actor FakeRemoteService: OesapRemoteService {
     projectErrorCalls: Set<Int> = [], projectGate: TestGate? = nil,
     projectGateAtCall: Int = 2,
     threadGateForA: TestGate? = nil, sendGate: TestGate? = nil,
+    sendGateAgentID: String? = nil,
     historyGate: TestGate? = nil, historyText: String = "Hi",
     historyMessages: [RemoteMessage]? = nil,
     olderMessages: [RemoteMessage]? = nil,
-    failsSending: Bool = false, creationGate: TestGate? = nil,
+    failsSending: Bool = false, receiptSupport: Bool = true,
+    failSendCalls: Set<Int> = [], stopGate: TestGate? = nil,
+    stopSnapshot: RemoteAgentControlSnapshot? = nil, stopError: Error? = nil,
+    initialThreadState: RemoteThread.State = .idle,
+    creationGate: TestGate? = nil,
     failFirstCreation: Bool = false, failFirstCreationDefinitively: Bool = false,
     promptAccepted: Bool = true, threadErrorForB: Bool = false,
-    serverIDValue: String = "fixture-host", usageSupported: Bool = false,
+    serverIDValue: String? = "fixture-host", usageSupported: Bool = false,
     usageSnapshot: RemoteProviderUsageSnapshot? = nil,
     usageErrorCalls: Set<Int> = [], usageGate: TestGate? = nil,
     usageGateAtCall: Int = 1, contextReport: RemoteContextUsage? = nil,
@@ -982,11 +1293,18 @@ private actor FakeRemoteService: OesapRemoteService {
     self.projectGateAtCall = projectGateAtCall
     self.threadGateForA = threadGateForA
     self.sendGate = sendGate
+    self.sendGateAgentID = sendGateAgentID
     self.historyGate = historyGate
     self.historyText = historyText
     self.historyMessages = historyMessages
     self.olderMessages = olderMessages
     self.failsSending = failsSending
+    self.receiptSupport = receiptSupport
+    self.failSendCalls = failSendCalls
+    self.stopGate = stopGate
+    self.stopSnapshot = stopSnapshot
+    self.stopError = stopError
+    self.initialThreadState = initialThreadState
     self.creationGate = creationGate
     self.failFirstCreation = failFirstCreation
     self.failFirstCreationDefinitively = failFirstCreationDefinitively
@@ -1007,6 +1325,7 @@ private actor FakeRemoteService: OesapRemoteService {
   func serverID() async -> String? { serverIDValue }
   func supportsNewThreads() async -> Bool { true }
   func supportsProviderUsage() async -> Bool { usageSupported }
+  func supportsAgentRequestReceipts() async -> Bool { receiptSupport }
 
   func providerUsage() async throws -> RemoteProviderUsageSnapshot {
     usageCalls += 1
@@ -1083,7 +1402,7 @@ private actor FakeRemoteService: OesapRemoteService {
     return [
       RemoteThread(
         id: "thread-\(projectID)", title: "Thread \(projectID)",
-        provider: nil, model: nil, state: .idle,
+        provider: nil, model: nil, state: initialThreadState,
         requiresAttention: false, attentionReason: nil,
         contextUsage: initialThreadContext ?? contextReport)
     ]
@@ -1118,9 +1437,33 @@ private actor FakeRemoteService: OesapRemoteService {
   }
 
   func send(agentID: String, text: String) async throws {
-    await sendGate?.wait()
+    if sendGateAgentID == nil || sendGateAgentID == agentID { await sendGate?.wait() }
     if failsSending { throw RemoteServiceError.connectionLost("fixture send failed") }
   }
+
+  func send(
+    agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
+  ) async throws {
+    sentAgentMessages.append(
+      SentAgentMessage(
+        agentID: agentID, text: text, messageID: messageID, behavior: behavior))
+    let callNumber = sentAgentMessages.count
+    if sendGateAgentID == nil || sendGateAgentID == agentID { await sendGate?.wait() }
+    if failsSending || failSendCalls.contains(callNumber) {
+      throw RemoteServiceError.connectionLost("fixture send failed")
+    }
+  }
+
+  func sentMessages() -> [SentAgentMessage] { sentAgentMessages }
+
+  func stop(agentID: String) async throws -> RemoteAgentControlSnapshot? {
+    stopCalls += 1
+    await stopGate?.wait()
+    if let stopError { throw stopError }
+    return stopSnapshot
+  }
+
+  func stopCallCount() -> Int { stopCalls }
 
   func pendingPermissions() async throws -> [RemotePermission] { [] }
   func answerPermission(_ permission: RemotePermission, allow: Bool) async throws {}
