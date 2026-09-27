@@ -29,6 +29,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
       coordinator?.pasteImageFromClipboard() ?? false
     }
     textView.onLayout = { [weak coordinator = context.coordinator] view in
+      coordinator?.updateCompactVerticalInset(on: view)
       coordinator?.requestExpansionMeasurement(on: view)
     }
     textView.backgroundColor = .clear
@@ -61,6 +62,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     textView.returnKeyType = isExpanded ? .default : .send
     textView.accessibilityLabel = accessibilityLabel
     textView.accessibilityIdentifier = accessibilityIdentifier
+    context.coordinator.updateCompactVerticalInset(on: textView)
     updateScrolling(textView)
     context.coordinator.requestExpansionMeasurement(on: textView)
     context.coordinator.requestFirstResponder(isFocused, on: textView)
@@ -141,6 +143,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
       guard !isApplyingStyle else { return }
       parent.text = textView.text
       updateMarkdownStyle(on: textView)
+      updateCompactVerticalInset(on: textView)
     }
 
     func textViewDidChangeSelection(_ textView: UITextView) {
@@ -214,6 +217,43 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     func cancelExpansionMeasurement() {
       isDismantled = true
       expansionMeasurementGeneration += 1
+    }
+
+    func updateCompactVerticalInset(on textView: UITextView) {
+      guard !parent.isExpanded else { return }
+      let inset = textView.textContainerInset
+      let centeredTop: CGFloat
+      if let lineHeight = Self.singleLineHeight(for: textView) {
+        // Center the rendered line in the compact row's spare height.
+        centeredTop = max(10, (textView.bounds.height - lineHeight) / 2)
+      } else {
+        centeredTop = 10
+      }
+      guard inset.top != centeredTop else { return }
+      textView.textContainerInset = UIEdgeInsets(
+        top: centeredTop, left: inset.left, bottom: inset.bottom, right: inset.right)
+    }
+
+    private static func singleLineHeight(for textView: UITextView) -> CGFloat? {
+      let width = textView.bounds.width
+      guard width.isFinite, width > 0,
+        width - textView.textContainerInset.left - textView.textContainerInset.right > 0
+      else { return nil }
+
+      let container = textView.textContainer
+      let manager = textView.layoutManager
+      manager.ensureLayout(for: container)
+      let glyphCount = manager.numberOfGlyphs
+      if glyphCount == 0 {
+        return (textView.font ?? .preferredFont(forTextStyle: .body)).lineHeight
+      }
+
+      var lineRange = NSRange(location: NSNotFound, length: 0)
+      let line = manager.lineFragmentRect(forGlyphAt: 0, effectiveRange: &lineRange)
+      guard lineRange.location != NSNotFound, NSMaxRange(lineRange) == glyphCount,
+        manager.extraLineFragmentTextContainer !== container
+      else { return nil }
+      return line.height
     }
 
     func requestExpansionMeasurement(on textView: UITextView) {

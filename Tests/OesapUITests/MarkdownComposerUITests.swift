@@ -134,6 +134,7 @@ final class MarkdownComposerUITests: XCTestCase {
     let expand = surface.buttons["chat-composer-expand"]
     let send = surface.buttons["send-message"]
     let attach = app.buttons["attach-image"]
+    attachScreenshot(named: "Compact composer empty placeholder", app: app)
 
     let shortDraft = "Review"
     editor.tap()
@@ -166,6 +167,8 @@ final class MarkdownComposerUITests: XCTestCase {
     )
     XCTAssertGreaterThanOrEqual(expand.frame.width, 44)
     XCTAssertGreaterThanOrEqual(expand.frame.height, 44)
+    XCTAssertGreaterThanOrEqual(send.frame.minY - expand.frame.maxY, 7)
+    XCTAssertEqual(expand.frame.midX, send.frame.midX, accuracy: 1)
     XCTAssertGreaterThan(editor.frame.height, priorEditorHeight)
     XCTAssertGreaterThanOrEqual(send.frame.width, 44)
     XCTAssertGreaterThanOrEqual(send.frame.height, 44)

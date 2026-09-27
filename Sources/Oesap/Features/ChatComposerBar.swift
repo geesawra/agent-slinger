@@ -321,7 +321,7 @@ struct ChatComposerBar: View {
   }
 
   private var compactEditor: some View {
-    ZStack(alignment: .topLeading) {
+    ZStack(alignment: .leading) {
       NativeImagePasteTextView(
         text: $draft,
         isFocused: focus,
@@ -348,7 +348,6 @@ struct ChatComposerBar: View {
           .font(.body)
           .foregroundStyle(Color.secondary)
           .padding(.horizontal, 14)
-          .padding(.top, 12)
           .allowsHitTesting(false)
           .accessibilityHidden(true)
       }
@@ -357,7 +356,7 @@ struct ChatComposerBar: View {
   }
 
   private var compactTrailingControls: some View {
-    VStack(spacing: 0) {
+    VStack(spacing: 8) {
       if showsCompactExpandControl {
         expandControl
       }
