@@ -170,7 +170,7 @@ struct ConnectionSetupView: View {
     .navigationTitle(title)
     .navigationBarTitleDisplayMode(.large)
     .toolbar {
-      if let onOpenSettings {
+      if let onOpenSettings, !model.savedInstances.isEmpty {
         ToolbarItem(placement: .topBarTrailing) {
           Button(action: onOpenSettings) {
             Label("Settings", systemImage: "gearshape")

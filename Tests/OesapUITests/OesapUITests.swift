@@ -1,23 +1,34 @@
 import XCTest
 
 final class OesapUITests: XCTestCase {
-  func testSettingsAreAvailableBeforeAndAfterConnecting() {
+  func testSettingsAreAvailableAfterFirstConfiguredInstance() {
     let app = launchDemo()
 
-    app.buttons["setup-settings-button"].tap()
-    XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.staticTexts["No saved instances"].exists)
-    app.buttons["add-instance-button"].tap()
-    XCTAssertTrue(app.navigationBars["Add Paseo instance"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.textFields["connection-name"].exists)
-    app.navigationBars.buttons.element(boundBy: 0).tap()
-    XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
-    app.navigationBars.buttons.element(boundBy: 0).tap()
+    XCTAssertFalse(app.buttons["setup-settings-button"].exists)
 
     connect(app)
     app.buttons["connection-options"].tap()
     app.buttons["settings-button"].tap()
     XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+    app.buttons["add-instance-button"].tap()
+    XCTAssertTrue(app.navigationBars["Add Paseo instance"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.textFields["connection-name"].exists)
+    app.navigationBars.buttons.element(boundBy: 0).tap()
+    XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+
+    let removeInstance = app.buttons.matching(
+      NSPredicate(format: "label BEGINSWITH %@", "Remove ")
+    ).firstMatch
+    XCTAssertTrue(removeInstance.waitForExistence(timeout: 5))
+    removeInstance.tap()
+    let confirmRemoval = app.buttons.matching(identifier: "confirm-remove-instance").firstMatch
+    XCTAssertTrue(confirmRemoval.waitForExistence(timeout: 5))
+    confirmRemoval.tap()
+    XCTAssertTrue(app.staticTexts["No saved instances"].waitForExistence(timeout: 5))
+
+    app.navigationBars.buttons.element(boundBy: 0).tap()
+    XCTAssertTrue(app.navigationBars["Oesap"].waitForExistence(timeout: 5))
+    XCTAssertFalse(app.buttons["setup-settings-button"].exists)
   }
 
   func testCanSwitchBetweenNamedInstancesAndRemoveAnInactiveOne() {
