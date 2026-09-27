@@ -4,8 +4,14 @@ import UniformTypeIdentifiers
 
 @MainActor
 struct ComposerImagePickerButton: View {
+  enum Presentation: Equatable {
+    case compact
+    case expanded
+  }
+
   let remainingCount: Int
   let imageImportIdentity: String
+  var presentation: Presentation = .expanded
   let onOperationStarted: () -> Int
   let onImageLoaded: (Data, String?, Int) -> Void
   let onOperationFailed: (String, Int) -> Void
@@ -64,11 +70,12 @@ struct ComposerImagePickerButton: View {
         }
       }
     } label: {
-      Image(systemName: "paperclip")
+      Image(systemName: presentation == .compact ? "plus" : "paperclip")
         .font(.system(size: 17, weight: .medium))
-        .frame(width: 44, height: 44)
-        .contentShape(Rectangle())
+        .frame(width: 32, height: 32)
+        .contentShape(Circle())
     }
+    .controlSize(.small)
     .accessibilityLabel("Attach image")
     .accessibilityIdentifier("attach-image")
     .disabled(remainingCount <= 0)
@@ -77,9 +84,15 @@ struct ComposerImagePickerButton: View {
       button
         .buttonStyle(.glass)
         .buttonBorderShape(.circle)
+        .frame(width: 44, height: 44)
+        .contentShape(Rectangle())
         .tint(Color(uiColor: .label))
     } else {
-      button.buttonStyle(.bordered).buttonBorderShape(.circle)
+      button
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .frame(width: 44, height: 44)
+        .contentShape(Rectangle())
     }
   }
 

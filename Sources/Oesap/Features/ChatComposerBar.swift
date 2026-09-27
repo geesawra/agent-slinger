@@ -90,9 +90,14 @@ struct ChatComposerBar: View {
         errorRow(error)
       }
 
-      accessoryRow
+      if hasAgentStatusControls {
+        accessoryRow
+      }
 
-      messageField
+      HStack(alignment: .bottom, spacing: 8) {
+        imagePicker.padding(.bottom, 4)
+        messageField
+      }
     }
   }
 
@@ -126,35 +131,12 @@ struct ChatComposerBar: View {
   }
 
   private var accessoryRow: some View {
-    Group {
-      if dynamicTypeSize.isAccessibilitySize {
-        VStack(spacing: 4) {
-          if hasAgentStatusControls {
-            HStack(spacing: 8) {
-              contextUsageControl
-              Spacer(minLength: 0)
-              stopControl
-            }
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-          }
-
-          HStack(spacing: 8) {
-            imagePicker
-            Spacer(minLength: 0)
-          }
-          .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        }
-      } else {
-        HStack(spacing: 8) {
-          contextUsageControl
-          imagePicker
-          Spacer(minLength: 0)
-          stopControl
-        }
-        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-      }
+    HStack(spacing: 8) {
+      contextUsageControl
+      Spacer(minLength: 0)
+      stopControl
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
+    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
     .accessibilityElement(children: .contain)
     .accessibilityIdentifier("chat-composer-accessory")
   }
@@ -171,6 +153,7 @@ struct ChatComposerBar: View {
     ComposerImagePickerButton(
       remainingCount: remainingImageCount,
       imageImportIdentity: imageImportIdentity,
+      presentation: .compact,
       onOperationStarted: beginImageOperation,
       onImageLoaded: { data, fileName, generation in
         prepareImage(data, fileName: fileName, generation: generation)
@@ -516,6 +499,7 @@ private struct ExpandedComposerView: View {
           remainingCount: max(
             0, RemoteImageLimits.maximumCount - images.count - pendingImageOperations),
           imageImportIdentity: imageImportIdentity,
+          presentation: .expanded,
           onOperationStarted: onImageOperationStarted,
           onImageLoaded: onImageLoaded,
           onOperationFailed: onImageOperationFailed

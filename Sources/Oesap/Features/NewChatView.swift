@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct NewChatView: View {
   @Bindable var model: OesapModel
@@ -291,6 +292,8 @@ struct NewChatView: View {
 
   private func openAgentSettings() {
     composerFocused = false
+    UIApplication.shared.sendAction(
+      #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     onOpenAgent()
   }
 }

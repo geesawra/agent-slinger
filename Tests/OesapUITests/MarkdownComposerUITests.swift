@@ -133,12 +133,18 @@ final class MarkdownComposerUITests: XCTestCase {
     XCTAssertTrue(editor.waitForExistence(timeout: 5))
     let expand = surface.buttons["chat-composer-expand"]
     let send = surface.buttons["send-message"]
+    let attach = app.buttons["attach-image"]
 
     let shortDraft = "Review"
     editor.tap()
     editor.typeText(shortDraft)
     XCTAssertFalse(expand.exists, "A one-line draft should not show Expand.")
     XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertTrue(attach.waitForExistence(timeout: 5))
+    XCTAssertGreaterThanOrEqual(attach.frame.width, 44)
+    XCTAssertGreaterThanOrEqual(attach.frame.height, 44)
+    XCTAssertLessThanOrEqual(attach.frame.maxX, surface.frame.minX)
+    XCTAssertEqual(attach.frame.maxY, send.frame.maxY, accuracy: 4)
     XCTAssertGreaterThanOrEqual(send.frame.width, 44)
     XCTAssertGreaterThanOrEqual(send.frame.height, 44)
     attachScreenshot(named: "Compact composer short draft without Expand", app: app)

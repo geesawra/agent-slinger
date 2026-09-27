@@ -51,6 +51,11 @@ between writing and previewing.
   existing running-agent and uncertain-send choices. This follows Apple's
   [Sheets guidance](https://developer.apple.com/design/human-interface-guidelines/sheets)
   for focused, full-height composition.
+- In compact mode, place a native circular plus menu immediately to the left of
+  the composer, aligned with the input and Send controls. Keep its 44-point
+  touch target and `Attach image` accessibility label. Show context and stop
+  controls in their own row only when those controls are available; the
+  expanded sheet keeps its paperclip menu above the editor.
 
 ## License and constraints
 

@@ -131,6 +131,11 @@ final class ImageComposerUITests: XCTestCase {
     XCTAssertTrue(app.descendants(matching: .any)["composer-image-0"].exists)
     let send = app.buttons["send-message"]
     XCTAssertTrue(send.isEnabled, "An image-only first message should be sendable.")
+    let keyboard = app.keyboards.firstMatch
+    if keyboard.exists {
+      XCTAssertLessThanOrEqual(send.frame.maxY, keyboard.frame.minY)
+    }
+    XCTAssertTrue(send.isHittable)
     attachScreenshot(named: "Image-only new thread draft", app: app)
     send.tap()
 
