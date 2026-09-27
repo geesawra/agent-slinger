@@ -1,6 +1,64 @@
 import XCTest
 
 final class OesapUITests: XCTestCase {
+  func testSettingsAreAvailableBeforeAndAfterConnecting() {
+    let app = launchDemo()
+
+    app.buttons["setup-settings-button"].tap()
+    XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["No saved instances"].exists)
+    app.buttons["add-instance-button"].tap()
+    XCTAssertTrue(app.navigationBars["Add Paseo instance"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.textFields["connection-name"].exists)
+    app.navigationBars.buttons.element(boundBy: 0).tap()
+    XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+    app.navigationBars.buttons.element(boundBy: 0).tap()
+
+    connect(app)
+    app.buttons["connection-options"].tap()
+    app.buttons["settings-button"].tap()
+    XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+  }
+
+  func testCanSwitchBetweenNamedInstancesAndRemoveAnInactiveOne() {
+    let app = launchDemo()
+    connect(app, name: "Studio", endpoint: "studio.paseo.local:6767")
+
+    app.buttons["connection-options"].tap()
+    app.buttons["settings-button"].tap()
+    app.buttons["add-instance-button"].tap()
+    XCTAssertTrue(app.navigationBars["Add Paseo instance"].waitForExistence(timeout: 5))
+    connect(app, name: "Travel", endpoint: "travel.paseo.local:6767")
+
+    app.buttons["connection-options"].tap()
+    app.buttons["settings-button"].tap()
+    let studio = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Studio"))
+      .firstMatch
+    XCTAssertTrue(studio.waitForExistence(timeout: 5))
+    studio.tap()
+    XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
+
+    app.buttons["connection-options"].tap()
+    app.buttons["settings-button"].tap()
+    let selectedStudio = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "Studio, Selected")
+    ).firstMatch
+    XCTAssertTrue(selectedStudio.waitForExistence(timeout: 5))
+
+    let removeTravel = app.buttons.matching(
+      NSPredicate(format: "label == %@", "Remove Travel")
+    ).firstMatch
+    XCTAssertTrue(removeTravel.waitForExistence(timeout: 5))
+    removeTravel.tap()
+    let confirmRemoval = app.buttons.matching(identifier: "confirm-remove-instance").firstMatch
+    XCTAssertTrue(confirmRemoval.waitForExistence(timeout: 5))
+    confirmRemoval.tap()
+    XCTAssertFalse(
+      app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Travel")).firstMatch
+        .waitForExistence(timeout: 1))
+    XCTAssertTrue(selectedStudio.exists)
+  }
+
   func testConnectBrowseAndSendMessage() {
     let app = launchDemo()
     attachScreenshot(named: "Connection setup")
@@ -68,8 +126,10 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(info.isHittable)
     info.tap()
     XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
-    XCTAssertTrue(
-      app.descendants(matching: .any)["session-info-status"].label.contains("Running"))
+    let status = app.descendants(matching: .any)
+      .matching(identifier: "session-info-status").firstMatch
+    XCTAssertTrue(status.waitForExistence(timeout: 5))
+    XCTAssertTrue(status.label.contains("Running"))
     app.buttons["session-info-done"].tap()
     XCTAssertEqual(composer.value as? String, "Keep this draft if I cancel Stop")
   }
@@ -216,7 +276,8 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(infoButton.waitForExistence(timeout: 5))
     infoButton.tap()
     XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
-    let sessionStatus = app.descendants(matching: .any)["session-info-status"]
+    let sessionStatus = app.descendants(matching: .any)
+      .matching(identifier: "session-info-status").firstMatch
     XCTAssertTrue(sessionStatus.waitForExistence(timeout: 5))
     XCTAssertTrue(sessionStatus.label.contains("Running"))
     XCTAssertTrue(staticText(containing: "codex", in: app).exists)
@@ -407,7 +468,10 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(infoButton.waitForExistence(timeout: 5))
     infoButton.tap()
     XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.descendants(matching: .any)["session-info-status"].label.contains("Running"))
+    let sessionStatus = app.descendants(matching: .any)
+      .matching(identifier: "session-info-status").firstMatch
+    XCTAssertTrue(sessionStatus.waitForExistence(timeout: 5))
+    XCTAssertTrue(sessionStatus.label.contains("Running"))
     let accessibilityUsageList = app.collectionViews.firstMatch
     XCTAssertTrue(accessibilityUsageList.waitForExistence(timeout: 5))
     let accessibilityUsed = staticText(containing: "64,000 tokens", in: app)
@@ -629,8 +693,8 @@ final class OesapUITests: XCTestCase {
     return app
   }
 
-  private func connect(_ app: XCUIApplication) {
-    enterEndpoint(app)
+  private func connect(_ app: XCUIApplication, name: String? = nil, endpoint: String? = nil) {
+    enterEndpoint(app, name: name, endpoint: endpoint)
     let connectButton = app.buttons["connect-button"]
     XCTAssertTrue(scrollUntilHittable(connectButton, in: app))
     connectButton.tap()
@@ -801,11 +865,22 @@ final class OesapUITests: XCTestCase {
     app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
   }
 
-  private func enterEndpoint(_ app: XCUIApplication) {
+  private func enterEndpoint(
+    _ app: XCUIApplication, name: String? = nil, endpoint value: String? = nil
+  ) {
+    if let name {
+      let nameField = app.textFields["connection-name"]
+      XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+      nameField.tap()
+      nameField.typeText(name)
+      let done = app.buttons["connection-keyboard-done"]
+      XCTAssertTrue(done.waitForExistence(timeout: 5))
+      done.tap()
+    }
     let endpoint = app.textFields["direct-endpoint"]
     XCTAssertTrue(endpoint.waitForExistence(timeout: 5))
     endpoint.tap()
-    endpoint.typeText("demo.paseo.local:6767")
+    endpoint.typeText(value ?? "demo.paseo.local:6767")
     let keyboard = app.keyboards.firstMatch
     let keyboardDone = app.buttons["connection-keyboard-done"]
     XCTAssertTrue(keyboardDone.waitForExistence(timeout: 5))

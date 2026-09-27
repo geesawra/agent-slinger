@@ -21,7 +21,12 @@ In Oesap, choose **Direct connection** and enter the Paseo host and port (for
 example, `mac.local:6767`; leave off `ws://` or `wss://`) and password when
 required, or choose **Relay pairing** and paste the link provided by Paseo.
 For a private VPN host without TLS, use the VPN IP address when turning TLS
-off. The app stores connection credentials in the iOS Keychain.
+off. Give each connection an optional name, then use **Settings** to add and
+switch between saved Paseo instances. Settings is available from both the
+disconnected setup screen and the connected Projects menu. The app stores
+connection credentials and the active instance choice in the iOS Keychain. On
+upgrade, an existing single saved connection is migrated into the instance
+list automatically.
 After connecting, open a project, select an agent thread, and send a message
 from its timeline. Use **Project Agent** to choose a provider and optional
 model for future threads on that host and project; those settings are saved on

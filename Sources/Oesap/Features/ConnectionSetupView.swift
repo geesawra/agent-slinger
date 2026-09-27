@@ -2,6 +2,10 @@ import SwiftUI
 
 struct ConnectionSetupView: View {
   @Bindable var model: OesapModel
+  var title = "Oesap"
+  var showsReconnectAction = true
+  var onOpenSettings: (() -> Void)?
+  var onConnected: (() -> Void)?
   @State private var connection = RemoteConnection.empty
   @State private var connectingTask: Task<Void, Never>?
   @FocusState private var focusedField: Field?
@@ -30,6 +34,11 @@ struct ConnectionSetupView: View {
 
       if connection.method == .direct {
         Section {
+          TextField("Name (optional)", text: $connection.name)
+            .textContentType(.organizationName)
+            .textInputAutocapitalization(.words)
+            .accessibilityIdentifier("connection-name")
+
           TextField("host:port (e.g. mac.local:6767)", text: $connection.endpoint)
             .textContentType(.URL)
             .textInputAutocapitalization(.never)
@@ -48,20 +57,27 @@ struct ConnectionSetupView: View {
         } header: {
           Text("Direct connection").foregroundStyle(Color.primary.opacity(0.75))
         } footer: {
-          if connection.usesTLS {
-            Text(
-              "Enter host:port without ws:// or wss://. TLS is on by default. For a private VPN host, use its IP address if needed."
-            )
-            .foregroundStyle(Color.primary.opacity(0.75))
-          } else {
-            Text(
-              "Without TLS, messages and the password are sent unencrypted. Use only on a private LAN or VPN host without TLS; use its IP address for a private VPN connection."
-            )
-            .foregroundStyle(Color.primary.opacity(0.75))
+          VStack(alignment: .leading, spacing: 6) {
+            Text("Give this connection a name such as Mac Studio.")
+            if connection.usesTLS {
+              Text(
+                "Enter host:port without ws:// or wss://. TLS is on by default. For a private VPN host, use its IP address if needed."
+              )
+            } else {
+              Text(
+                "Without TLS, messages and the password are sent unencrypted. Use only on a private LAN or VPN host without TLS; use its IP address for a private VPN connection."
+              )
+            }
           }
+          .foregroundStyle(Color.primary.opacity(0.75))
         }
       } else {
         Section {
+          TextField("Name (optional)", text: $connection.name)
+            .textContentType(.organizationName)
+            .textInputAutocapitalization(.words)
+            .accessibilityIdentifier("connection-name")
+
           TextField("Paste pairing link", text: $connection.pairingLink, axis: .vertical)
             .textContentType(.URL)
             .textInputAutocapitalization(.never)
@@ -72,6 +88,9 @@ struct ConnectionSetupView: View {
           Text("Create a relay pairing link in Paseo, then paste it here.")
             .font(.footnote)
             .foregroundStyle(Color.primary.opacity(0.75))
+          Text("Give this connection a name such as Home Studio.")
+            .font(.footnote)
+            .foregroundStyle(Color.primary.opacity(0.75))
         } header: {
           Text("Relay pairing").foregroundStyle(Color.primary.opacity(0.75))
         } footer: {
@@ -80,13 +99,13 @@ struct ConnectionSetupView: View {
         }
       }
 
-      if model.hasSavedConnection {
+      if showsReconnectAction, let activeInstanceID = model.activeInstanceID {
         Section {
           Button {
             connectingTask = Task { await model.reconnect() }
           } label: {
             HStack {
-              Label("Reconnect previous host", systemImage: "arrow.clockwise")
+              Label(reconnectTitle(for: activeInstanceID), systemImage: "arrow.clockwise")
               Spacer()
               if model.connectionState.isBusy { ProgressView() }
             }
@@ -110,7 +129,10 @@ struct ConnectionSetupView: View {
       Section {
         Button {
           focusedField = nil
-          connectingTask = Task { await model.connect(connection) }
+          connectingTask = Task {
+            await model.connect(connection)
+            if model.connectionState == .connected { onConnected?() }
+          }
         } label: {
           HStack {
             Spacer()
@@ -145,9 +167,19 @@ struct ConnectionSetupView: View {
           .accessibilityIdentifier("connection-keyboard-done")
       }
     }
-    .navigationTitle("Oesap")
+    .navigationTitle(title)
     .navigationBarTitleDisplayMode(.large)
-    .task { await model.refreshSavedConnectionState() }
+    .toolbar {
+      if let onOpenSettings {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button(action: onOpenSettings) {
+            Label("Settings", systemImage: "gearshape")
+          }
+          .accessibilityIdentifier("setup-settings-button")
+        }
+      }
+    }
+    .task { await model.refreshSavedInstances() }
   }
 
   private var connectionMethodPicker: some View {
@@ -164,6 +196,13 @@ struct ConnectionSetupView: View {
     case .direct: !connection.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     case .relay: !connection.pairingLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+  }
+
+  private func reconnectTitle(for activeInstanceID: String) -> String {
+    guard let name = model.savedInstances.first(where: { $0.id == activeInstanceID })?.name else {
+      return "Reconnect selected instance"
+    }
+    return "Reconnect \(name)"
   }
 
 }

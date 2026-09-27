@@ -49,7 +49,7 @@ struct ContextUsageIndicator: View {
     HStack(spacing: 6) {
       if let fraction {
         Gauge(value: visualFraction(fraction), in: 0...1) {
-          Text("Context window used")
+          EmptyView()
         }
         .gaugeStyle(.accessoryCircularCapacity)
         .tint(Color.accentColor)
@@ -214,6 +214,8 @@ struct UsageListContent: View {
     Section("Session") {
       LabeledContent("Status") {
         Label(thread.state.label, systemImage: thread.state.symbol)
+          .accessibilityElement(children: .ignore)
+          .accessibilityLabel("Status, \(thread.state.label)")
           .accessibilityIdentifier("session-info-status")
       }
       if thread.requiresAttention || thread.state == .waiting {

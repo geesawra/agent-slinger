@@ -17,6 +17,9 @@ final class OesapModel {
 
   private(set) var connectionState: ConnectionState = .disconnected
   private(set) var hasSavedConnection = false
+  private(set) var savedInstances: [SavedPaseoInstance] = []
+  private(set) var activeInstanceID: String?
+  private(set) var instanceError: String?
   private(set) var projects: [RemoteProject] = []
   private(set) var threads: [RemoteThread] = []
   private(set) var messages: [RemoteMessage] = []
@@ -93,6 +96,7 @@ final class OesapModel {
     [:]
   @ObservationIgnored private var connectionObservationTask: Task<Void, Never>?
   @ObservationIgnored private var connectionGeneration = 0
+  @ObservationIgnored private var savedInstancesRefreshGeneration = 0
   @ObservationIgnored private var olderTimelineCursor: RemoteTimelineCursor?
   @ObservationIgnored private var latestTimelineCursor: RemoteTimelineCursor?
   @ObservationIgnored private var projectSelectionGeneration = 0
@@ -453,27 +457,46 @@ final class OesapModel {
   }
 
   func refreshSavedConnectionState() async {
+    await refreshSavedInstances()
+  }
+
+  func refreshSavedInstances() async {
+    savedInstancesRefreshGeneration += 1
+    let refreshGeneration = savedInstancesRefreshGeneration
     let generation = connectionGeneration
-    let saved = await connectionFactory.savedConnectionExists()
-    guard connectionGeneration == generation else { return }
-    hasSavedConnection = saved
+    do {
+      let instances = try await connectionFactory.listSavedInstances()
+      let activeID = try await connectionFactory.activeInstanceID()
+      guard connectionGeneration == generation,
+        savedInstancesRefreshGeneration == refreshGeneration
+      else { return }
+      savedInstances = instances
+      activeInstanceID = activeID
+      hasSavedConnection = !instances.isEmpty
+      instanceError = nil
+    } catch {
+      guard connectionGeneration == generation,
+        savedInstancesRefreshGeneration == refreshGeneration
+      else { return }
+      instanceError = error.localizedDescription
+    }
   }
 
   func connect(_ connection: RemoteConnection) async {
     guard !connectionState.isBusy else { return }
-    prepareAgentActionsForConnectionChange()
+    let previousService = service
+    let preserveInitialSelection =
+      previousService == nil && activeInstanceID == nil
+      && projects.isEmpty && threads.isEmpty && messages.isEmpty
     let generation = invalidateConnection()
     service = nil
     connectedServerID = nil
-    agentRequestReceiptsSupported = false
-    canCreateThreads = false
-    agentProviders = []
-    loadingAgentOptions = false
-    clearAgentOverview()
-    clearProviderUsage()
-    clearCachedContextUsage()
+    clearWorkspaceForInstanceChange(preserveSelection: preserveInitialSelection)
     connectionState = .connecting
     clearErrors()
+    instanceError = nil
+    await previousService?.disconnect()
+    guard connectionGeneration == generation else { return }
     do {
       let connectedService = try await connectionFactory.connect(connection)
       guard connectionGeneration == generation else {
@@ -509,16 +532,17 @@ final class OesapModel {
       providerUsageSupported = supportsProviderUsage
       agentRequestReceiptsSupported = supportsAgentRequestReceipts
       connectionState = .connected
-      hasSavedConnection = true
       timelineGeneration += 1
       startObservingConnection(connectedService, generation: generation)
-      await reloadWorkspace(preserveSelection: true, generation: generation)
+      await reloadWorkspace(preserveSelection: preserveInitialSelection, generation: generation)
       if connectionGeneration == generation { _ = startProviderUsageRefresh() }
+      if connectionGeneration == generation { await refreshSavedInstances() }
       if connectionGeneration == generation, Task.isCancelled { await disconnect() }
     } catch {
       guard connectionGeneration == generation else { return }
       if error is CancellationError {
         connectionState = .disconnected
+        await refreshSavedInstances()
         return
       }
       service = nil
@@ -528,7 +552,125 @@ final class OesapModel {
       agentRequestReceiptsSupported = false
       connectionState = .disconnected
       connectError = error.localizedDescription
-      await refreshSavedConnectionState()
+      await refreshSavedInstances()
+      if connectionGeneration == generation { instanceError = error.localizedDescription }
+    }
+  }
+
+  @discardableResult
+  func selectSavedInstance(_ id: String) async -> Bool {
+    guard !connectionState.isBusy else { return false }
+    guard savedInstances.contains(where: { $0.id == id }) else {
+      instanceError = "This saved Paseo instance is no longer available. Refresh and try again."
+      return false
+    }
+    if activeInstanceID == id, connectionState == .connected { return true }
+
+    let previousService = service
+    let generation = invalidateConnection()
+    service = nil
+    connectedServerID = nil
+    clearWorkspaceForInstanceChange()
+    activeInstanceID = id
+    connectionState = .connecting
+    clearErrors()
+    instanceError = nil
+    await previousService?.disconnect()
+    guard connectionGeneration == generation else { return false }
+
+    do {
+      let connectedService = try await connectionFactory.selectSavedInstance(id: id)
+      guard connectionGeneration == generation else {
+        await connectedService.disconnect()
+        return false
+      }
+      if Task.isCancelled {
+        await connectedService.disconnect()
+        guard connectionGeneration == generation else { return false }
+        connectionState = .disconnected
+        await refreshSavedInstances()
+        return false
+      }
+      let serverID = await connectedService.serverID()
+      let supportsNewThreads = await connectedService.supportsNewThreads()
+      let supportsProviderUsage = await connectedService.supportsProviderUsage()
+      let supportsAgentRequestReceipts = await connectedService.supportsAgentRequestReceipts()
+      guard connectionGeneration == generation else {
+        await connectedService.disconnect()
+        return false
+      }
+      if Task.isCancelled {
+        await connectedService.disconnect()
+        guard connectionGeneration == generation else { return false }
+        connectionState = .disconnected
+        await refreshSavedInstances()
+        return false
+      }
+      service = connectedService
+      connectedServerID = serverID
+      agentControlServerID = serverID
+      canCreateThreads = supportsNewThreads
+      providerUsageSupported = supportsProviderUsage
+      agentRequestReceiptsSupported = supportsAgentRequestReceipts
+      connectionState = .connected
+      timelineGeneration += 1
+      startObservingConnection(connectedService, generation: generation)
+      await reloadWorkspace(preserveSelection: false, generation: generation)
+      if connectionGeneration == generation { _ = startProviderUsageRefresh() }
+      if connectionGeneration == generation { await refreshSavedInstances() }
+      if connectionGeneration == generation, Task.isCancelled {
+        await markConnectionLost(
+          generation: generation,
+          reason: "Switching instances was cancelled. Reconnect to continue.")
+      }
+      return connectionGeneration == generation && connectionState == .connected
+    } catch {
+      guard connectionGeneration == generation else { return false }
+      service = nil
+      connectedServerID = nil
+      canCreateThreads = false
+      providerUsageSupported = false
+      agentRequestReceiptsSupported = false
+      connectionState = .disconnected
+      connectError = error.localizedDescription
+      await refreshSavedInstances()
+      if connectionGeneration == generation { instanceError = error.localizedDescription }
+      return false
+    }
+  }
+
+  func removeSavedInstance(_ id: String) async {
+    guard !connectionState.isBusy else { return }
+    let removesActiveInstance = activeInstanceID == id
+    let generation: Int
+    let previousService: (any OesapRemoteService)?
+    if removesActiveInstance {
+      previousService = service
+      generation = invalidateConnection()
+      service = nil
+      connectedServerID = nil
+      clearWorkspaceForInstanceChange()
+      connectionState = .disconnected
+      clearErrors()
+    } else {
+      previousService = nil
+      generation = connectionGeneration
+    }
+    instanceError = nil
+    await previousService?.disconnect()
+    guard connectionGeneration == generation else { return }
+    do {
+      try await connectionFactory.removeSavedInstance(id: id)
+      guard connectionGeneration == generation else { return }
+      await refreshSavedInstances()
+    } catch {
+      guard connectionGeneration == generation else { return }
+      await refreshSavedInstances()
+      guard connectionGeneration == generation else { return }
+      instanceError = error.localizedDescription
+      if removesActiveInstance, connectionGeneration == generation {
+        connectError = error.localizedDescription
+      }
     }
   }
 
@@ -558,6 +700,7 @@ final class OesapModel {
         await connectedService.disconnect()
         guard connectionGeneration == generation else { return }
         connectionState = .disconnected
+        await refreshSavedInstances()
         return
       }
       let serverID = await connectedService.serverID()
@@ -572,6 +715,7 @@ final class OesapModel {
         await connectedService.disconnect()
         guard connectionGeneration == generation else { return }
         connectionState = .disconnected
+        await refreshSavedInstances()
         return
       }
       if priorServerID == nil || priorServerID != serverID {
@@ -591,6 +735,7 @@ final class OesapModel {
       startObservingConnection(connectedService, generation: generation)
       await reloadWorkspace(preserveSelection: true, generation: generation)
       if connectionGeneration == generation { _ = startProviderUsageRefresh() }
+      if connectionGeneration == generation { await refreshSavedInstances() }
       if connectionGeneration == generation, Task.isCancelled {
         await markConnectionLost(
           generation: generation, reason: "Reconnect was cancelled. Try again to continue.")
@@ -599,6 +744,7 @@ final class OesapModel {
       guard connectionGeneration == generation else { return }
       if error is CancellationError {
         connectionState = .disconnected
+        await refreshSavedInstances()
         return
       }
       service = nil
@@ -609,6 +755,8 @@ final class OesapModel {
       connectError = error.localizedDescription
       workspaceError =
         "Reconnect failed. Your open thread and draft stay in this app while it is open. Try again when the host is reachable."
+      await refreshSavedInstances()
+      if connectionGeneration == generation { instanceError = error.localizedDescription }
     }
   }
 
@@ -667,7 +815,8 @@ final class OesapModel {
     await previousService?.disconnect()
     guard connectionGeneration == generation else { return }
     connectError = cleanupError
-    hasSavedConnection = cleanupError != nil
+    await refreshSavedInstances()
+    if connectionGeneration == generation, let cleanupError { instanceError = cleanupError }
   }
 
   func selectProject(_ id: String) async {
@@ -1981,6 +2130,11 @@ final class OesapModel {
   @discardableResult
   private func invalidateConnection() -> Int {
     clearSessionDetails()
+    // A settings request can still be awaiting a response from the old host.
+    // Releasing its token lets the newly selected host accept settings changes;
+    // the old request's mutation-ID check discards any late response.
+    activeSessionSettingsMutation = nil
+    activeSessionSettingsMutationThreadID = nil
     connectionObservationTask?.cancel()
     connectionObservationTask = nil
     agentOverviewRefreshTask?.cancel()
@@ -2005,7 +2159,7 @@ final class OesapModel {
     guard connectionGeneration == generation else { return }
     prepareAgentActionsForConnectionChange()
     let oldService = service
-    let currentGeneration = invalidateConnection()
+    invalidateConnection()
     service = nil
     canCreateThreads = false
     agentProviders = []
@@ -2025,9 +2179,52 @@ final class OesapModel {
     answeringPermissionID = nil
     if replaceWorkspaceError { workspaceError = reason }
     await oldService?.disconnect()
-    let saved = await connectionFactory.savedConnectionExists()
-    guard connectionGeneration == currentGeneration else { return }
-    hasSavedConnection = saved
+    await refreshSavedInstances()
+  }
+
+  private func clearWorkspaceForInstanceChange(preserveSelection: Bool = false) {
+    connectedServerID = nil
+    agentControlServerID = nil
+    canCreateThreads = false
+    agentRequestReceiptsSupported = false
+    agentProviders = []
+    loadingAgentOptions = false
+    agentConfigurationError = nil
+    agentConfigurationRevision += 1
+    clearAgentControlState()
+    pendingNewThreadIntents.removeAll()
+    pendingNewThreadResults.removeAll()
+    clearAgentOverview()
+    clearProviderUsage()
+    clearCachedContextUsage()
+
+    projects = []
+    threads = []
+    messages = []
+    permissions = []
+    loadingProjects = false
+    loadingThreads = false
+    loadingHistory = false
+    loadingOlderMessages = false
+    loadingContextUsage = false
+    sendingMessage = false
+    answeringPermissionID = nil
+    historyMayBeIncomplete = false
+    timelineHasOlder = false
+    olderTimelineCursor = nil
+    latestTimelineCursor = nil
+    drafts.removeAll()
+    if !preserveSelection {
+      selectedProjectID = nil
+      selectedThreadID = nil
+      UserDefaults.standard.removeObject(forKey: Self.selectedProjectKey)
+      UserDefaults.standard.removeObject(forKey: Self.selectedThreadKey)
+    }
+    projectSelectionGeneration += 1
+    threadSelectionGeneration += 1
+    timelineGeneration += 1
+    clearErrors()
+    workspaceError = nil
   }
 
   private func clearErrors() {

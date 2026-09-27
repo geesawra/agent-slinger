@@ -6,7 +6,47 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
   private var generation = 0
 
   func savedConnectionExists() async -> Bool {
-    do { return try store.load() != nil } catch { return false }
+    do { return try !store.list().isEmpty } catch { return false }
+  }
+
+  func listSavedInstances() async throws -> [SavedPaseoInstance] {
+    try store.list().map(\.summary)
+  }
+
+  func activeInstanceID() async throws -> String? {
+    try store.activeID()
+  }
+
+  func selectSavedInstance(id: String) async throws -> any OesapRemoteService {
+    // Persist the choice before connecting. If the selected host is offline,
+    // Reconnect still knows which saved host the user chose.
+    let record = try store.list().first(where: { $0.id == id })
+    guard let record else {
+      throw RemoteServiceError.unavailable("That saved Paseo instance is no longer available.")
+    }
+    try store.select(id: id)
+
+    generation += 1
+    let attempt = generation
+    let previousService = activeService
+    activeService = nil
+    await previousService?.disconnect()
+    guard attempt == generation else { throw CancellationError() }
+
+    let service = PaseoRemoteServiceAdapter(config: record.config)
+    do {
+      try await service.connect()
+      try Task.checkCancellation()
+      guard attempt == generation else {
+        await service.disconnect()
+        throw CancellationError()
+      }
+      activeService = service
+      return service
+    } catch {
+      await service.disconnect()
+      throw error
+    }
   }
 
   func connect(_ connection: RemoteConnection) async throws -> any OesapRemoteService {
@@ -36,7 +76,7 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
         await service.disconnect()
         throw CancellationError()
       }
-      try store.save(config)
+      try store.saveAndSelect(config, name: connection.name)
       activeService = service
       return service
     } catch {
@@ -52,11 +92,11 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
     activeService = nil
     await previousService?.disconnect()
     guard attempt == generation else { throw CancellationError() }
-    guard let config = try store.load() else {
+    guard let record = try store.activeConnection() else {
       throw RemoteServiceError.unavailable(
-        "There is no saved Paseo connection. Connect to a host first.")
+        "There is no selected Paseo connection. Choose a saved host or connect to one first.")
     }
-    let service = PaseoRemoteServiceAdapter(config: config)
+    let service = PaseoRemoteServiceAdapter(config: record.config)
     do {
       try await service.connect()
       guard attempt == generation else {
@@ -71,13 +111,25 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
     }
   }
 
+  func removeSavedInstance(id: String) async throws {
+    let activeID = try store.activeID()
+    try store.remove(id: id)
+    guard activeID == id else { return }
+    generation += 1
+    let previousService = activeService
+    activeService = nil
+    await previousService?.disconnect()
+  }
+
   func disconnect() async throws {
     generation += 1
     let previousService = activeService
     activeService = nil
     let clearError: Error?
     do {
-      try store.clear()
+      if let activeID = try store.activeID() {
+        try store.remove(id: activeID)
+      }
       clearError = nil
     } catch {
       clearError = error

@@ -342,7 +342,7 @@ struct ChatComposerBar: View {
       if draft.isEmpty {
         Text("Message agent…")
           .font(.body)
-          .foregroundStyle(Color.secondary)
+          .foregroundStyle(Color.primary.opacity(0.7))
           .padding(.horizontal, 14)
           .allowsHitTesting(false)
           .accessibilityHidden(true)
@@ -566,7 +566,7 @@ private struct ExpandedComposerView: View {
 
       if draft.isEmpty {
         Text("Write a message. Markdown is supported.")
-          .foregroundStyle(Color.secondary)
+          .foregroundStyle(Color.primary.opacity(0.7))
           .padding(.leading, 14)
           .padding(.top, 10)
           .allowsHitTesting(false)

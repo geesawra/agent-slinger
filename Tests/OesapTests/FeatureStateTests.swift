@@ -202,6 +202,169 @@ final class FeatureStateTests: XCTestCase {
     await model.disconnect()
   }
 
+  func testSavedInstancesCanBeSelectedAndDisconnectRemovesOnlyTheActiveOne() async {
+    let first = FakeRemoteService(
+      projects: [.init(id: "project-a", name: "Project A", subtitle: nil)],
+      serverIDValue: "host-a")
+    let second = FakeRemoteService(
+      projects: [.init(id: "project-b", name: "Project B", subtitle: nil)],
+      serverIDValue: "host-b")
+    let instances = [
+      SavedPaseoInstance(id: "host-a", name: "Work", subtitle: "work.example"),
+      SavedPaseoInstance(id: "host-b", name: "Personal", subtitle: "personal.example"),
+    ]
+    let factory = FakeConnectionFactory(
+      connectServices: [], initiallySavedInstances: instances,
+      activeInstanceID: "host-a", instanceServices: ["host-a": first, "host-b": second])
+    let model = OesapModel(connectionFactory: factory)
+    await model.refreshSavedInstances()
+
+    XCTAssertTrue(model.hasSavedConnection)
+    XCTAssertEqual(model.savedInstances, instances)
+    let selectedFirst = await model.selectSavedInstance("host-a")
+    XCTAssertTrue(selectedFirst)
+    XCTAssertEqual(model.activeInstanceID, "host-a")
+    XCTAssertEqual(model.projects.map(\.id), ["project-a"])
+
+    let selectedSecond = await model.selectSavedInstance("host-b")
+    XCTAssertTrue(selectedSecond)
+    XCTAssertEqual(model.activeInstanceID, "host-b")
+    XCTAssertEqual(model.projects.map(\.id), ["project-b"])
+    let firstClosed = await first.isClosed()
+    XCTAssertTrue(firstClosed)
+
+    await model.disconnect()
+    XCTAssertEqual(model.savedInstances.map(\.id), ["host-a"])
+    XCTAssertTrue(model.hasSavedConnection)
+    XCTAssertNil(model.activeInstanceID)
+    let selectedAgain = await model.selectSavedInstance("host-a")
+    XCTAssertTrue(selectedAgain)
+    XCTAssertEqual(model.projects.map(\.id), ["project-a"])
+    await model.disconnect()
+  }
+
+  func testSwitchingInstancesReleasesPendingSettingsMutation() async {
+    let oldHostApplyGate = TestGate()
+    let first = FakeRemoteService(
+      serverIDValue: "host-a", initialSettings: sessionSettingsFixture(),
+      settingsApplyGate: oldHostApplyGate)
+    let second = FakeRemoteService(
+      serverIDValue: "host-b", initialSettings: sessionSettingsFixture())
+    let factory = FakeConnectionFactory(
+      connectServices: [],
+      initiallySavedInstances: [
+        SavedPaseoInstance(id: "host-a", name: "Work", subtitle: "work.example"),
+        SavedPaseoInstance(id: "host-b", name: "Personal", subtitle: "personal.example"),
+      ],
+      activeInstanceID: "host-a", instanceServices: ["host-a": first, "host-b": second])
+    let model = OesapModel(connectionFactory: factory)
+    await model.refreshSavedInstances()
+    let selectedFirst = await model.selectSavedInstance("host-a")
+    XCTAssertTrue(selectedFirst)
+    model.selectThread("thread-A")
+    await model.openSessionDetails(threadID: "thread-A")
+    model.chooseSessionModel("model-two")
+    let oldApply = Task { await model.applySessionSettings(threadID: "thread-A") }
+    await oldHostApplyGate.waitUntilEntered()
+
+    let selectedSecond = await model.selectSavedInstance("host-b")
+    XCTAssertTrue(selectedSecond)
+    model.selectThread("thread-A")
+    await model.openSessionDetails(threadID: "thread-A")
+    model.chooseSessionModel("model-two")
+    XCTAssertTrue(model.canApplySessionSettings)
+    await model.applySessionSettings(threadID: "thread-A")
+    XCTAssertEqual(model.sessionSettings?.modelID, "model-two")
+
+    await oldHostApplyGate.open()
+    await oldApply.value
+    XCTAssertEqual(model.sessionSettings?.modelID, "model-two")
+    let secondApplyCalls = await second.settingsApplyCallCount()
+    XCTAssertEqual(secondApplyCalls, 1)
+    await model.disconnect()
+  }
+
+  func testInstanceSwitchClearsHostStateAndRejectsLateWorkspaceResults() async throws {
+    let projectGate = TestGate()
+    let first = FakeRemoteService(
+      projects: [.init(id: "project-a", name: "Project A", subtitle: nil)],
+      projectGate: projectGate, projectGateAtCall: 2,
+      historyMessages: [
+        RemoteMessage(id: "old-message", author: .agent, text: "Host A", timestamp: nil)
+      ], serverIDValue: "host-a")
+    let second = FakeRemoteService(
+      projects: [.init(id: "project-b", name: "Project B", subtitle: nil)],
+      serverIDValue: "host-b")
+    let factory = FakeConnectionFactory(
+      connectServices: [],
+      initiallySavedInstances: [
+        SavedPaseoInstance(id: "host-a", name: "Work", subtitle: "work.example"),
+        SavedPaseoInstance(id: "host-b", name: "Personal", subtitle: "personal.example"),
+      ],
+      activeInstanceID: "host-a", instanceServices: ["host-a": first, "host-b": second])
+    let model = OesapModel(connectionFactory: factory)
+    await model.refreshSavedInstances()
+    let selectedFirst = await model.selectSavedInstance("host-a")
+    XCTAssertTrue(selectedFirst)
+    model.selectThread("thread-project-a")
+    model.setDraft("draft for host A", for: "thread-project-a")
+    let timeline = Task { await model.watchTimeline(threadID: "thread-project-a") }
+    let historyLoaded = await eventually { model.messages.first?.text == "Host A" }
+    XCTAssertTrue(historyLoaded)
+
+    let lateRefresh = Task { await model.refreshWorkspace() }
+    await projectGate.waitUntilEntered()
+    let selectedSecond = await model.selectSavedInstance("host-b")
+    XCTAssertTrue(selectedSecond)
+    await projectGate.open()
+    await lateRefresh.value
+    await timeline.value
+
+    XCTAssertEqual(model.activeInstanceID, "host-b")
+    XCTAssertEqual(model.projects.map(\.id), ["project-b"])
+    XCTAssertNil(model.selectedThreadID)
+    XCTAssertTrue(model.messages.isEmpty)
+    XCTAssertEqual(model.draft(for: "thread-project-a"), "")
+    let firstClosed = await first.isClosed()
+    XCTAssertTrue(firstClosed)
+
+    await model.removeSavedInstance("host-a")
+    XCTAssertEqual(model.projects.map(\.id), ["project-b"])
+    XCTAssertEqual(model.activeInstanceID, "host-b")
+    await model.disconnect()
+  }
+
+  func testFailedInstanceSwitchKeepsTargetSelectedAndClearsPreviousHost() async {
+    let first = FakeRemoteService(
+      projects: [.init(id: "project-a", name: "Project A", subtitle: nil)],
+      serverIDValue: "host-a")
+    let factory = FakeConnectionFactory(
+      connectServices: [],
+      initiallySavedInstances: [
+        SavedPaseoInstance(id: "host-a", name: "Work", subtitle: "work.example"),
+        SavedPaseoInstance(id: "host-b", name: "Personal", subtitle: "personal.example"),
+      ],
+      activeInstanceID: "host-a", instanceServices: ["host-a": first])
+    let model = OesapModel(connectionFactory: factory)
+    await model.refreshSavedInstances()
+    let selectedFirst = await model.selectSavedInstance("host-a")
+    XCTAssertTrue(selectedFirst)
+    model.setDraft("private host A draft", for: "thread-project-a")
+
+    let selectedMissingTarget = await model.selectSavedInstance("host-b")
+
+    XCTAssertFalse(selectedMissingTarget)
+    XCTAssertEqual(model.connectionState, .disconnected)
+    XCTAssertEqual(model.activeInstanceID, "host-b")
+    XCTAssertTrue(model.hasSavedConnection)
+    XCTAssertTrue(model.projects.isEmpty)
+    XCTAssertTrue(model.messages.isEmpty)
+    XCTAssertEqual(model.draft(for: "thread-project-a"), "")
+    XCTAssertNotNil(model.instanceError)
+    let firstClosed = await first.isClosed()
+    XCTAssertTrue(firstClosed)
+  }
+
   func testLateProjectRefreshCannotResurrectDisconnectedWorkspace() async throws {
     let gate = TestGate()
     let service = FakeRemoteService(projectGate: gate)
@@ -1476,20 +1639,66 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
   private var reconnectServices: [FakeRemoteService]
   private let connectGate: TestGate?
   private var active: FakeRemoteService?
-  private var saved: Bool
+  private var savedInstances: [SavedPaseoInstance]
+  private var currentInstanceID: String?
+  private var instanceServices: [String: FakeRemoteService]
   private var generation = 0
+  private var connectCount = 0
 
   init(
     connectServices: [FakeRemoteService], reconnectServices: [FakeRemoteService] = [],
-    connectGate: TestGate? = nil, initiallySaved: Bool = false
+    connectGate: TestGate? = nil, initiallySaved: Bool = false,
+    initiallySavedInstances: [SavedPaseoInstance] = [], activeInstanceID: String? = nil,
+    instanceServices: [String: FakeRemoteService] = [:]
   ) {
+    let instances =
+      initiallySaved && initiallySavedInstances.isEmpty
+      ? [SavedPaseoInstance(id: "saved-instance", name: "Saved connection", subtitle: "")]
+      : initiallySavedInstances
+    let currentID = activeInstanceID ?? instances.first?.id
+    let activeService = currentID.flatMap { instanceServices[$0] }
+
     self.connectServices = connectServices
     self.reconnectServices = reconnectServices
     self.connectGate = connectGate
-    self.saved = initiallySaved
+    self.savedInstances = instances
+    self.currentInstanceID = currentID
+    self.instanceServices = instanceServices
+    self.active = activeService
   }
 
-  func savedConnectionExists() async -> Bool { saved }
+  func savedConnectionExists() async -> Bool { !savedInstances.isEmpty }
+  func listSavedInstances() async throws -> [SavedPaseoInstance] { savedInstances }
+  func activeInstanceID() async throws -> String? { currentInstanceID }
+
+  func selectSavedInstance(id: String) async throws -> any OesapRemoteService {
+    guard savedInstances.contains(where: { $0.id == id }) else {
+      throw RemoteServiceError.unavailable("Unknown saved instance")
+    }
+    generation += 1
+    let previousID = currentInstanceID
+    let previousService = active
+    currentInstanceID = id
+    active = nil
+    if previousID != id { await previousService?.disconnect() }
+    guard let service = instanceServices[id] else {
+      throw RemoteServiceError.unavailable("The saved instance has no fixture service")
+    }
+    await service.reopen()
+    active = service
+    return service
+  }
+
+  func removeSavedInstance(id: String) async throws {
+    generation += 1
+    savedInstances.removeAll { $0.id == id }
+    instanceServices[id] = nil
+    if currentInstanceID == id {
+      await active?.disconnect()
+      active = nil
+      currentInstanceID = nil
+    }
+  }
 
   func connect(_ connection: RemoteConnection) async throws -> any OesapRemoteService {
     generation += 1
@@ -1500,8 +1709,16 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
       await service.disconnect()
       throw CancellationError()
     }
+    connectCount += 1
+    let id = "connected-instance-\(connectCount)"
+    savedInstances.append(
+      SavedPaseoInstance(
+        id: id,
+        name: connection.name.isEmpty ? "Paseo" : connection.name,
+        subtitle: connection.endpoint))
+    currentInstanceID = id
     active = service
-    saved = true
+    instanceServices[id] = service
     return service
   }
 
@@ -1510,14 +1727,19 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
     let service = reconnectServices.removeFirst()
     await active?.disconnect()
     active = service
+    if let currentInstanceID { instanceServices[currentInstanceID] = service }
     return service
   }
 
   func disconnect() async throws {
     generation += 1
     await active?.disconnect()
+    if let currentInstanceID {
+      savedInstances.removeAll { $0.id == currentInstanceID }
+      instanceServices[currentInstanceID] = nil
+    }
     active = nil
-    saved = false
+    currentInstanceID = nil
   }
 }
 
@@ -1904,6 +2126,7 @@ private actor FakeRemoteService: OesapRemoteService {
   }
 
   func subscriptionCount() -> Int { timelineContinuations.count }
+  func reopen() { closed = false }
   func isClosed() -> Bool { closed }
   func emit(_ update: RemoteTimelineUpdate) {
     for continuation in timelineContinuations.values { continuation.yield(update) }
