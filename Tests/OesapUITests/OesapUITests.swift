@@ -205,6 +205,14 @@ final class OesapUITests: XCTestCase {
     attachScreenshot(named: "Chat context usage")
     contextButton.tap()
 
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    let settingsList = app.collectionViews.firstMatch
+    XCTAssertTrue(settingsList.waitForExistence(timeout: 5))
+    let contextGauge = app.descendants(matching: .any)["session-context-gauge"]
+    XCTAssertTrue(scrollElementIntoView(contextGauge, in: settingsList))
+    let usageLink = app.descendants(matching: .any)["session-usage-details-link"]
+    XCTAssertTrue(scrollElementIntoView(usageLink, in: settingsList))
+    usageLink.tap()
     XCTAssertTrue(app.navigationBars["Usage details"].waitForExistence(timeout: 5))
     XCTAssertTrue(staticText(containing: "Last reported context", in: app).exists)
     let usageList = app.collectionViews.firstMatch
@@ -234,7 +242,9 @@ final class OesapUITests: XCTestCase {
     let creditBalance = staticText(containing: "12.50", in: app)
     XCTAssertTrue(scrollElementIntoView(creditBalance, in: usageList))
     attachScreenshot(named: "Selected provider credit balance")
-    app.buttons["usage-details-done"].tap()
+    app.navigationBars["Usage details"].buttons.firstMatch.tap()
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    app.buttons["agent-settings-done"].tap()
 
     app.navigationBars.buttons.firstMatch.tap()
     XCTAssertTrue(app.navigationBars["Oesap demo"].waitForExistence(timeout: 5))
@@ -259,6 +269,83 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(scrollElementIntoView(cursor, in: hostUsageList))
     XCTAssertTrue(staticText(containing: "Usage provider temporarily unavailable.", in: app).exists)
     attachScreenshot(named: "Host provider unavailable and error statuses")
+  }
+
+  func testAgentSettingsApplyModelEffortAndPermissionsThroughContextButton() {
+    continueAfterFailure = false
+    let app = launchDemo()
+    connect(app)
+    app.buttons["project-demo-project"].tap()
+    app.buttons["thread-demo-agent-running"].tap()
+
+    let context = app.buttons["context-usage-button"]
+    XCTAssertTrue(context.waitForExistence(timeout: 5))
+    assertMinimumTapTarget(context, named: "Context and settings")
+    context.tap()
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+
+    let modelPicker = app.descendants(matching: .any)["session-model-picker"]
+    let effortPicker = app.descendants(matching: .any)["session-effort-picker"]
+    let permissionsPicker = app.descendants(matching: .any)["session-permissions-picker"]
+    let apply = app.buttons["apply-session-settings"]
+    XCTAssertTrue(modelPicker.waitForExistence(timeout: 5))
+    XCTAssertTrue(effortPicker.waitForExistence(timeout: 5))
+    XCTAssertFalse(apply.isEnabled)
+
+    modelPicker.tap()
+    let astra = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "GPT-6 Astra")
+    ).firstMatch
+    XCTAssertTrue(astra.waitForExistence(timeout: 5))
+    astra.tap()
+    XCTAssertTrue(apply.isEnabled)
+    XCTAssertTrue(scrollUntilHittable(effortPicker, in: app))
+    effortPicker.tap()
+    let maximum = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "Max")
+    ).firstMatch
+    XCTAssertTrue(maximum.waitForExistence(timeout: 5))
+    maximum.tap()
+    XCTAssertTrue(scrollUntilHittable(permissionsPicker, in: app))
+    permissionsPicker.tap()
+    let fullAccess = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "Full Access")
+    ).firstMatch
+    XCTAssertTrue(fullAccess.waitForExistence(timeout: 5))
+    fullAccess.tap()
+    XCTAssertTrue(scrollUntilHittable(apply, in: app))
+    apply.tap()
+    XCTAssertTrue(
+      app.staticTexts["session-settings-notice"].waitForExistence(timeout: 5))
+    attachScreenshot(named: "Agent model and effort applied")
+
+    app.buttons["agent-settings-done"].tap()
+    context.tap()
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    let reopenedModel = app.descendants(matching: .any)["session-model-picker"]
+    let reopenedEffort = app.descendants(matching: .any)["session-effort-picker"]
+    let reopenedPermissions = app.descendants(matching: .any)["session-permissions-picker"]
+    XCTAssertTrue(reopenedModel.waitForExistence(timeout: 5))
+    XCTAssertTrue(reopenedModel.label.contains("GPT-6 Astra"))
+    XCTAssertTrue(reopenedEffort.label.contains("Max"))
+    XCTAssertTrue(reopenedPermissions.label.contains("Full Access"))
+    XCTAssertFalse(app.buttons["apply-session-settings"].isEnabled)
+
+    XCTAssertTrue(scrollUntilHittable(reopenedEffort, in: app))
+    reopenedEffort.tap()
+    let high = app.buttons["High"]
+    XCTAssertTrue(high.waitForExistence(timeout: 5))
+    high.tap()
+    app.buttons["apply-session-settings"].tap()
+    XCTAssertTrue(app.staticTexts["session-settings-notice"].waitForExistence(timeout: 5))
+    app.buttons["agent-settings-done"].tap()
+    context.tap()
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      app.descendants(matching: .any)["session-model-picker"].label.contains("GPT-6 Astra"))
+    XCTAssertTrue(app.descendants(matching: .any)["session-effort-picker"].label.contains("High"))
+    XCTAssertTrue(
+      app.descendants(matching: .any)["session-permissions-picker"].label.contains("Full Access"))
   }
 
   func testProviderUsageUnsupportedUnavailableAndErrorStates() {
@@ -315,9 +402,9 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(running.isHittable)
     attachScreenshot(named: "Chat at accessibility text size")
     contextButton.tap()
-    XCTAssertTrue(app.navigationBars["Usage details"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.buttons["usage-details-done"].isHittable)
-    attachScreenshot(named: "Usage details at accessibility text size")
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["agent-settings-done"].isHittable)
+    attachScreenshot(named: "Agent settings at accessibility text size")
     let accessibilityUsageList = app.collectionViews.firstMatch
     XCTAssertTrue(accessibilityUsageList.waitForExistence(timeout: 5))
     let accessibilityUsed = staticText(containing: "64,000 tokens", in: app)

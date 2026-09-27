@@ -183,10 +183,71 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       RemoteAgentProvider(
         id: provider.id, available: provider.available, error: provider.error,
         label: provider.label,
-        models: provider.models.map {
-          RemoteAgentModel(id: $0.id, label: $0.label, isDefault: $0.isDefault)
-        })
+        models: provider.models.map(Self.mapAgentModel))
     }
+  }
+
+  func agentSettings(agentID: String) async throws -> RemoteAgentSettings {
+    let agent = try await client.agentSettings(agentID: agentID)
+    let providers: [PaseoProvider]
+    do {
+      providers = try await client.listProviders(cwd: agent.cwd)
+    } catch PaseoProtocolError.unsupportedCapability {
+      // Older hosts still expose the authoritative agent snapshot for read-only details.
+      providers = []
+    }
+    let selectedProvider = providers.first(where: { $0.id == agent.provider })
+    let models = selectedProvider?.models.map(Self.mapAgentModel) ?? []
+    let canApply =
+      connectedInfo?.features["agentConfigApply"] == true
+      && selectedProvider?.available == true
+      && (!models.isEmpty || !agent.availableModes.isEmpty)
+    return RemoteAgentSettings(
+      agentID: agent.agentID, provider: agent.provider, cwd: agent.cwd,
+      modelID: agent.modelID, thinkingOptionID: agent.thinkingOptionID,
+      effectiveThinkingOptionID: agent.effectiveThinkingOptionID,
+      currentModeID: agent.currentModeID,
+      availableModes: agent.availableModes.map {
+        RemoteAgentMode(id: $0.id, label: $0.label, description: $0.description)
+      }, models: models,
+      canApply: canApply,
+      supportsThinking: canApply && connectedInfo?.features["agentThinkingUpdate"] == true
+        && models.contains(where: { !$0.thinkingOptions.isEmpty }),
+      status: agent.status)
+  }
+
+  func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?, modeID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult {
+    let result = try await client.applyAgentSettings(
+      agentID: agentID, modelID: modelID, thinkingOptionID: thinkingOptionID, modeID: modeID)
+    return RemoteAgentSettingsApplyResult(notice: result.notice)
+  }
+
+  func applyAgentMode(agentID: String, modeID: String) async throws
+    -> RemoteAgentSettingsApplyResult
+  {
+    let result = try await client.applyAgentMode(agentID: agentID, modeID: modeID)
+    return RemoteAgentSettingsApplyResult(notice: result.notice)
+  }
+
+  func applyAgentThinking(
+    agentID: String, thinkingOptionID: String?, modeID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult {
+    let result = try await client.applyAgentThinking(
+      agentID: agentID, thinkingOptionID: thinkingOptionID, modeID: modeID)
+    return RemoteAgentSettingsApplyResult(notice: result.notice)
+  }
+
+  private static func mapAgentModel(_ model: PaseoProviderModel) -> RemoteAgentModel {
+    RemoteAgentModel(
+      id: model.id, label: model.label, isDefault: model.isDefault,
+      thinkingOptions: model.thinkingOptions.map {
+        RemoteThinkingOption(
+          id: $0.id, label: $0.label, description: $0.description,
+          isDefault: $0.isDefault)
+      },
+      defaultThinkingOptionID: model.defaultThinkingOptionID)
   }
 
   func createThread(_ intent: RemoteNewThreadIntent) async throws -> RemoteNewThreadResult {

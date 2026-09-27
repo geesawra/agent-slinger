@@ -117,7 +117,7 @@ private struct UsageValueRow: View {
   }
 }
 
-private struct UsageListContent: View {
+struct UsageListContent: View {
   @Bindable var model: OesapModel
   let contextThreadID: String?
 

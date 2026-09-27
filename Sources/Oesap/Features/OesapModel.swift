@@ -47,6 +47,14 @@ final class OesapModel {
   private(set) var providerUsageSupported = false
   private(set) var loadingContextUsage = false
   private(set) var contextUsageError: String?
+  private(set) var sessionSettings: RemoteAgentSettings?
+  private(set) var sessionDetailsLoading = false
+  private(set) var sessionDetailsApplying = false
+  private(set) var sessionDetailsError: String?
+  private(set) var sessionDetailsNotice: String?
+  private(set) var sessionDraftModelID: String?
+  private(set) var sessionDraftThinkingOptionID: String?
+  private(set) var sessionDraftModeID: String?
   private(set) var answeringPermissionID: String?
   private(set) var timelineGeneration = 0
   private(set) var connectError: String?
@@ -99,6 +107,11 @@ final class OesapModel {
   @ObservationIgnored private var contextUsageRefreshTask: Task<Void, Never>?
   @ObservationIgnored private var contextUsageRequestGeneration = 0
   @ObservationIgnored private var contextUsageRevision = 0
+  @ObservationIgnored private var sessionDetailsThreadID: String?
+  @ObservationIgnored private var sessionDetailsGeneration = 0
+  @ObservationIgnored private var sessionDetailsRequestGeneration = 0
+  private var activeSessionSettingsMutation: UUID?
+  private var activeSessionSettingsMutationThreadID: String?
 
   private struct AgentOverviewLoadResult: Sendable {
     let index: Int
@@ -130,6 +143,258 @@ final class OesapModel {
 
   func providerUsage(for providerID: String) -> RemoteProviderUsage? {
     providerUsageProviders.first(where: { $0.id == providerID })
+  }
+
+  var sessionSettingsHaveChanges: Bool {
+    guard let settings = sessionSettings else { return false }
+    return sessionDraftModelID != settings.modelID
+      || (settings.supportsThinking
+        && sessionDraftThinkingOptionID != settings.thinkingOptionID)
+      || sessionDraftModeID != settings.currentModeID
+  }
+
+  var canApplySessionSettings: Bool {
+    guard activeSessionSettingsMutation == nil, connectionState == .connected,
+      !sessionDetailsLoading, !sessionDetailsApplying,
+      let settings = sessionSettings, settings.canApply,
+      !settings.models.isEmpty || !settings.availableModes.isEmpty,
+      sessionSettingsHaveChanges,
+      sessionDetailsThreadID == selectedThreadID
+    else { return false }
+    let modelID = sessionDraftModelID
+    if modelID != settings.modelID,
+      let modelID,
+      !settings.models.contains(where: { $0.id == modelID })
+    {
+      return false
+    }
+    if settings.supportsThinking,
+      sessionDraftThinkingOptionID != settings.thinkingOptionID,
+      let optionID = sessionDraftThinkingOptionID
+    {
+      guard
+        sessionModel(for: modelID, in: settings)?.thinkingOptions.contains(where: {
+          $0.id == optionID
+        }) == true
+      else { return false }
+    }
+    if sessionDraftModeID != settings.currentModeID {
+      guard let modeID = sessionDraftModeID,
+        settings.availableModes.contains(where: { $0.id == modeID })
+      else { return false }
+    }
+    return true
+  }
+
+  var sessionSettingsMutationPendingElsewhere: Bool {
+    activeSessionSettingsMutation != nil
+      && activeSessionSettingsMutationThreadID != sessionDetailsThreadID
+  }
+
+  func openSessionDetails(threadID: String) async {
+    clearSessionDetails()
+    sessionDetailsThreadID = threadID
+    await refreshSessionDetails(threadID: threadID, preserveDraft: false)
+    if sessionDetailsThreadID == threadID {
+      await refreshContextUsage(threadID: threadID)
+    }
+  }
+
+  func refreshSessionDetails(threadID: String) async {
+    await refreshSessionDetails(threadID: threadID, preserveDraft: true)
+  }
+
+  func chooseSessionModel(_ modelID: String?) {
+    guard let settings = sessionSettings, settings.canApply,
+      sessionDetailsThreadID == selectedThreadID, !sessionDetailsApplying
+    else { return }
+    guard modelID == nil || settings.models.contains(where: { $0.id == modelID }) else { return }
+    guard sessionDraftModelID != modelID else { return }
+    sessionDraftModelID = modelID
+    guard settings.supportsThinking else { return }
+    sessionDraftThinkingOptionID = nil
+  }
+
+  func chooseSessionThinkingOption(_ optionID: String?) {
+    guard let settings = sessionSettings, settings.canApply, settings.supportsThinking,
+      sessionDetailsThreadID == selectedThreadID, !sessionDetailsApplying,
+      let model = sessionModel(for: sessionDraftModelID, in: settings)
+    else { return }
+    guard optionID == nil || model.thinkingOptions.contains(where: { $0.id == optionID }) else {
+      return
+    }
+    sessionDraftThinkingOptionID = optionID
+  }
+
+  func chooseSessionMode(_ modeID: String?) {
+    guard let settings = sessionSettings, settings.canApply,
+      sessionDetailsThreadID == selectedThreadID, !sessionDetailsApplying
+    else { return }
+    guard
+      modeID == settings.currentModeID
+        || settings.availableModes.contains(where: { $0.id == modeID })
+    else { return }
+    sessionDraftModeID = modeID
+  }
+
+  func applySessionSettings(threadID: String) async {
+    guard activeSessionSettingsMutation == nil, connectionState == .connected,
+      sessionDetailsThreadID == threadID, selectedThreadID == threadID,
+      let settings = sessionSettings, canApplySessionSettings,
+      let remote = service
+    else { return }
+    let modelID = sessionDraftModelID
+    let thinkingOptionID = settings.supportsThinking ? sessionDraftThinkingOptionID : nil
+    let modeChanged = sessionDraftModeID != settings.currentModeID
+    let modelChanged = modelID != settings.modelID
+    let effortChanged =
+      settings.supportsThinking
+      && thinkingOptionID != settings.thinkingOptionID
+    let modeID = modeChanged ? sessionDraftModeID : nil
+    let generation = connectionGeneration
+    let selectionGeneration = threadSelectionGeneration
+    let detailsGeneration = sessionDetailsGeneration
+    let serverID = connectedServerID
+    let mutationID = UUID()
+    activeSessionSettingsMutation = mutationID
+    activeSessionSettingsMutationThreadID = threadID
+    sessionDetailsRequestGeneration += 1
+    sessionDetailsApplying = true
+    sessionDetailsError = nil
+    sessionDetailsNotice = nil
+    var applyNotice: String?
+    var applyError: String?
+    do {
+      if modelChanged {
+        applyNotice = try await remote.applyAgentSettings(
+          agentID: threadID, modelID: modelID, thinkingOptionID: thinkingOptionID,
+          modeID: modeID
+        ).notice
+      } else if effortChanged {
+        applyNotice = try await remote.applyAgentThinking(
+          agentID: threadID, thinkingOptionID: thinkingOptionID, modeID: modeID
+        ).notice
+      } else if let modeID {
+        applyNotice = try await remote.applyAgentMode(
+          agentID: threadID, modeID: modeID
+        ).notice
+      }
+    } catch {
+      applyError = error.localizedDescription
+    }
+    // The host may apply the model before rejecting the effort. Always read back.
+    var refreshed: RemoteAgentSettings?
+    var refreshError: String?
+    do {
+      refreshed = try await remote.agentSettings(agentID: threadID)
+    } catch {
+      refreshError = error.localizedDescription
+    }
+    guard activeSessionSettingsMutation == mutationID else { return }
+    activeSessionSettingsMutation = nil
+    activeSessionSettingsMutationThreadID = nil
+    sessionDetailsApplying = false
+    guard connectionGeneration == generation,
+      threadSelectionGeneration == selectionGeneration,
+      sessionDetailsGeneration == detailsGeneration,
+      selectedThreadID == threadID, sessionDetailsThreadID == threadID,
+      connectedServerID == serverID
+    else { return }
+    if let refreshed {
+      installSessionSettings(refreshed, threadID: threadID)
+      if applyError == nil {
+        sessionDraftModelID = refreshed.modelID
+        sessionDraftThinkingOptionID = refreshed.thinkingOptionID
+        sessionDraftModeID = refreshed.currentModeID
+      }
+    }
+    if let applyError, let refreshError {
+      sessionDetailsError =
+        "The host could not apply these settings: \(applyError). Current settings could not be loaded: \(refreshError)"
+    } else if let applyError {
+      sessionDetailsError = "The host could not apply these settings: \(applyError)"
+    } else if let refreshError {
+      sessionDetailsError =
+        "The change may have applied, but current settings could not be loaded: \(refreshError)"
+    } else {
+      sessionDetailsNotice = applyNotice ?? "Current settings loaded from the host."
+    }
+  }
+
+  private func refreshSessionDetails(threadID: String, preserveDraft: Bool) async {
+    guard !sessionDetailsApplying else { return }
+    guard connectionState == .connected, selectedThreadID == threadID,
+      sessionDetailsThreadID == threadID, let remote = service
+    else {
+      if sessionDetailsThreadID == threadID {
+        sessionDetailsError = "Reconnect to load session settings."
+      }
+      return
+    }
+    let generation = connectionGeneration
+    let selectionGeneration = threadSelectionGeneration
+    let detailsGeneration = sessionDetailsGeneration
+    let serverID = connectedServerID
+    sessionDetailsRequestGeneration += 1
+    let requestGeneration = sessionDetailsRequestGeneration
+    sessionDetailsLoading = true
+    sessionDetailsError = nil
+    do {
+      let fetched = try await remote.agentSettings(agentID: threadID)
+      guard connectionGeneration == generation,
+        threadSelectionGeneration == selectionGeneration,
+        sessionDetailsGeneration == detailsGeneration,
+        sessionDetailsRequestGeneration == requestGeneration,
+        selectedThreadID == threadID, sessionDetailsThreadID == threadID,
+        connectedServerID == serverID
+      else { return }
+      let hadDraft = preserveDraft && sessionSettingsHaveChanges
+      installSessionSettings(fetched, threadID: threadID)
+      if !hadDraft {
+        sessionDraftModelID = fetched.modelID
+        sessionDraftThinkingOptionID = fetched.thinkingOptionID
+        sessionDraftModeID = fetched.currentModeID
+      }
+      sessionDetailsLoading = false
+    } catch {
+      guard connectionGeneration == generation,
+        threadSelectionGeneration == selectionGeneration,
+        sessionDetailsGeneration == detailsGeneration,
+        sessionDetailsRequestGeneration == requestGeneration,
+        selectedThreadID == threadID, sessionDetailsThreadID == threadID,
+        connectedServerID == serverID
+      else { return }
+      sessionDetailsLoading = false
+      sessionDetailsError = error.localizedDescription
+    }
+  }
+
+  private func clearSessionDetails() {
+    sessionDetailsGeneration += 1
+    sessionDetailsRequestGeneration += 1
+    sessionDetailsThreadID = nil
+    sessionSettings = nil
+    sessionDetailsLoading = false
+    sessionDetailsApplying = false
+    sessionDetailsError = nil
+    sessionDetailsNotice = nil
+    sessionDraftModelID = nil
+    sessionDraftThinkingOptionID = nil
+    sessionDraftModeID = nil
+  }
+
+  private func sessionModel(
+    for modelID: String?, in settings: RemoteAgentSettings
+  ) -> RemoteAgentModel? {
+    if let modelID { return settings.models.first { $0.id == modelID } }
+    return settings.models.first(where: \.isDefault)
+  }
+
+  private func installSessionSettings(_ settings: RemoteAgentSettings, threadID: String) {
+    sessionSettings = settings
+    if let index = threads.firstIndex(where: { $0.id == threadID }) {
+      threads[index].model = settings.modelID
+    }
   }
 
   func refreshProviderUsage() async {
@@ -408,6 +673,7 @@ final class OesapModel {
   func selectProject(_ id: String) async {
     projectSelectionGeneration += 1
     threadSelectionGeneration += 1
+    clearSessionDetails()
     selectedProjectID = id
     agentProviders = []
     loadingAgentOptions = false
@@ -427,6 +693,7 @@ final class OesapModel {
   }
 
   func selectThread(_ id: String) {
+    clearSessionDetails()
     contextUsageRefreshTask?.cancel()
     contextUsageRefreshTask = nil
     contextUsageRequestGeneration += 1
@@ -1713,6 +1980,7 @@ final class OesapModel {
 
   @discardableResult
   private func invalidateConnection() -> Int {
+    clearSessionDetails()
     connectionObservationTask?.cancel()
     connectionObservationTask = nil
     agentOverviewRefreshTask?.cancel()

@@ -39,6 +39,40 @@ struct RemoteAgentModel: Identifiable, Sendable, Equatable {
   var id: String
   var label: String
   var isDefault: Bool
+  var thinkingOptions: [RemoteThinkingOption] = []
+  var defaultThinkingOptionID: String? = nil
+}
+
+struct RemoteThinkingOption: Identifiable, Sendable, Equatable {
+  var id: String
+  var label: String
+  var description: String?
+  var isDefault: Bool
+}
+
+struct RemoteAgentMode: Identifiable, Sendable, Equatable {
+  var id: String
+  var label: String
+  var description: String?
+}
+
+struct RemoteAgentSettings: Sendable, Equatable {
+  var agentID: String
+  var provider: String
+  var cwd: String
+  var modelID: String?
+  var thinkingOptionID: String?
+  var effectiveThinkingOptionID: String?
+  var currentModeID: String? = nil
+  var availableModes: [RemoteAgentMode] = []
+  var models: [RemoteAgentModel]
+  var canApply: Bool
+  var supportsThinking: Bool
+  var status: String
+}
+
+struct RemoteAgentSettingsApplyResult: Sendable, Equatable {
+  var notice: String?
 }
 
 struct RemoteAgentProvider: Identifiable, Sendable, Equatable {
@@ -342,6 +376,15 @@ protocol OesapRemoteService: Sendable {
   func providerUsage() async throws -> RemoteProviderUsageSnapshot
   func contextUsage(agentID: String) async throws -> RemoteContextUsage?
   func agentProviders(cwd: String) async throws -> [RemoteAgentProvider]
+  func agentSettings(agentID: String) async throws -> RemoteAgentSettings
+  func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?, modeID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult
+  func applyAgentMode(agentID: String, modeID: String) async throws
+    -> RemoteAgentSettingsApplyResult
+  func applyAgentThinking(
+    agentID: String, thinkingOptionID: String?, modeID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult
   func createThread(_ intent: RemoteNewThreadIntent) async throws -> RemoteNewThreadResult
   func connectionEvents() async -> AsyncStream<RemoteConnectionEvent>
   func projects() async throws -> [RemoteProject]
@@ -373,6 +416,30 @@ extension OesapRemoteService {
   }
   func contextUsage(agentID: String) async throws -> RemoteContextUsage? { nil }
   func agentProviders(cwd: String) async throws -> [RemoteAgentProvider] { [] }
+  func agentSettings(agentID: String) async throws -> RemoteAgentSettings {
+    throw RemoteServiceError.unavailable("This host does not support agent settings.")
+  }
+  func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?, modeID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult {
+    throw RemoteServiceError.unavailable("This host does not support agent settings updates.")
+  }
+  func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult {
+    try await applyAgentSettings(
+      agentID: agentID, modelID: modelID, thinkingOptionID: thinkingOptionID, modeID: nil)
+  }
+  func applyAgentMode(agentID: String, modeID: String) async throws
+    -> RemoteAgentSettingsApplyResult
+  {
+    throw RemoteServiceError.unavailable("This host does not support agent mode updates.")
+  }
+  func applyAgentThinking(
+    agentID: String, thinkingOptionID: String?, modeID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult {
+    throw RemoteServiceError.unavailable("This host does not support agent effort updates.")
+  }
   func createThread(_ intent: RemoteNewThreadIntent) async throws -> RemoteNewThreadResult {
     throw RemoteServiceError.unavailable("This host does not support new thread creation.")
   }
@@ -498,6 +565,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
     private var creations: [String: RemoteNewThreadResult] = [:]
     private var resolvedPermissions: Set<String> = []
     private var stoppedAgents: Set<String> = []
+    private var agentSettingsByID: [String: RemoteAgentSettings] = [:]
     private var closed = false
 
     init(
@@ -607,10 +675,139 @@ enum RemoteServiceError: LocalizedError, Sendable {
         RemoteAgentProvider(
           id: "codex", available: true, error: nil, label: "Codex",
           models: [
-            RemoteAgentModel(id: "gpt-6-sol", label: "GPT-6 Sol", isDefault: true),
-            RemoteAgentModel(id: "gpt-6-astra", label: "GPT-6 Astra", isDefault: false),
+            RemoteAgentModel(
+              id: "gpt-6-sol", label: "GPT-6 Sol", isDefault: true,
+              thinkingOptions: [
+                RemoteThinkingOption(
+                  id: "medium", label: "Medium", description: nil, isDefault: true),
+                RemoteThinkingOption(id: "high", label: "High", description: nil, isDefault: false),
+                RemoteThinkingOption(
+                  id: "xhigh", label: "Extra high", description: nil, isDefault: false),
+              ], defaultThinkingOptionID: "medium"),
+            RemoteAgentModel(
+              id: "gpt-6-astra", label: "GPT-6 Astra", isDefault: false,
+              thinkingOptions: [
+                RemoteThinkingOption(id: "high", label: "High", description: nil, isDefault: true),
+                RemoteThinkingOption(
+                  id: "xhigh", label: "Extra high", description: nil, isDefault: false),
+                RemoteThinkingOption(id: "max", label: "Max", description: nil, isDefault: false),
+              ], defaultThinkingOptionID: "high"),
           ])
       ]
+    }
+
+    func agentSettings(agentID: String) async throws -> RemoteAgentSettings {
+      try ensureConnected()
+      if let stored = agentSettingsByID[agentID] { return stored }
+      let projectThreads = try await threads(projectID: "demo-project")
+      let toolsThreads = try await threads(projectID: "demo-tools-project")
+      let allThreads = projectThreads + toolsThreads
+      guard let thread = allThreads.first(where: { $0.id == agentID }),
+        let provider = thread.provider
+      else {
+        throw RemoteServiceError.unavailable("The demo agent is no longer available.")
+      }
+      let providers = try await agentProviders(cwd: thread.cwd ?? "/demo/oesap")
+      let models = providers.first(where: { $0.id == provider })?.models ?? []
+      let selected =
+        models.first(where: { $0.id == thread.model })
+        ?? models.first(where: \.isDefault)
+      let modes =
+        provider == "codex"
+        ? [
+          RemoteAgentMode(
+            id: "auto", label: "Default Permissions",
+            description: "Edit files and run commands with the default approval flow."),
+          RemoteAgentMode(
+            id: "auto-review", label: "Auto-review",
+            description: "Review eligible permission requests automatically."),
+          RemoteAgentMode(
+            id: "full-access", label: "Full Access",
+            description: "Edit files, run commands, and access the network without prompts."),
+        ] : []
+      let settings = RemoteAgentSettings(
+        agentID: agentID, provider: provider, cwd: thread.cwd ?? "/demo/oesap",
+        modelID: thread.model, thinkingOptionID: nil,
+        effectiveThinkingOptionID: selected?.defaultThinkingOptionID,
+        currentModeID: modes.isEmpty ? nil : "auto", availableModes: modes,
+        models: models, canApply: !models.isEmpty || !modes.isEmpty,
+        supportsThinking: models.contains(where: { !$0.thinkingOptions.isEmpty }),
+        status: thread.state.label)
+      agentSettingsByID[agentID] = settings
+      return settings
+    }
+
+    func applyAgentSettings(
+      agentID: String, modelID: String?, thinkingOptionID: String?, modeID: String?
+    ) async throws -> RemoteAgentSettingsApplyResult {
+      var settings = try await agentSettings(agentID: agentID)
+      guard settings.canApply else {
+        throw RemoteServiceError.unavailable("The demo agent cannot change settings.")
+      }
+      let model =
+        modelID.flatMap { id in settings.models.first(where: { $0.id == id }) }
+        ?? settings.models.first(where: \.isDefault)
+      guard let model, modelID == nil || model.id == modelID else {
+        throw RemoteServiceError.unavailable("The selected model is unavailable.")
+      }
+      if let thinkingOptionID,
+        !model.thinkingOptions.contains(where: { $0.id == thinkingOptionID })
+      {
+        throw RemoteServiceError.unavailable("The selected reasoning level is unavailable.")
+      }
+      if let modeID, !settings.availableModes.contains(where: { $0.id == modeID }) {
+        throw RemoteServiceError.unavailable("The selected permission mode is unavailable.")
+      }
+      settings.modelID = modelID
+      settings.thinkingOptionID = thinkingOptionID
+      settings.effectiveThinkingOptionID = thinkingOptionID ?? model.defaultThinkingOptionID
+      if let modeID { settings.currentModeID = modeID }
+      agentSettingsByID[agentID] = settings
+      return RemoteAgentSettingsApplyResult(
+        notice: settings.status == "Running" ? "Settings apply next turn" : nil)
+    }
+
+    func applyAgentMode(agentID: String, modeID: String) async throws
+      -> RemoteAgentSettingsApplyResult
+    {
+      var settings = try await agentSettings(agentID: agentID)
+      guard settings.canApply,
+        settings.availableModes.contains(where: { $0.id == modeID })
+      else {
+        throw RemoteServiceError.unavailable("The selected permission mode is unavailable.")
+      }
+      settings.currentModeID = modeID
+      agentSettingsByID[agentID] = settings
+      return RemoteAgentSettingsApplyResult(
+        notice: settings.status == "Running" ? "Permission mode applies next turn" : nil)
+    }
+
+    func applyAgentThinking(
+      agentID: String, thinkingOptionID: String?, modeID: String?
+    ) async throws -> RemoteAgentSettingsApplyResult {
+      var settings = try await agentSettings(agentID: agentID)
+      guard settings.canApply, settings.supportsThinking else {
+        throw RemoteServiceError.unavailable("The demo agent cannot change effort.")
+      }
+      let model =
+        settings.modelID.flatMap { id in
+          settings.models.first(where: { $0.id == id })
+        } ?? settings.models.first(where: \.isDefault)
+      guard let model,
+        thinkingOptionID == nil
+          || model.thinkingOptions.contains(where: { $0.id == thinkingOptionID })
+      else {
+        throw RemoteServiceError.unavailable("The selected reasoning level is unavailable.")
+      }
+      if let modeID, !settings.availableModes.contains(where: { $0.id == modeID }) {
+        throw RemoteServiceError.unavailable("The selected permission mode is unavailable.")
+      }
+      settings.thinkingOptionID = thinkingOptionID
+      settings.effectiveThinkingOptionID = thinkingOptionID ?? model.defaultThinkingOptionID
+      if let modeID { settings.currentModeID = modeID }
+      agentSettingsByID[agentID] = settings
+      return RemoteAgentSettingsApplyResult(
+        notice: settings.status == "Running" ? "Settings apply next turn" : nil)
     }
 
     func createThread(_ intent: RemoteNewThreadIntent) async throws -> RemoteNewThreadResult {

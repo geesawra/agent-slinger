@@ -213,9 +213,14 @@ public actor PaseoProtocolClient: PaseoService {
       responseType: "get_providers_snapshot_response",
       operation: "provider discovery"
     )
-    guard let entries = payload["entries"]?.arrayValue else {
+    guard let fullEntries = payload["entries"]?.arrayValue else {
       throw PaseoProtocolError.malformedMessage("provider snapshot omitted its entries")
     }
+    let compactSnapshot = payload["compactSnapshot"]
+    let entries =
+      fullEntries.isEmpty
+      ? (compactSnapshot?["entries"]?.arrayValue ?? fullEntries) : fullEntries
+    let thinkingSets = compactSnapshot?["thinkingSets"]?.arrayValue ?? []
     return try entries.map { entry in
       guard let id = entry["provider"]?.stringValue, !id.isEmpty,
         let status = entry["status"]?.stringValue
@@ -229,14 +234,145 @@ public actor PaseoProtocolClient: PaseoService {
         guard let modelID = model["id"]?.stringValue,
           let label = model["label"]?.stringValue
         else { throw PaseoProtocolError.malformedMessage("provider model omitted id or label") }
+        let thinkingSet: PaseoJSONValue?
+        if let index = model["thinkingSet"]?.intValue {
+          guard thinkingSets.indices.contains(index) else {
+            throw PaseoProtocolError.malformedMessage(
+              "provider model referenced an invalid thinking set")
+          }
+          thinkingSet = thinkingSets[index]
+        } else {
+          thinkingSet = nil
+        }
+        let thinkingRows = try optionalArray(
+          model["thinkingOptions"] ?? thinkingSet?["options"], field: "model thinking options")
+        let thinkingOptions = try thinkingRows.map { option in
+          guard let optionID = option["id"]?.stringValue, !optionID.isEmpty,
+            let optionLabel = option["label"]?.stringValue
+          else {
+            throw PaseoProtocolError.malformedMessage("thinking option omitted id or label")
+          }
+          return PaseoThinkingOption(
+            id: optionID, label: optionLabel, description: option["description"]?.stringValue,
+            isDefault: option["isDefault"]?.boolValue == true)
+        }
+        let defaultThinkingOptionID =
+          model["defaultThinkingOptionId"]?.stringValue
+          ?? thinkingSet?["defaultOptionId"]?.stringValue
+          ?? thinkingOptions.first(where: \.isDefault)?.id
         return PaseoProviderModel(
-          id: modelID, label: label, isDefault: model["isDefault"]?.boolValue == true)
+          id: modelID, label: label, isDefault: model["isDefault"]?.boolValue == true,
+          thinkingOptions: thinkingOptions, defaultThinkingOptionID: defaultThinkingOptionID)
       }
       return PaseoProvider(
         id: id, label: entry["label"]?.stringValue ?? id,
         available: status == "ready" && entry["enabled"]?.boolValue != false,
         error: entry["error"]?.stringValue, models: models)
     }
+  }
+
+  public func agentSettings(agentID: String) async throws -> PaseoAgentSettings {
+    try requireConnected()
+    guard !agentID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose an agent before editing settings.")
+    }
+    let payload = try await request(
+      type: "fetch_agent_request", fields: ["agentId": .string(agentID)],
+      responseType: "fetch_agent_response", operation: "agent settings")
+    guard let agent = payload["agent"], agent.objectValue != nil else {
+      throw PaseoProtocolError.requestRejected("The agent is no longer available.")
+    }
+    guard let actualID = agent["id"]?.stringValue, actualID == agentID,
+      let provider = agent["provider"]?.stringValue, !provider.isEmpty,
+      let cwd = agent["cwd"]?.stringValue,
+      let status = agent["status"]?.stringValue
+    else {
+      throw PaseoProtocolError.malformedMessage("agent settings omitted or mismatched identity")
+    }
+    let modeRows = try optionalArray(agent["availableModes"], field: "available modes")
+    let availableModes = try modeRows.map { mode in
+      guard let modeID = mode["id"]?.stringValue, !modeID.isEmpty,
+        let label = mode["label"]?.stringValue
+      else {
+        throw PaseoProtocolError.malformedMessage("agent mode omitted id or label")
+      }
+      return PaseoAgentMode(
+        id: modeID, label: label, description: mode["description"]?.stringValue)
+    }
+    return PaseoAgentSettings(
+      agentID: actualID, provider: provider, cwd: cwd, status: status,
+      modelID: try optionalNullableString(agent["model"], field: "agent model"),
+      thinkingOptionID: try optionalNullableString(
+        agent["thinkingOptionId"], field: "agent thinking option"),
+      effectiveThinkingOptionID: try optionalNullableString(
+        agent["effectiveThinkingOptionId"], field: "effective thinking option"),
+      currentModeID: try optionalNullableString(agent["currentModeId"], field: "agent mode"),
+      availableModes: availableModes)
+  }
+
+  public func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?, modeID: String?
+  ) async throws -> PaseoAgentSettingsApplyResult {
+    var config: [String: PaseoJSONValue] = [
+      "modelId": modelID.map(PaseoJSONValue.string) ?? .null
+    ]
+    if serverInfo?.features["agentThinkingUpdate"] == true {
+      config["thinkingOptionId"] = thinkingOptionID.map(PaseoJSONValue.string) ?? .null
+    }
+    if let modeID, !modeID.isEmpty {
+      config["modeId"] = .string(modeID)
+    }
+    return try await applyAgentConfig(agentID: agentID, config: config)
+  }
+
+  public func applyAgentMode(agentID: String, modeID: String) async throws
+    -> PaseoAgentSettingsApplyResult
+  {
+    guard !modeID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose a permission mode before applying.")
+    }
+    return try await applyAgentConfig(
+      agentID: agentID, config: ["modeId": .string(modeID)])
+  }
+
+  public func applyAgentThinking(
+    agentID: String, thinkingOptionID: String?, modeID: String?
+  ) async throws -> PaseoAgentSettingsApplyResult {
+    try requireConnected()
+    try requireFeature("agentThinkingUpdate", as: "agent thinking update")
+    var config: [String: PaseoJSONValue] = [
+      "thinkingOptionId": thinkingOptionID.map(PaseoJSONValue.string) ?? .null
+    ]
+    if let modeID, !modeID.isEmpty {
+      config["modeId"] = .string(modeID)
+    }
+    return try await applyAgentConfig(agentID: agentID, config: config)
+  }
+
+  private func applyAgentConfig(
+    agentID: String, config: [String: PaseoJSONValue]
+  ) async throws -> PaseoAgentSettingsApplyResult {
+    try requireConnected()
+    try requireFeature("agentConfigApply", as: "agent settings update")
+    guard !agentID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose an agent before editing settings.")
+    }
+    let payload = try await request(
+      type: "agent.config.apply.request",
+      fields: ["agentId": .string(agentID), "config": .object(config)],
+      responseType: "agent.config.apply.response", operation: "agent settings update",
+      allowError: true)
+    guard payload["agentId"]?.stringValue == agentID,
+      let accepted = payload["accepted"]?.boolValue
+    else {
+      throw PaseoProtocolError.malformedMessage("agent settings response omitted its result")
+    }
+    guard accepted else {
+      throw PaseoProtocolError.requestRejected(
+        payload["error"]?.stringValue ?? "The Paseo host rejected the agent settings.")
+    }
+    let notice = payload["notice"]?["message"]?.stringValue
+    return PaseoAgentSettingsApplyResult(notice: notice)
   }
 
   public func createAgent(_ intent: PaseoAgentCreationIntent) async throws
@@ -1208,6 +1344,11 @@ public actor PaseoProtocolClient: PaseoService {
     case .string(let string): return string
     default: throw PaseoProtocolError.malformedMessage("response contained an invalid \(field)")
     }
+  }
+
+  private func optionalNullableString(_ value: PaseoJSONValue?, field: String) throws -> String? {
+    guard let value else { return nil }
+    return try nullableString(value, field: field)
   }
 
   private func optionalArray(_ value: PaseoJSONValue?, field: String) throws -> [PaseoJSONValue] {

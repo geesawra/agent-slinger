@@ -102,12 +102,79 @@ public struct PaseoProviderModel: Sendable, Equatable {
   public let id: String
   public let label: String
   public let isDefault: Bool
+  public let thinkingOptions: [PaseoThinkingOption]
+  public let defaultThinkingOptionID: String?
 
-  public init(id: String, label: String, isDefault: Bool) {
+  public init(
+    id: String, label: String, isDefault: Bool,
+    thinkingOptions: [PaseoThinkingOption] = [], defaultThinkingOptionID: String? = nil
+  ) {
     self.id = id
     self.label = label
     self.isDefault = isDefault
+    self.thinkingOptions = thinkingOptions
+    self.defaultThinkingOptionID = defaultThinkingOptionID
   }
+}
+
+public struct PaseoThinkingOption: Sendable, Equatable {
+  public let id: String
+  public let label: String
+  public let description: String?
+  public let isDefault: Bool
+
+  public init(id: String, label: String, description: String?, isDefault: Bool) {
+    self.id = id
+    self.label = label
+    self.description = description
+    self.isDefault = isDefault
+  }
+}
+
+public struct PaseoAgentMode: Sendable, Equatable {
+  public let id: String
+  public let label: String
+  public let description: String?
+
+  public init(id: String, label: String, description: String?) {
+    self.id = id
+    self.label = label
+    self.description = description
+  }
+}
+
+public struct PaseoAgentSettings: Sendable, Equatable {
+  public let agentID: String
+  public let provider: String
+  public let cwd: String
+  public let status: String
+  public let modelID: String?
+  public let thinkingOptionID: String?
+  public let effectiveThinkingOptionID: String?
+  public let currentModeID: String?
+  public let availableModes: [PaseoAgentMode]
+
+  public init(
+    agentID: String, provider: String, cwd: String, status: String, modelID: String?,
+    thinkingOptionID: String?, effectiveThinkingOptionID: String?,
+    currentModeID: String? = nil, availableModes: [PaseoAgentMode] = []
+  ) {
+    self.agentID = agentID
+    self.provider = provider
+    self.cwd = cwd
+    self.status = status
+    self.modelID = modelID
+    self.thinkingOptionID = thinkingOptionID
+    self.effectiveThinkingOptionID = effectiveThinkingOptionID
+    self.currentModeID = currentModeID
+    self.availableModes = availableModes
+  }
+}
+
+public struct PaseoAgentSettingsApplyResult: Sendable, Equatable {
+  public let notice: String?
+
+  public init(notice: String?) { self.notice = notice }
 }
 
 public struct PaseoProvider: Sendable, Equatable {
@@ -517,6 +584,15 @@ public protocol PaseoService: Sendable {
   func supportsAgentRequestReceipts() async -> Bool
   func listProviderUsage() async throws -> PaseoProviderUsageSnapshot
   func listProviders(cwd: String) async throws -> [PaseoProvider]
+  func agentSettings(agentID: String) async throws -> PaseoAgentSettings
+  func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?, modeID: String?
+  ) async throws -> PaseoAgentSettingsApplyResult
+  func applyAgentMode(agentID: String, modeID: String) async throws
+    -> PaseoAgentSettingsApplyResult
+  func applyAgentThinking(
+    agentID: String, thinkingOptionID: String?, modeID: String?
+  ) async throws -> PaseoAgentSettingsApplyResult
   func createAgent(_ intent: PaseoAgentCreationIntent) async throws -> PaseoAgentCreationResult
   func listThreads(projectID: String, page: PaseoPageRequest) async throws -> PaseoPage<PaseoThread>
   func history(
@@ -575,6 +651,30 @@ extension PaseoService {
   }
   public func listProviders(cwd: String) async throws -> [PaseoProvider] {
     throw PaseoProtocolError.unsupportedCapability("provider discovery")
+  }
+  public func agentSettings(agentID: String) async throws -> PaseoAgentSettings {
+    throw PaseoProtocolError.unsupportedCapability("agent settings")
+  }
+  public func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?, modeID: String?
+  ) async throws -> PaseoAgentSettingsApplyResult {
+    throw PaseoProtocolError.unsupportedCapability("agent settings update")
+  }
+  public func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?
+  ) async throws -> PaseoAgentSettingsApplyResult {
+    try await applyAgentSettings(
+      agentID: agentID, modelID: modelID, thinkingOptionID: thinkingOptionID, modeID: nil)
+  }
+  public func applyAgentMode(agentID: String, modeID: String) async throws
+    -> PaseoAgentSettingsApplyResult
+  {
+    throw PaseoProtocolError.unsupportedCapability("agent mode update")
+  }
+  public func applyAgentThinking(
+    agentID: String, thinkingOptionID: String?, modeID: String?
+  ) async throws -> PaseoAgentSettingsApplyResult {
+    throw PaseoProtocolError.unsupportedCapability("agent thinking update")
   }
 
   public func createAgent(_ intent: PaseoAgentCreationIntent) async throws

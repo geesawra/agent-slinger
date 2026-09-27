@@ -58,7 +58,7 @@ private enum AgentActionConfirmation: Identifiable {
 struct ChatView: View {
   @Bindable var model: OesapModel
   let threadID: String
-  @State private var showsUsageDetails = false
+  @State private var showsAgentSettings = false
   @State private var composerFocused = false
   @State private var viewportHeight: CGFloat = 0
   @State private var isNearBottom = true
@@ -292,7 +292,10 @@ struct ChatView: View {
             clearError: {},
             contextUsage: model.contextUsage(for: threadID),
             isLoadingContextUsage: model.loadingContextUsage,
-            onShowContextUsage: { showsUsageDetails = true },
+            onShowContextUsage: {
+              composerFocused = false
+              showsAgentSettings = true
+            },
             isAgentRunning: thread?.state == .running,
             isStopPending: model.isStopRequestPending(threadID),
             isStopEnabled: model.agentControlAvailable(for: threadID)
@@ -310,8 +313,8 @@ struct ChatView: View {
         }
         .navigationTitle(thread?.title ?? "Agent thread")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showsUsageDetails) {
-          UsageDetailsSheet(model: model, contextThreadID: threadID)
+        .sheet(isPresented: $showsAgentSettings) {
+          AgentSettingsSheet(model: model, threadID: threadID)
         }
         .sheet(item: $actionSheet) { action in
           AgentActionSheetView(

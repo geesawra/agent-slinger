@@ -26,6 +26,136 @@ final class FeatureStateTests: XCTestCase {
     XCTAssertEqual(model.draft(for: "thread-A"), "ready to send")
   }
 
+  func testSessionSettingsApplyReadsBackHostNormalizedValues() async {
+    let service = FakeRemoteService(
+      initialSettings: sessionSettingsFixture(), normalizedThinkingOptionID: "high")
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    await model.openSessionDetails(threadID: "thread-A")
+    XCTAssertEqual(model.sessionSettings?.modelID, "model-one")
+    XCTAssertEqual(model.sessionDraftThinkingOptionID, "medium")
+
+    model.chooseSessionModel("model-two")
+    XCTAssertNil(model.sessionDraftThinkingOptionID)
+    model.chooseSessionThinkingOption("max")
+    model.chooseSessionMode("full-access")
+    XCTAssertTrue(model.sessionSettingsHaveChanges)
+    await model.applySessionSettings(threadID: "thread-A")
+
+    let applyCalls = await service.settingsApplyCallCount()
+    let settingsCalls = await service.settingsCallCount()
+    XCTAssertEqual(applyCalls, 1)
+    XCTAssertEqual(settingsCalls, 3)
+    XCTAssertEqual(model.sessionSettings?.modelID, "model-two")
+    XCTAssertEqual(model.sessionSettings?.thinkingOptionID, "high")
+    XCTAssertEqual(model.sessionSettings?.currentModeID, "full-access")
+    XCTAssertEqual(model.sessionDraftThinkingOptionID, "high")
+    XCTAssertEqual(model.sessionDraftModeID, "full-access")
+    XCTAssertFalse(model.sessionSettingsHaveChanges)
+    XCTAssertEqual(model.sessionDetailsNotice, "Host accepted the settings.")
+    model.chooseSessionThinkingOption("max")
+    await model.applySessionSettings(threadID: "thread-A")
+    let thinkingCalls = await service.thinkingApplyCallCount()
+    let unchangedFullCalls = await service.settingsApplyCallCount()
+    XCTAssertEqual(thinkingCalls, 1)
+    XCTAssertEqual(unchangedFullCalls, 1)
+    XCTAssertEqual(model.sessionSettings?.modelID, "model-two")
+    await model.disconnect()
+  }
+
+  func testSessionSettingsPartialRejectionShowsAuthoritativeValueAndPendingChoice() async {
+    let service = FakeRemoteService(
+      initialSettings: sessionSettingsFixture(),
+      settingsApplyError: RemoteServiceError.unavailable("Effort was refused"))
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    await model.openSessionDetails(threadID: "thread-A")
+    model.chooseSessionModel("model-two")
+    model.chooseSessionThinkingOption("max")
+    model.chooseSessionMode("full-access")
+
+    await model.applySessionSettings(threadID: "thread-A")
+
+    XCTAssertEqual(model.sessionSettings?.modelID, "model-two")
+    XCTAssertEqual(model.sessionSettings?.thinkingOptionID, "medium")
+    XCTAssertEqual(model.sessionSettings?.currentModeID, "full-access")
+    XCTAssertEqual(model.sessionDraftThinkingOptionID, "max")
+    XCTAssertTrue(model.sessionSettingsHaveChanges)
+    XCTAssertTrue(model.sessionDetailsError?.contains("Effort was refused") == true)
+    await model.disconnect()
+  }
+
+  func testSessionPermissionModeOnlyApplyLeavesUnknownModelUntouched() async {
+    var settings = sessionSettingsFixture()
+    settings.modelID = "unlisted-host-model"
+    settings.models = []
+    let service = FakeRemoteService(initialSettings: settings)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    await model.openSessionDetails(threadID: "thread-A")
+    model.chooseSessionMode("full-access")
+    XCTAssertTrue(model.canApplySessionSettings)
+
+    await model.applySessionSettings(threadID: "thread-A")
+
+    let modeCalls = await service.modeApplyCallCount()
+    let fullSettingsCalls = await service.settingsApplyCallCount()
+    XCTAssertEqual(modeCalls, 1)
+    XCTAssertEqual(fullSettingsCalls, 0)
+    XCTAssertEqual(model.sessionSettings?.modelID, "unlisted-host-model")
+    XCTAssertEqual(model.sessionSettings?.currentModeID, "full-access")
+    XCTAssertFalse(model.sessionSettingsHaveChanges)
+    await model.disconnect()
+  }
+
+  func testOldSessionSettingsLoadCannotReplaceNewSelection() async {
+    let gate = TestGate()
+    let service = FakeRemoteService(initialSettings: sessionSettingsFixture(), settingsGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let oldLoad = Task { await model.openSessionDetails(threadID: "thread-A") }
+    await gate.waitUntilEntered()
+
+    model.selectThread("thread-B")
+    await model.openSessionDetails(threadID: "thread-B")
+    XCTAssertEqual(model.sessionSettings?.agentID, "thread-B")
+    await gate.open()
+    await oldLoad.value
+    XCTAssertEqual(model.sessionSettings?.agentID, "thread-B")
+    await model.disconnect()
+    XCTAssertNil(model.sessionSettings)
+  }
+
+  func testOldSessionSettingsApplyCannotReplaceNewSelection() async {
+    let gate = TestGate()
+    let service = FakeRemoteService(
+      initialSettings: sessionSettingsFixture(), settingsApplyGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    await model.openSessionDetails(threadID: "thread-A")
+    model.chooseSessionModel("model-two")
+    let oldApply = Task { await model.applySessionSettings(threadID: "thread-A") }
+    await gate.waitUntilEntered()
+
+    model.selectThread("thread-B")
+    await model.openSessionDetails(threadID: "thread-B")
+    XCTAssertEqual(model.sessionSettings?.agentID, "thread-B")
+    XCTAssertFalse(model.sessionDetailsLoading)
+    await gate.open()
+    await oldApply.value
+    XCTAssertEqual(model.sessionSettings?.agentID, "thread-B")
+    XCTAssertEqual(model.sessionDraftModelID, "model-one")
+    XCTAssertNil(model.sessionDetailsError)
+    model.chooseSessionModel("model-two")
+    XCTAssertTrue(model.canApplySessionSettings)
+    await model.disconnect()
+  }
+
   func testImageOnlySendCapturesImagesAndClearsOnlySubmittedImages() async throws {
     let gate = TestGate()
     let service = FakeRemoteService(sendGate: gate)
@@ -1289,6 +1419,32 @@ final class FeatureStateTests: XCTestCase {
   }
 }
 
+private func sessionSettingsFixture() -> RemoteAgentSettings {
+  RemoteAgentSettings(
+    agentID: "thread-A", provider: "codex", cwd: "/fixture/project",
+    modelID: "model-one", thinkingOptionID: "medium",
+    effectiveThinkingOptionID: "medium",
+    currentModeID: "auto",
+    availableModes: [
+      RemoteAgentMode(id: "auto", label: "Default Permissions", description: "Ask as needed."),
+      RemoteAgentMode(id: "full-access", label: "Full Access", description: "Do not ask."),
+    ],
+    models: [
+      RemoteAgentModel(
+        id: "model-one", label: "Model One", isDefault: true,
+        thinkingOptions: [
+          RemoteThinkingOption(id: "medium", label: "Medium", description: nil, isDefault: true),
+          RemoteThinkingOption(id: "high", label: "High", description: nil, isDefault: false),
+        ], defaultThinkingOptionID: "medium"),
+      RemoteAgentModel(
+        id: "model-two", label: "Model Two", isDefault: false,
+        thinkingOptions: [
+          RemoteThinkingOption(id: "high", label: "High", description: nil, isDefault: true),
+          RemoteThinkingOption(id: "max", label: "Max", description: nil, isDefault: false),
+        ], defaultThinkingOptionID: "high"),
+    ], canApply: true, supportsThinking: true, status: "idle")
+}
+
 private actor TestGate {
   private var waiter: CheckedContinuation<Void, Never>?
   private var entryWaiter: CheckedContinuation<Void, Never>?
@@ -1411,6 +1567,17 @@ private actor FakeRemoteService: OesapRemoteService {
   private let contextError: Error?
   private let threadCWD: String?
   private let imageReadGate: TestGate?
+  private let initialSettings: RemoteAgentSettings?
+  private let settingsGate: TestGate?
+  private let settingsGateAtCall: Int
+  private let settingsApplyGate: TestGate?
+  private let settingsApplyError: Error?
+  private let normalizedThinkingOptionID: String?
+  private var settingsByAgentID: [String: RemoteAgentSettings] = [:]
+  private var settingsCalls = 0
+  private var settingsApplyCalls = 0
+  private var thinkingApplyCalls = 0
+  private var modeApplyCalls = 0
   private var imageReadTargets: [(cwd: String, path: String, maxBytes: Int)] = []
   private var usageCalls = 0
   private var submittedCreations: [RemoteNewThreadIntent] = []
@@ -1451,7 +1618,11 @@ private actor FakeRemoteService: OesapRemoteService {
     usageGateAtCall: Int = 1, contextReport: RemoteContextUsage? = nil,
     initialThreadContext: RemoteContextUsage? = nil, contextGate: TestGate? = nil,
     contextError: Error? = nil, threadCWD: String? = nil,
-    imageReadGate: TestGate? = nil
+    imageReadGate: TestGate? = nil,
+    initialSettings: RemoteAgentSettings? = nil,
+    settingsGate: TestGate? = nil, settingsGateAtCall: Int = 1,
+    settingsApplyGate: TestGate? = nil, settingsApplyError: Error? = nil,
+    normalizedThinkingOptionID: String? = nil
   ) {
     self.projectsValue = projects
     self.projectsError = projectsError
@@ -1490,6 +1661,12 @@ private actor FakeRemoteService: OesapRemoteService {
     self.contextError = contextError
     self.threadCWD = threadCWD
     self.imageReadGate = imageReadGate
+    self.initialSettings = initialSettings
+    self.settingsGate = settingsGate
+    self.settingsGateAtCall = settingsGateAtCall
+    self.settingsApplyGate = settingsApplyGate
+    self.settingsApplyError = settingsApplyError
+    self.normalizedThinkingOptionID = normalizedThinkingOptionID
   }
 
   func serverID() async -> String? { serverIDValue }
@@ -1511,6 +1688,65 @@ private actor FakeRemoteService: OesapRemoteService {
     if let contextError { throw contextError }
     return contextReport
   }
+
+  func agentSettings(agentID: String) async throws -> RemoteAgentSettings {
+    settingsCalls += 1
+    if settingsCalls == settingsGateAtCall { await settingsGate?.wait() }
+    guard var settings = settingsByAgentID[agentID] ?? initialSettings else {
+      throw RemoteServiceError.unavailable("Session settings are unavailable")
+    }
+    settings.agentID = agentID
+    return settings
+  }
+
+  func applyAgentSettings(
+    agentID: String, modelID: String?, thinkingOptionID: String?, modeID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult {
+    settingsApplyCalls += 1
+    await settingsApplyGate?.wait()
+    var settings = try await agentSettings(agentID: agentID)
+    settings.modelID = modelID
+    if let modeID { settings.currentModeID = modeID }
+    if let settingsApplyError {
+      settingsByAgentID[agentID] = settings
+      throw settingsApplyError
+    }
+    settings.thinkingOptionID = normalizedThinkingOptionID ?? thinkingOptionID
+    settings.effectiveThinkingOptionID = settings.thinkingOptionID
+    settingsByAgentID[agentID] = settings
+    return RemoteAgentSettingsApplyResult(notice: "Host accepted the settings.")
+  }
+
+  func applyAgentMode(agentID: String, modeID: String) async throws
+    -> RemoteAgentSettingsApplyResult
+  {
+    modeApplyCalls += 1
+    await settingsApplyGate?.wait()
+    var settings = try await agentSettings(agentID: agentID)
+    guard settings.availableModes.contains(where: { $0.id == modeID }) else {
+      throw RemoteServiceError.unavailable("Permission mode unavailable")
+    }
+    settings.currentModeID = modeID
+    settingsByAgentID[agentID] = settings
+    return RemoteAgentSettingsApplyResult(notice: "Host accepted the permissions mode.")
+  }
+
+  func applyAgentThinking(
+    agentID: String, thinkingOptionID: String?, modeID: String?
+  ) async throws -> RemoteAgentSettingsApplyResult {
+    thinkingApplyCalls += 1
+    var settings = try await agentSettings(agentID: agentID)
+    settings.thinkingOptionID = normalizedThinkingOptionID ?? thinkingOptionID
+    settings.effectiveThinkingOptionID = settings.thinkingOptionID
+    if let modeID { settings.currentModeID = modeID }
+    settingsByAgentID[agentID] = settings
+    return RemoteAgentSettingsApplyResult(notice: "Host accepted the effort.")
+  }
+
+  func settingsCallCount() -> Int { settingsCalls }
+  func settingsApplyCallCount() -> Int { settingsApplyCalls }
+  func thinkingApplyCallCount() -> Int { thinkingApplyCalls }
+  func modeApplyCallCount() -> Int { modeApplyCalls }
 
   func usageCallCount() -> Int { usageCalls }
 

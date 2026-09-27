@@ -248,6 +248,7 @@ struct ChatComposerBar: View {
     }
     .buttonStyle(style)
     .tint(Color(uiColor: .label))
+    .accessibilityHint("Opens agent settings and usage details.")
     .accessibilityIdentifier("context-usage-button")
   }
 
