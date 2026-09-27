@@ -25,7 +25,7 @@ struct SessionInfoSheet: View {
       .navigationTitle("Session info")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: .cancellationAction) {
           Button("Done") { dismiss() }
             .accessibilityIdentifier("session-info-done")
         }
@@ -212,12 +212,10 @@ struct UsageListContent: View {
 
   private func sessionInformationSection(thread: RemoteThread) -> some View {
     Section("Session") {
-      LabeledContent("Status") {
-        Label(thread.state.label, systemImage: thread.state.symbol)
-          .accessibilityElement(children: .ignore)
-          .accessibilityLabel("Status, \(thread.state.label)")
-          .accessibilityIdentifier("session-info-status")
-      }
+      UsageValueRow(label: "Status", value: thread.state.label, font: .body)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Status, \(thread.state.label)")
+        .accessibilityIdentifier("session-info-status")
       if thread.requiresAttention || thread.state == .waiting {
         LabeledContent("Attention", value: "Required")
       }
