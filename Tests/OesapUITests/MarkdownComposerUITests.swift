@@ -120,8 +120,28 @@ final class MarkdownComposerUITests: XCTestCase {
     editor.typeText(prompt)
     XCTAssertEqual(editor.value as? String, prompt)
     assertNoComposerModeControls(in: app)
+    let surface = app.descendants(matching: .any)["expanded-composer-surface"].firstMatch
+    XCTAssertTrue(surface.waitForExistence(timeout: 5))
+    let send = surface.descendants(matching: .button)["expanded-send-message"].firstMatch
+    XCTAssertTrue(send.isHittable)
+    XCTAssertTrue(
+      surface.descendants(matching: .any)["expanded-send-message"].exists,
+      "Expanded Send should be contained by the composer surface."
+    )
+    XCTAssertTrue(
+      surface.frame.insetBy(dx: -1, dy: -1).contains(send.frame),
+      "Expanded Send should be geometrically inside the composer surface."
+    )
+    XCTAssertGreaterThanOrEqual(send.frame.width, 44)
+    XCTAssertGreaterThanOrEqual(send.frame.height, 44)
+    XCTAssertFalse(editor.frame.intersects(send.frame), "The editor must not overlap Send.")
+    XCTAssertFalse(
+      app.navigationBars["Compose message"].descendants(matching: .any)["expanded-send-message"]
+        .exists,
+      "Expanded Send should not be in the navigation toolbar."
+    )
     attachScreenshot(named: "Expanded live Markdown before send", app: app)
-    app.buttons["expanded-send-message"].tap()
+    send.tap()
 
     let sendChoice = app.navigationBars["Send to running agent?"]
     XCTAssertTrue(sendChoice.waitForExistence(timeout: 5))

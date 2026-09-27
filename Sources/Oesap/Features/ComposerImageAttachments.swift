@@ -163,23 +163,25 @@ struct ComposerImageDraftStrip: View {
         ScrollView(.horizontal) {
           HStack(spacing: 8) {
             ForEach(Array(images.enumerated()), id: \.element.id) { index, image in
-              ImageAttachmentThumbnail(image: image) {
+              ImageAttachmentThumbnail(image: image, size: CGSize(width: 96, height: 72)) {
                 onRemove(image.id)
               }
-              .frame(width: 96, height: 88, alignment: .leading)
+              .frame(width: 96, height: 72, alignment: .leading)
               .accessibilityElement(children: .contain)
               .accessibilityIdentifier("composer-image-\(index)")
             }
 
             if isPreparing {
-              ProgressView("Preparing image")
-                .frame(width: 96, height: 88)
+              ProgressView()
+                .frame(width: 96, height: 72)
+                .accessibilityLabel("Preparing image")
                 .accessibilityIdentifier("composer-image-preparing")
             }
           }
           .padding(.vertical, 2)
         }
         .scrollIndicators(.hidden)
+        .frame(height: 76)
 
         if let error {
           Text(error)
@@ -190,6 +192,8 @@ struct ComposerImageDraftStrip: View {
         }
       }
       .accessibilityIdentifier("composer-attachment-strip")
+      .padding(.horizontal, 8)
+      .padding(.top, 8)
     }
   }
 }

@@ -25,6 +25,7 @@ struct ImageAttachmentViewerItem: Identifiable {
 /// the composer.
 struct ImageAttachmentThumbnail: View {
   let image: RemoteDraftImage
+  var size = CGSize(width: 96, height: 88)
   var onRemove: (() -> Void)? = nil
 
   @State private var viewerItem: ImageAttachmentViewerItem?
@@ -34,22 +35,26 @@ struct ImageAttachmentThumbnail: View {
       Button {
         viewerItem = .local(image)
       } label: {
-        Group {
-          if let uiImage = UIImage(data: image.data) {
-            Image(uiImage: uiImage)
-              .resizable()
-              .scaledToFill()
-          } else {
-            Label("Image preview unavailable", systemImage: "photo")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-              .frame(maxWidth: .infinity, maxHeight: .infinity)
-              .background(.quaternary)
+        GeometryReader { geometry in
+          Group {
+            if let uiImage = UIImage(data: image.data) {
+              Image(uiImage: uiImage)
+                .resizable()
+                .scaledToFill()
+            } else {
+              Label("Image preview unavailable", systemImage: "photo")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.quaternary)
+            }
           }
+          .frame(width: geometry.size.width, height: geometry.size.height)
+          .clipped()
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .frame(width: 96, height: 88)
-        .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(width: size.width, height: size.height)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
       }
       .buttonStyle(.plain)
       .accessibilityLabel("Preview \(image.fileName ?? "selected image")")
@@ -57,7 +62,7 @@ struct ImageAttachmentThumbnail: View {
       if let onRemove {
         Button(action: onRemove) {
           Image(systemName: "xmark.circle.fill")
-            .font(.title3)
+            .font(.system(size: 18, weight: .semibold))
             .symbolRenderingMode(.palette)
             .foregroundStyle(.white, .black.opacity(0.72))
             .frame(width: 44, height: 44)
@@ -67,7 +72,8 @@ struct ImageAttachmentThumbnail: View {
         .accessibilityLabel("Remove image")
       }
     }
-    .frame(width: 96, height: 88)
+    .frame(width: size.width, height: size.height)
+    .contentShape(Rectangle())
     .fullScreenCover(item: $viewerItem) { item in
       ImageAttachmentViewer(item: item)
     }

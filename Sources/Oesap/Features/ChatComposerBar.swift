@@ -91,15 +91,7 @@ struct ChatComposerBar: View {
 
       accessoryRow
 
-      imageDraftStrip
-
-      HStack(alignment: .bottom, spacing: 8) {
-        if !dynamicTypeSize.isAccessibilitySize {
-          imagePicker
-        }
-        messageField
-        sendControl
-      }
+      messageField
     }
   }
 
@@ -148,6 +140,7 @@ struct ChatComposerBar: View {
       } else {
         HStack(spacing: 8) {
           contextUsageControl
+          imagePicker
           expandControl
           Spacer(minLength: 0)
           stopControl
@@ -314,7 +307,32 @@ struct ChatComposerBar: View {
 
   @ViewBuilder
   private var messageField: some View {
-    let input = ZStack(alignment: .topLeading) {
+    let input = VStack(spacing: 0) {
+      imageDraftStrip
+
+      HStack(alignment: .bottom, spacing: 4) {
+        compactEditor
+        sendControl
+      }
+      .padding(.leading, 8)
+      .padding(.vertical, 4)
+      .padding(.trailing, 4)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier("chat-composer-surface")
+
+    if #available(iOS 26.0, *) {
+      input.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    } else {
+      input.background(
+        Color(uiColor: .secondarySystemBackground),
+        in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+  }
+
+  private var compactEditor: some View {
+    ZStack(alignment: .topLeading) {
       NativeImagePasteTextView(
         text: $draft,
         isFocused: focus,
@@ -337,23 +355,13 @@ struct ChatComposerBar: View {
         Text("Message agent…")
           .font(.body)
           .foregroundStyle(Color.secondary)
-          .padding(.horizontal, 16)
+          .padding(.horizontal, 14)
           .padding(.top, 12)
           .allowsHitTesting(false)
           .accessibilityHidden(true)
       }
     }
     .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-
-    if #available(iOS 26.0, *) {
-      input.glassEffect(
-        .regular,
-        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-    } else {
-      input.background(
-        Color(uiColor: .secondarySystemBackground),
-        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-    }
   }
 
   @ViewBuilder
@@ -379,6 +387,7 @@ struct ChatComposerBar: View {
       .contentShape(Rectangle())
     }
     .buttonStyle(style)
+    .controlSize(.small)
     .buttonBorderShape(.circle)
     .disabled(!canSend)
     .accessibilityLabel(isSending ? "Sending message" : "Send message")
@@ -492,13 +501,6 @@ private struct ExpandedComposerView: View {
         )
         .frame(maxWidth: .infinity, alignment: .leading)
 
-        ComposerImageDraftStrip(
-          images: $images,
-          isPreparing: pendingImageOperations > 0,
-          error: imageError,
-          onRemove: onRemoveImage
-        )
-
         editor
       }
       .padding()
@@ -509,9 +511,6 @@ private struct ExpandedComposerView: View {
         ToolbarItem(placement: .topBarLeading) {
           Button("Done", action: onDismiss)
             .accessibilityIdentifier("expanded-composer-done")
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-          sendButton
         }
       }
       .onAppear {
@@ -526,6 +525,30 @@ private struct ExpandedComposerView: View {
   }
 
   private var editor: some View {
+    VStack(spacing: 8) {
+      ComposerImageDraftStrip(
+        images: $images,
+        isPreparing: pendingImageOperations > 0,
+        error: imageError,
+        onRemove: onRemoveImage
+      )
+
+      HStack(alignment: .bottom, spacing: 4) {
+        expandedEditor
+        sendButton
+      }
+    }
+    .padding(8)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .background(
+      Color(uiColor: .secondarySystemBackground),
+      in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+    )
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier("expanded-composer-surface")
+  }
+
+  private var expandedEditor: some View {
     ZStack(alignment: .topLeading) {
       NativeImagePasteTextView(
         text: $draft,
@@ -544,21 +567,28 @@ private struct ExpandedComposerView: View {
       if draft.isEmpty {
         Text("Write a message. Markdown is supported.")
           .foregroundStyle(Color.secondary)
-          .padding(.leading, 5)
-          .padding(.top, 8)
+          .padding(.leading, 14)
+          .padding(.top, 10)
+          .allowsHitTesting(false)
           .accessibilityHidden(true)
       }
     }
-    .padding(10)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
   }
 
   @ViewBuilder
   private var sendButton: some View {
-    let button = Button("Send", action: onSend)
-      .disabled(!canSend)
-      .accessibilityIdentifier("expanded-send-message")
+    let button = Button(action: onSend) {
+      Image(systemName: "arrow.up")
+        .font(.system(size: 18, weight: .semibold))
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+    .disabled(!canSend)
+    .controlSize(.small)
+    .buttonBorderShape(.circle)
+    .accessibilityLabel("Send message")
+    .accessibilityIdentifier("expanded-send-message")
     if #available(iOS 26.0, *) {
       button.buttonStyle(.glassProminent)
     } else {

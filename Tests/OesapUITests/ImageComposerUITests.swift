@@ -13,11 +13,23 @@ final class ImageComposerUITests: XCTestCase {
 
     let strip = app.descendants(matching: .any)["composer-attachment-strip"]
     XCTAssertTrue(strip.waitForExistence(timeout: 10))
-    let thumbnail = app.descendants(matching: .any)["composer-image-0"]
+    let surface = composerSurface("chat-composer-surface", in: app)
+    XCTAssertTrue(surface.waitForExistence(timeout: 5))
+    let thumbnail = surface.descendants(matching: .any)["composer-image-0"].firstMatch
     XCTAssertTrue(thumbnail.waitForExistence(timeout: 5))
     XCTAssertTrue(app.buttons["Remove image"].isHittable)
+    let send = surface.descendants(matching: .button)["send-message"].firstMatch
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    assertContained(thumbnail, in: surface, named: "Image thumbnail")
+    assertContained(send, in: surface, named: "Send button")
+    assertMinimumSendTarget(send)
     attachScreenshot(named: "Pasted image in chat composer", app: app)
 
+    surface.buttons["Preview selected image"].tap()
+    let closeViewer = app.buttons["Close image"]
+    XCTAssertTrue(closeViewer.waitForExistence(timeout: 5))
+    closeViewer.tap()
+    XCTAssertTrue(thumbnail.waitForExistence(timeout: 5))
     app.buttons["Remove image"].tap()
     XCTAssertFalse(strip.waitForExistence(timeout: 2))
     XCTAssertFalse(app.buttons["send-message"].isEnabled)
@@ -34,7 +46,20 @@ final class ImageComposerUITests: XCTestCase {
 
     typeMessageAfterPasting(
       remainingText: "eep this image with the uncertain message", into: composer, app: app)
-    app.buttons["send-message"].tap()
+    let surface = composerSurface("chat-composer-surface", in: app)
+    let thumbnail = surface.descendants(matching: .any)["composer-image-0"].firstMatch
+    let send = surface.descendants(matching: .button)["send-message"].firstMatch
+    XCTAssertTrue(surface.waitForExistence(timeout: 5))
+    XCTAssertTrue(thumbnail.exists)
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertTrue(send.isHittable)
+    assertContained(thumbnail, in: surface, named: "Image thumbnail")
+    assertContained(send, in: surface, named: "Send button")
+    assertMinimumSendTarget(send)
+    XCTAssertFalse(composer.frame.intersects(send.frame), "The editor must not overlap Send.")
+    attachScreenshot(named: "Compact composer with image and text", app: app)
+
+    send.tap()
     chooseRunningSendAction(app, "Steer when supported")
 
     XCTAssertTrue(
@@ -63,7 +88,17 @@ final class ImageComposerUITests: XCTestCase {
     XCTAssertTrue(app.buttons["Preview selected image"].waitForExistence(timeout: 5))
     XCTAssertEqual(editor.value as? String, "Keep this source in the expanded editor")
     pasteSanitizedImage(into: editor, app: app)
-    XCTAssertTrue(app.descendants(matching: .any)["composer-image-1"].waitForExistence(timeout: 10))
+    let expandedSurface = composerSurface("expanded-composer-surface", in: app)
+    XCTAssertTrue(expandedSurface.waitForExistence(timeout: 5))
+    let thumbnail = expandedSurface.descendants(matching: .any)["composer-image-1"].firstMatch
+    XCTAssertTrue(thumbnail.waitForExistence(timeout: 10))
+    let send = expandedSurface.descendants(matching: .button)["expanded-send-message"].firstMatch
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertTrue(send.isHittable)
+    assertContained(thumbnail, in: expandedSurface, named: "Expanded image thumbnail")
+    assertContained(send, in: expandedSurface, named: "Expanded Send button")
+    assertMinimumSendTarget(send)
+    XCTAssertFalse(editor.frame.intersects(send.frame), "The editor must not overlap Send.")
     attachScreenshot(named: "Expanded composer with shared image draft", app: app)
 
     app.buttons["expanded-composer-done"].tap()
@@ -160,17 +195,55 @@ final class ImageComposerUITests: XCTestCase {
     let composer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(composer.waitForExistence(timeout: 5))
     pasteSanitizedImage(into: composer, app: app)
-    let thumbnail = app.descendants(matching: .any)["composer-image-0"]
+    let compactSurface = composerSurface("chat-composer-surface", in: app)
+    XCTAssertTrue(compactSurface.waitForExistence(timeout: 5))
+    let thumbnail = compactSurface.descendants(matching: .any)["composer-image-0"].firstMatch
     XCTAssertTrue(thumbnail.waitForExistence(timeout: 10))
     let context = app.buttons["context-usage-button"]
-    let send = app.buttons["send-message"]
+    let accessory = app.descendants(matching: .any)["chat-composer-accessory"]
+    let send = compactSurface.descendants(matching: .button)["send-message"].firstMatch
+    typeMessageAfterPasting(
+      remainingText: "eep this image visible at AX5", into: composer, app: app)
+    XCTAssertEqual(composer.value as? String, "Keep this image visible at AX5")
     XCTAssertTrue(context.isHittable)
+    XCTAssertTrue(accessory.exists)
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
     XCTAssertTrue(send.isHittable)
     XCTAssertTrue(thumbnail.isHittable)
     assertInsideAppBounds(context, app: app)
     assertInsideAppBounds(send, app: app)
     assertInsideAppBounds(thumbnail, app: app)
-    attachScreenshot(named: "AX5 composer with image draft", app: app)
+    assertContained(thumbnail, in: compactSurface, named: "AX5 image thumbnail")
+    assertContained(send, in: compactSurface, named: "AX5 Send button")
+    assertMinimumSendTarget(send)
+    XCTAssertLessThanOrEqual(context.frame.maxY, compactSurface.frame.minY)
+    XCTAssertLessThanOrEqual(accessory.frame.maxY, compactSurface.frame.minY)
+    XCTAssertFalse(composer.frame.intersects(send.frame), "The editor must not overlap Send.")
+    attachScreenshot(named: "AX5 compact composer with image and text", app: app)
+
+    app.buttons["chat-composer-expand"].tap()
+    let expandedSurface = composerSurface("expanded-composer-surface", in: app)
+    XCTAssertTrue(expandedSurface.waitForExistence(timeout: 5))
+    let expandedThumbnail = expandedSurface.descendants(matching: .any)["composer-image-0"]
+      .firstMatch
+    let expandedSend = expandedSurface.descendants(matching: .button)["expanded-send-message"]
+      .firstMatch
+    let expandedEditor = app.textViews["expanded-chat-composer"]
+    XCTAssertTrue(expandedEditor.waitForExistence(timeout: 5))
+    XCTAssertTrue(expandedThumbnail.waitForExistence(timeout: 5))
+    XCTAssertTrue(expandedSend.waitForExistence(timeout: 5))
+    XCTAssertTrue(expandedThumbnail.isHittable)
+    XCTAssertTrue(expandedSend.isHittable)
+    assertInsideAppBounds(expandedThumbnail, app: app)
+    assertInsideAppBounds(expandedSend, app: app)
+    assertContained(expandedThumbnail, in: expandedSurface, named: "AX5 expanded image thumbnail")
+    assertContained(expandedSend, in: expandedSurface, named: "AX5 expanded Send button")
+    assertMinimumSendTarget(expandedSend)
+    XCTAssertFalse(
+      expandedEditor.frame.intersects(expandedSend.frame),
+      "The expanded editor must not overlap Send."
+    )
+    attachScreenshot(named: "AX5 expanded composer with image and text", app: app)
   }
 
   private func launchDemo(accessibilitySize: Bool = false, arguments: [String]) -> XCUIApplication {
@@ -337,5 +410,42 @@ final class ImageComposerUITests: XCTestCase {
     attachment.name = name
     attachment.lifetime = .keepAlways
     add(attachment)
+  }
+
+  private func composerSurface(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+    app.descendants(matching: .any)[identifier].firstMatch
+  }
+
+  private func assertContained(
+    _ element: XCUIElement, in surface: XCUIElement, named name: String,
+    file: StaticString = #filePath, line: UInt = #line
+  ) {
+    XCTAssertTrue(
+      element.exists, "\(name) should be exposed inside its composer surface.",
+      file: file, line: line
+    )
+    let matchingDescendant = surface.descendants(matching: .any)
+      .matching(identifier: element.identifier).firstMatch
+    XCTAssertTrue(
+      matchingDescendant.exists,
+      "\(name) should be an accessibility descendant of its composer surface.",
+      file: file, line: line
+    )
+    let elementFrameDescription = "\(name) AX frame \(element.frame)"
+    let surfaceFrameDescription = "composer surface AX frame \(surface.frame)"
+    XCTAssertTrue(
+      surface.frame.insetBy(dx: -1, dy: -1).contains(element.frame),
+      "\(elementFrameDescription) should be inside \(surfaceFrameDescription).",
+      file: file, line: line
+    )
+  }
+
+  private func assertMinimumSendTarget(
+    _ send: XCUIElement, file: StaticString = #filePath, line: UInt = #line
+  ) {
+    XCTAssertGreaterThanOrEqual(
+      send.frame.width, 44, "Send should be at least 44 points wide.", file: file, line: line)
+    XCTAssertGreaterThanOrEqual(
+      send.frame.height, 44, "Send should be at least 44 points tall.", file: file, line: line)
   }
 }
