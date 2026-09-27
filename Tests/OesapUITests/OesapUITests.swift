@@ -36,13 +36,26 @@ final class OesapUITests: XCTestCase {
   }
 
   func testCancellingStopKeepsAgentRunningAndPreservesDraft() {
-    let (app, timeline, stop) = openAgentControlChat()
+    let (app, stop) = openAgentControlChat()
     let composer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(composer.waitForExistence(timeout: 5))
     composer.tap()
     composer.typeText("Keep this draft if I cancel Stop")
 
-    XCTAssertTrue(scrollToTimelineStartUntilHittable(stop, in: timeline))
+    XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+    let context = app.buttons["context-usage-button"]
+    let send = app.buttons["send-message"]
+    XCTAssertTrue(context.waitForExistence(timeout: 5))
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertTrue(context.isHittable, "Context should remain reachable while typing.")
+    XCTAssertTrue(stop.isHittable, "Stop should remain reachable while typing.")
+    XCTAssertTrue(send.isHittable, "Send should remain reachable while typing.")
+    XCTAssertLessThanOrEqual(context.frame.maxY, composer.frame.minY)
+    XCTAssertLessThanOrEqual(stop.frame.maxY, composer.frame.minY)
+    assertMinimumTapTarget(context, named: "Context usage")
+    assertMinimumTapTarget(stop, named: "Stop agent")
+    attachScreenshot(named: "Light context and Stop accessory with keyboard")
+
     stop.tap()
     let alert = app.alerts["Stop this agent?"]
     XCTAssertTrue(alert.waitForExistence(timeout: 5))
@@ -56,8 +69,8 @@ final class OesapUITests: XCTestCase {
   }
 
   func testConfirmingStopUpdatesAuthoritativeAgentState() {
-    let (app, timeline, stop) = openAgentControlChat()
-    XCTAssertTrue(scrollToTimelineStartUntilHittable(stop, in: timeline))
+    let (app, stop) = openAgentControlChat()
+    XCTAssertTrue(stop.isHittable)
     stop.tap()
 
     let alert = app.alerts["Stop this agent?"]
@@ -74,14 +87,14 @@ final class OesapUITests: XCTestCase {
   }
 
   func testSteerChoiceSendsAndShowsHostReceipt() {
-    let (app, _, _) = openAgentControlChat()
+    let (app, _) = openAgentControlChat()
     let prompt = "Continue this active turn without restarting"
     sendRunningPrompt(prompt, using: "Steer when supported", in: app)
     assertAcceptedRunningPrompt(prompt, in: app)
   }
 
   func testInterruptChoiceSendsAndShowsHostReceipt() {
-    let (app, _, _) = openAgentControlChat()
+    let (app, _) = openAgentControlChat()
     let prompt = "Replace the active turn with this task"
     sendRunningPrompt(prompt, using: "Interrupt and send", in: app)
     assertAcceptedRunningPrompt(prompt, in: app)
@@ -184,6 +197,7 @@ final class OesapUITests: XCTestCase {
 
     let contextButton = app.buttons["context-usage-button"]
     XCTAssertTrue(contextButton.waitForExistence(timeout: 5))
+    XCTAssertTrue(contextButton.isHittable, "Context belongs to the persistent composer accessory.")
     XCTAssertTrue(contextButton.label.contains("Last reported context usage"))
     let contextValue = (contextButton.value as? String) ?? ""
     let contextAccessibility = "\(contextButton.label) \(contextValue)"
@@ -291,11 +305,10 @@ final class OesapUITests: XCTestCase {
 
     let contextButton = app.buttons["context-usage-button"]
     XCTAssertTrue(contextButton.waitForExistence(timeout: 5))
+    XCTAssertTrue(contextButton.isHittable, "Context should remain in the accessory row at AX5.")
+    assertMinimumTapTarget(contextButton, named: "Context usage")
     let timeline = app.scrollViews["chat-timeline-scroll"]
     XCTAssertTrue(timeline.waitForExistence(timeout: 5))
-    XCTAssertTrue(
-      scrollCardIntoSafePosition(contextButton, in: timeline, whenMissing: .earlier),
-      "The chat header should be reachable at accessibility text size.")
     let running = app.staticTexts["Running"]
     for _ in 0..<8 where !running.isHittable { timeline.swipeDown() }
     XCTAssertTrue(running.waitForExistence(timeout: 5))
@@ -548,7 +561,7 @@ final class OesapUITests: XCTestCase {
     }
   }
 
-  private func openAgentControlChat() -> (XCUIApplication, XCUIElement, XCUIElement) {
+  private func openAgentControlChat() -> (XCUIApplication, XCUIElement) {
     let app = launchDemo(arguments: ["--demo-agent-control"])
     connect(app)
     let project = app.buttons["project-demo-project"]
@@ -557,23 +570,17 @@ final class OesapUITests: XCTestCase {
     let thread = app.buttons["thread-demo-agent-running"]
     XCTAssertTrue(scrollUntilHittable(thread, in: app))
     thread.tap()
-    let timeline = app.scrollViews["chat-timeline-scroll"]
-    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
     let stop = app.buttons["agent-stop-demo-agent-running"]
     XCTAssertTrue(stop.waitForExistence(timeout: 5))
-    return (app, timeline, stop)
+    XCTAssertTrue(stop.isHittable, "Stop should stay in the composer accessory row.")
+    return (app, stop)
   }
 
-  private func scrollToTimelineStartUntilHittable(
-    _ element: XCUIElement,
-    in timeline: XCUIElement,
-    maxSwipes: Int = 20
-  ) -> Bool {
-    for _ in 0..<maxSwipes {
-      if element.exists && element.isHittable { return true }
-      timeline.swipeDown()
-    }
-    return element.exists && element.isHittable
+  private func assertMinimumTapTarget(_ element: XCUIElement, named name: String) {
+    XCTAssertGreaterThanOrEqual(
+      element.frame.width, 44, "\(name) should be at least 44 points wide.")
+    XCTAssertGreaterThanOrEqual(
+      element.frame.height, 44, "\(name) should be at least 44 points tall.")
   }
 
   private func sendRunningPrompt(_ prompt: String, using action: String, in app: XCUIApplication) {

@@ -48,31 +48,42 @@ struct ContextUsageIndicator: View {
   var body: some View {
     Group {
       if dynamicTypeSize.isAccessibilitySize {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Context")
-            .font(.body.weight(.medium))
-          HStack(spacing: 8) {
-            loadingIndicator
-            Text(statusValue)
-              .font(.body.weight(.semibold))
-            Spacer(minLength: 0)
-            disclosureIndicator
+        HStack(spacing: 6) {
+          if let fraction {
+            Image(systemName: "chart.pie.fill")
+              .font(.subheadline)
+              .foregroundStyle(Color.primary)
+              .accessibilityHidden(true)
+            Text(fractionPercentLabel(fraction))
+              .font(.subheadline.weight(.medium))
+              .foregroundStyle(Color.primary)
+          } else if isLoading {
+            ProgressView()
+              .controlSize(.small)
+              .tint(Color.secondary)
+              .accessibilityHidden(true)
+          } else {
+            Image(systemName: "chart.pie")
+              .font(.subheadline)
+              .foregroundStyle(Color.secondary)
+              .accessibilityHidden(true)
+            Text("—")
+              .font(.caption)
+              .foregroundStyle(Color.primary)
           }
+          disclosureIndicator
         }
       } else {
-        HStack(spacing: 8) {
-          Text("Context")
-            .font(.subheadline)
-          Spacer(minLength: 8)
-          loadingIndicator
-          Text(statusValue)
+        HStack(spacing: 6) {
+          Text(statusLabel)
             .font(.subheadline.weight(.medium))
-            .multilineTextAlignment(.trailing)
+            .foregroundStyle(Color.primary)
+          loadingIndicator
           disclosureIndicator
         }
       }
     }
-    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+    .frame(minHeight: 44, alignment: .leading)
     .contentShape(Rectangle())
     .accessibilityElement(children: .ignore)
     .accessibilityLabel("Last reported context usage")
@@ -86,6 +97,7 @@ struct ContextUsageIndicator: View {
     if isLoading && fraction == nil {
       ProgressView()
         .controlSize(.small)
+        .tint(Color.secondary)
         .accessibilityHidden(true)
     }
   }
@@ -93,12 +105,13 @@ struct ContextUsageIndicator: View {
   private var disclosureIndicator: some View {
     Image(systemName: "chevron.right")
       .font(.caption.weight(.semibold))
-      .foregroundStyle(.tertiary)
+      .foregroundStyle(Color.secondary)
       .accessibilityHidden(true)
   }
 
-  private var statusValue: String {
-    fraction.map { "\(fractionPercentLabel($0)) used" } ?? (isLoading ? "Loading" : "Unavailable")
+  private var statusLabel: String {
+    fraction.map { "Context \(fractionPercentLabel($0))" }
+      ?? "Context \(isLoading ? "Loading" : "Unavailable")"
   }
 }
 

@@ -23,10 +23,17 @@ unavailable or failed provider reports, and optional reset metadata.
 
 ## Decision
 
-- Put a full-width context-usage disclosure row below the chat agent status.
-  Tapping it opens a native usage sheet with reported token counts and the
-  matching provider quota only when the agent provider ID exactly matches a
-  host report ID.
+- Keep the chat timeline status focused on agent state and provider/model
+  information. Put a compact Context disclosure and, while running, Stop in a
+  fixed accessory row immediately above the shared composer. Context opens a
+  native usage sheet with reported token counts and the matching provider quota
+  only when the agent provider ID exactly matches a host report ID. Stop keeps
+  its native confirmation.
+- On iOS 26 and later, use native Liquid Glass controls for the composer and
+  accessory row, grouped with `GlassEffectContainer`; use native material and
+  bordered controls on the iOS 17 fallback path. Follow Apple's
+  [Liquid Glass adoption guidance](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)
+  for the separation between controls and content.
 - Label context data as last reported. Show a percentage only when both token
   counts are finite and the context-window size is positive. A partial report
   remains visible without a percentage; missing usage is not shown as zero.
@@ -48,3 +55,14 @@ context use from unrelated fields. Context may remain unchanged while an agent
 is idle, and a quota refresh may return a cached host report. Users can inspect
 those semantics alongside the values instead of seeing invented precision or
 zeros for missing data.
+
+## Validation
+
+The simulator build and strict Swift format lint passed on 27 September 2026.
+Eight functional UI flows passed in `.build/glass-accessory-verified.xcresult`,
+and two focused checks passed in `.build/glass-accessory-tint.xcresult`. The
+native accessibility audit still reports contrast failures for the Context
+and Stop labels. In the captured light appearance, sampled black glyphs over
+the glass backdrop measured 20.65:1; that single appearance does not establish
+contrast across other dynamic backdrops, so the audit finding remains
+unresolved and is not suppressed.

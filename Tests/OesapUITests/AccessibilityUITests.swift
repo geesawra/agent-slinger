@@ -32,6 +32,7 @@ final class AccessibilityUITests: XCTestCase {
     let context = app.buttons["context-usage-button"]
     XCTAssertTrue(context.waitForExistence(timeout: 5))
     XCTAssertEqual(context.value as? String, "32% used")
+    XCTAssertTrue(context.isHittable, "Context usage should remain in the composer accessory row.")
     attachScreenshot(named: "Accessibility audit — chat", app: app)
     try app.performAccessibilityAudit(
       for: [
@@ -83,15 +84,10 @@ final class AccessibilityUITests: XCTestCase {
     XCTAssertTrue(scrollUntilHittable(runningThread, in: app, whenMissing: .earlier))
     runningThread.tap()
 
-    let runningTimeline = app.scrollViews["chat-timeline-scroll"]
-    XCTAssertTrue(runningTimeline.waitForExistence(timeout: 5))
     let context = app.buttons["context-usage-button"]
-    XCTAssertTrue(
-      scrollUntilVisibleAboveComposer(
-        context, in: runningTimeline, app: app, whenMissing: .earlier),
-      "The context usage control should be reachable at the start of the timeline."
-    )
+    XCTAssertTrue(context.waitForExistence(timeout: 5))
     XCTAssertEqual(context.value as? String, "32% used")
+    XCTAssertTrue(context.isHittable, "Context usage should remain above the composer at AX5.")
     assertMinimumTapTarget(context, named: "Context usage")
 
     let composer = app.descendants(matching: .any)["chat-composer"]
@@ -101,6 +97,8 @@ final class AccessibilityUITests: XCTestCase {
     let send = app.buttons["send-message"]
     XCTAssertTrue(send.waitForExistence(timeout: 5))
     XCTAssertTrue(send.isEnabled)
+    XCTAssertTrue(
+      context.isHittable, "Context usage should remain reachable with the keyboard open.")
     assertMinimumTapTarget(send, named: "Send message")
     attachScreenshot(named: "AX5 dark chat composer", app: app)
     send.tap()
@@ -119,13 +117,14 @@ final class AccessibilityUITests: XCTestCase {
     XCTAssertTrue(scrollUntilHittable(thread, in: app))
     thread.tap()
 
-    let timeline = app.scrollViews["chat-timeline-scroll"]
-    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
     let stop = app.buttons["agent-stop-demo-agent-running"]
-    XCTAssertTrue(
-      scrollUntilVisibleAboveComposer(stop, in: timeline, app: app, whenMissing: .earlier),
-      "Stop should be reachable at accessibility text size.")
+    let context = app.buttons["context-usage-button"]
+    XCTAssertTrue(stop.waitForExistence(timeout: 5))
+    XCTAssertTrue(context.waitForExistence(timeout: 5))
+    XCTAssertTrue(stop.isHittable, "Stop should stay in the composer accessory row at AX5.")
+    XCTAssertTrue(context.isHittable, "Context should stay in the composer accessory row at AX5.")
     assertMinimumTapTarget(stop, named: "Stop agent")
+    assertMinimumTapTarget(context, named: "Context usage")
     attachScreenshot(named: "AX5 dark Stop control", app: app)
     stop.tap()
 
@@ -143,10 +142,15 @@ final class AccessibilityUITests: XCTestCase {
     let prompt = "Check active-turn choices at large text size"
     composer.tap()
     composer.typeText(prompt)
+    XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+    XCTAssertTrue(stop.isHittable, "Stop should remain reachable while the keyboard is open.")
+    XCTAssertTrue(context.isHittable, "Context should remain reachable while the keyboard is open.")
     let send = app.buttons["send-message"]
     XCTAssertTrue(send.waitForExistence(timeout: 5))
     XCTAssertTrue(send.isEnabled)
+    XCTAssertTrue(send.isHittable)
     assertMinimumTapTarget(send, named: "Send message")
+    attachScreenshot(named: "AX5 dark accessory and composer with keyboard", app: app)
     send.tap()
 
     let sendSheet = app.navigationBars["Send to running agent?"]
@@ -343,11 +347,19 @@ final class AccessibilityUITests: XCTestCase {
     maxSwipes: Int = 16
   ) -> Bool {
     let composer = app.descendants(matching: .any)["chat-composer"]
+    let accessory = app.descendants(matching: .any)["chat-composer-accessory"]
     let navigationBar = app.navigationBars.firstMatch
 
     for _ in 0..<maxSwipes {
       let top = navigationBar.frame.maxY + 8
-      let bottom = composer.exists ? composer.frame.minY - 24 : timeline.frame.maxY - 24
+      let bottom: CGFloat
+      if accessory.exists {
+        bottom = accessory.frame.minY - 8
+      } else if composer.exists {
+        bottom = composer.frame.minY - 24
+      } else {
+        bottom = timeline.frame.maxY - 24
+      }
       if element.exists && element.isHittable
         && element.frame.minY >= top && element.frame.maxY <= bottom
       {
@@ -355,18 +367,25 @@ final class AccessibilityUITests: XCTestCase {
       }
 
       guard element.exists else {
-        scroll(direction, in: timeline)
+        nudgeTimeline(toward: direction, in: timeline, top: top, bottom: bottom)
         continue
       }
       if element.frame.minY < top {
-        nudgeTimeline(toward: .earlier, in: timeline)
+        nudgeTimeline(toward: .earlier, in: timeline, top: top, bottom: bottom)
       } else {
-        nudgeTimeline(toward: .later, in: timeline)
+        nudgeTimeline(toward: .later, in: timeline, top: top, bottom: bottom)
       }
     }
 
     let top = navigationBar.frame.maxY + 8
-    let bottom = composer.exists ? composer.frame.minY - 24 : timeline.frame.maxY - 24
+    let bottom: CGFloat
+    if accessory.exists {
+      bottom = accessory.frame.minY - 8
+    } else if composer.exists {
+      bottom = composer.frame.minY - 24
+    } else {
+      bottom = timeline.frame.maxY - 24
+    }
     return element.exists && element.isHittable
       && element.frame.minY >= top && element.frame.maxY <= bottom
   }
@@ -375,8 +394,9 @@ final class AccessibilityUITests: XCTestCase {
   {
     let top = app.navigationBars.firstMatch.frame.maxY + 8
     let composer = app.descendants(matching: .any)["chat-composer"]
-    guard composer.exists else { return false }
-    let bottom = composer.frame.minY - 24
+    let accessory = app.descendants(matching: .any)["chat-composer-accessory"]
+    guard accessory.exists || composer.exists else { return false }
+    let bottom = accessory.exists ? accessory.frame.minY - 8 : composer.frame.minY - 24
     return element.exists && element.isHittable
       && element.frame.minY >= top && element.frame.maxY <= bottom
   }
@@ -423,19 +443,32 @@ final class AccessibilityUITests: XCTestCase {
     }
   }
 
-  private func nudgeTimeline(toward direction: TimelineDirection, in timeline: XCUIElement) {
+  private func nudgeTimeline(
+    toward direction: TimelineDirection,
+    in timeline: XCUIElement,
+    top: CGFloat,
+    bottom: CGFloat
+  ) {
+    let frame = timeline.frame
+    let usableTop = max(top, frame.minY + 8)
+    let usableBottom = min(bottom, frame.maxY - 8)
+    let usableHeight = usableBottom - usableTop
+    guard frame.height > 0, usableHeight > 40 else { return }
+
     let startY: CGFloat
     let endY: CGFloat
     switch direction {
     case .earlier:
-      startY = 0.30
-      endY = 0.41
+      startY = usableTop + usableHeight * 0.34
+      endY = usableTop + usableHeight * 0.49
     case .later:
-      startY = 0.70
-      endY = 0.59
+      startY = usableTop + usableHeight * 0.72
+      endY = usableTop + usableHeight * 0.57
     }
-    let start = timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: startY))
-    let end = timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: endY))
+    let start = timeline.coordinate(
+      withNormalizedOffset: CGVector(dx: 0.5, dy: (startY - frame.minY) / frame.height))
+    let end = timeline.coordinate(
+      withNormalizedOffset: CGVector(dx: 0.5, dy: (endY - frame.minY) / frame.height))
     start.press(forDuration: 0.04, thenDragTo: end)
   }
 

@@ -102,20 +102,7 @@ struct ChatView: View {
             }
 
             if let thread {
-              AgentStatusCard(
-                thread: thread,
-                contextUsage: model.contextUsage(for: threadID),
-                isLoadingContextUsage: model.loadingContextUsage,
-                isStopPending: model.isStopRequestPending(threadID),
-                isStopEnabled: model.agentControlAvailable(for: threadID)
-                  && !model.isSendingAgentMessage(for: threadID),
-                onShowUsage: { showsUsageDetails = true },
-                onStop: {
-                  actionConfirmation = .stop(
-                    threadID: threadID,
-                    revision: model.threadStateRevision(for: threadID))
-                }
-              )
+              AgentStatusCard(thread: thread)
             }
 
             if let permission = model.permissions.first(where: { $0.agentID == threadID }) {
@@ -292,6 +279,19 @@ struct ChatView: View {
             focus: $composerFocused,
             send: submitThreadMessage,
             clearError: {},
+            contextUsage: model.contextUsage(for: threadID),
+            isLoadingContextUsage: model.loadingContextUsage,
+            onShowContextUsage: { showsUsageDetails = true },
+            isAgentRunning: thread?.state == .running,
+            isStopPending: model.isStopRequestPending(threadID),
+            isStopEnabled: model.agentControlAvailable(for: threadID)
+              && !model.isSendingAgentMessage(for: threadID),
+            stopButtonIdentifier: "agent-stop-\(threadID)",
+            onStop: {
+              actionConfirmation = .stop(
+                threadID: threadID,
+                revision: model.threadStateRevision(for: threadID))
+            },
             refocusAfterSend: thread?.state != .running
               && !model.hasUncertainAgentMessage(for: threadID)
           )
@@ -471,24 +471,13 @@ private struct AgentActionSheetView: View {
 
 private struct AgentStatusCard: View {
   let thread: RemoteThread
-  let contextUsage: RemoteContextUsage?
-  let isLoadingContextUsage: Bool
-  let isStopPending: Bool
-  let isStopEnabled: Bool
-  var onShowUsage: () -> Void
-  var onStop: () -> Void
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      statusInformation.frame(maxWidth: .infinity, alignment: .leading)
-      Divider()
-      usageButton
-    }
-    .padding(14)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    statusInformation
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.vertical, 4)
   }
 
   private var statusInformation: some View {
@@ -503,7 +492,9 @@ private struct AgentStatusCard: View {
       VStack(alignment: .leading, spacing: 4) {
         if dynamicTypeSize.isAccessibilitySize {
           VStack(alignment: .leading, spacing: 4) {
-            Text(thread.state.label).font(.headline)
+            Text(thread.state.label)
+              .font(.headline)
+              .fixedSize(horizontal: false, vertical: true)
             if thread.requiresAttention {
               Label {
                 Text("Attention").foregroundStyle(.primary)
@@ -515,7 +506,9 @@ private struct AgentStatusCard: View {
           }
         } else {
           HStack(spacing: 8) {
-            Text(thread.state.label).font(.headline)
+            Text(thread.state.label)
+              .font(.headline)
+              .fixedSize(horizontal: false, vertical: true)
             if thread.requiresAttention {
               Label {
                 Text("Attention").foregroundStyle(.primary)
@@ -546,28 +539,8 @@ private struct AgentStatusCard: View {
           .font(.footnote)
           .foregroundStyle(Color.primary.opacity(0.75))
         }
-        if thread.state == .running, !isStopPending {
-          Button(action: onStop) {
-            Text("Stop agent")
-              .foregroundStyle(Color(uiColor: .systemBackground))
-              .frame(minHeight: 44)
-              .fixedSize(horizontal: false, vertical: true)
-          }
-          .buttonStyle(.borderedProminent)
-          .tint(Color(uiColor: .label))
-          .disabled(!isStopEnabled || isStopPending)
-          .accessibilityIdentifier("agent-stop-\(thread.id)")
-        }
       }
     }
-  }
-
-  private var usageButton: some View {
-    Button(action: onShowUsage) {
-      ContextUsageIndicator(usage: contextUsage, isLoading: isLoadingContextUsage)
-    }
-    .buttonStyle(.plain)
-    .accessibilityIdentifier("context-usage-button")
   }
 }
 
