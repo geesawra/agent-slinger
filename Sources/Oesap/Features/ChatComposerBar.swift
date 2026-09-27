@@ -22,6 +22,7 @@ struct ChatComposerBar: View {
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @State private var showsExpandedComposer = false
+  @State private var showsCompactExpandControl = false
   @State private var expandedShouldRestoreFocus = false
   @State private var pendingExpandedSend: (String, [RemoteDraftImage])?
   @State private var pendingImageOperations = 0
@@ -101,9 +102,10 @@ struct ChatComposerBar: View {
       Image(systemName: "arrow.up.left.and.arrow.down.right")
         .font(.system(size: 14, weight: .medium))
         .foregroundStyle(Color.primary)
-        .frame(width: 44, height: 44)
-        .contentShape(Rectangle())
+        .frame(width: 32, height: 32)
+        .contentShape(Circle())
     }
+    .controlSize(.small)
     .accessibilityLabel("Expand message composer")
     .accessibilityIdentifier("chat-composer-expand")
 
@@ -111,9 +113,15 @@ struct ChatComposerBar: View {
       button
         .buttonStyle(.glass)
         .buttonBorderShape(.circle)
+        .frame(width: 44, height: 44)
+        .contentShape(Rectangle())
         .tint(Color(uiColor: .label))
     } else {
-      button.buttonStyle(.bordered).buttonBorderShape(.circle)
+      button
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .frame(width: 44, height: 44)
+        .contentShape(Rectangle())
     }
   }
 
@@ -132,7 +140,6 @@ struct ChatComposerBar: View {
 
           HStack(spacing: 8) {
             imagePicker
-            expandControl
             Spacer(minLength: 0)
           }
           .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -141,7 +148,6 @@ struct ChatComposerBar: View {
         HStack(spacing: 8) {
           contextUsageControl
           imagePicker
-          expandControl
           Spacer(minLength: 0)
           stopControl
         }
@@ -312,7 +318,7 @@ struct ChatComposerBar: View {
 
       HStack(alignment: .bottom, spacing: 4) {
         compactEditor
-        sendControl
+        compactTrailingControls
       }
       .padding(.leading, 8)
       .padding(.vertical, 4)
@@ -347,6 +353,9 @@ struct ChatComposerBar: View {
         onPasteStarted: beginImageOperation,
         onPasteFailed: { message, generation in
           finishImageOperation(message, generation: generation)
+        },
+        onNeedsExpansionChange: { needsExpansion in
+          showsCompactExpandControl = needsExpansion
         }
       )
       .frame(minHeight: 48)
@@ -362,6 +371,16 @@ struct ChatComposerBar: View {
       }
     }
     .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+  }
+
+  private var compactTrailingControls: some View {
+    VStack(spacing: 0) {
+      if showsCompactExpandControl {
+        expandControl
+      }
+      sendControl
+    }
+    .frame(width: 44, alignment: .bottom)
   }
 
   @ViewBuilder
@@ -380,15 +399,17 @@ struct ChatComposerBar: View {
           ProgressView()
         } else {
           Image(systemName: "arrow.up")
-            .font(.system(size: 18, weight: .semibold))
+            .font(.system(size: 16, weight: .semibold))
         }
       }
-      .frame(minWidth: 44, minHeight: 44)
-      .contentShape(Rectangle())
+      .frame(width: 32, height: 32)
+      .contentShape(Circle())
     }
-    .buttonStyle(style)
     .controlSize(.small)
+    .buttonStyle(style)
     .buttonBorderShape(.circle)
+    .frame(width: 44, height: 44)
+    .contentShape(Rectangle())
     .disabled(!canSend)
     .accessibilityLabel(isSending ? "Sending message" : "Send message")
     .accessibilityIdentifier("send-message")
@@ -580,9 +601,9 @@ private struct ExpandedComposerView: View {
   private var sendButton: some View {
     let button = Button(action: onSend) {
       Image(systemName: "arrow.up")
-        .font(.system(size: 18, weight: .semibold))
-        .frame(minWidth: 44, minHeight: 44)
-        .contentShape(Rectangle())
+        .font(.system(size: 16, weight: .semibold))
+        .frame(width: 32, height: 32)
+        .contentShape(Circle())
     }
     .disabled(!canSend)
     .controlSize(.small)
@@ -590,9 +611,15 @@ private struct ExpandedComposerView: View {
     .accessibilityLabel("Send message")
     .accessibilityIdentifier("expanded-send-message")
     if #available(iOS 26.0, *) {
-      button.buttonStyle(.glassProminent)
+      button
+        .buttonStyle(.glassProminent)
+        .frame(width: 44, height: 44)
+        .contentShape(Rectangle())
     } else {
-      button.buttonStyle(.borderedProminent)
+      button
+        .buttonStyle(.borderedProminent)
+        .frame(width: 44, height: 44)
+        .contentShape(Rectangle())
     }
   }
 }

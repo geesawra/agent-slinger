@@ -79,14 +79,19 @@ final class ImageComposerUITests: XCTestCase {
     XCTAssertTrue(composer.waitForExistence(timeout: 5))
     pasteSanitizedImage(into: composer, app: app)
     XCTAssertTrue(app.descendants(matching: .any)["composer-image-0"].waitForExistence(timeout: 10))
+    let source =
+      "Keep this source in the expanded editor while preserving the captured image for a careful review and a clear summary of what changed."
     typeMessageAfterPasting(
-      remainingText: "eep this source in the expanded editor", into: composer, app: app)
-    app.buttons["chat-composer-expand"].tap()
+      remainingText: String(source.dropFirst()), into: composer, app: app)
+    let compactSurface = composerSurface("chat-composer-surface", in: app)
+    let expand = compactSurface.buttons["chat-composer-expand"]
+    XCTAssertTrue(expand.waitForExistence(timeout: 5))
+    expand.tap()
 
     let editor = app.textViews["expanded-chat-composer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5))
     XCTAssertTrue(app.buttons["Preview selected image"].waitForExistence(timeout: 5))
-    XCTAssertEqual(editor.value as? String, "Keep this source in the expanded editor")
+    XCTAssertEqual(editor.value as? String, source)
     pasteSanitizedImage(into: editor, app: app)
     let expandedSurface = composerSurface("expanded-composer-surface", in: app)
     XCTAssertTrue(expandedSurface.waitForExistence(timeout: 5))
@@ -102,7 +107,7 @@ final class ImageComposerUITests: XCTestCase {
     attachScreenshot(named: "Expanded composer with shared image draft", app: app)
 
     app.buttons["expanded-composer-done"].tap()
-    XCTAssertEqual(composer.value as? String, "Keep this source in the expanded editor")
+    XCTAssertEqual(composer.value as? String, source)
     XCTAssertTrue(app.descendants(matching: .any)["composer-image-0"].exists)
   }
 
@@ -202,9 +207,12 @@ final class ImageComposerUITests: XCTestCase {
     let context = app.buttons["context-usage-button"]
     let accessory = app.descendants(matching: .any)["chat-composer-accessory"]
     let send = compactSurface.descendants(matching: .button)["send-message"].firstMatch
+    let expand = compactSurface.buttons["chat-composer-expand"]
+    let source =
+      "Keep this image visible at AX5 while preserving its context for the current review and the next implementation step."
     typeMessageAfterPasting(
-      remainingText: "eep this image visible at AX5", into: composer, app: app)
-    XCTAssertEqual(composer.value as? String, "Keep this image visible at AX5")
+      remainingText: String(source.dropFirst()), into: composer, app: app)
+    XCTAssertEqual(composer.value as? String, source)
     XCTAssertTrue(context.isHittable)
     XCTAssertTrue(accessory.exists)
     XCTAssertTrue(send.waitForExistence(timeout: 5))
@@ -221,7 +229,8 @@ final class ImageComposerUITests: XCTestCase {
     XCTAssertFalse(composer.frame.intersects(send.frame), "The editor must not overlap Send.")
     attachScreenshot(named: "AX5 compact composer with image and text", app: app)
 
-    app.buttons["chat-composer-expand"].tap()
+    XCTAssertTrue(expand.waitForExistence(timeout: 5))
+    expand.tap()
     let expandedSurface = composerSurface("expanded-composer-surface", in: app)
     XCTAssertTrue(expandedSurface.waitForExistence(timeout: 5))
     let expandedThumbnail = expandedSurface.descendants(matching: .any)["composer-image-0"]

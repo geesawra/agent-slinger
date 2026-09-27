@@ -16,6 +16,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
   let onPasteImage: (Data, Int) -> Void
   let onPasteStarted: () -> Int
   let onPasteFailed: (String, Int) -> Void
+  var onNeedsExpansionChange: ((Bool) -> Void)? = nil
 
   func makeCoordinator() -> Coordinator {
     Coordinator(parent: self)
@@ -26,6 +27,9 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     textView.delegate = context.coordinator
     textView.pasteImage = { [weak coordinator = context.coordinator] in
       coordinator?.pasteImageFromClipboard() ?? false
+    }
+    textView.onLayout = { [weak coordinator = context.coordinator] view in
+      coordinator?.requestExpansionMeasurement(on: view)
     }
     textView.backgroundColor = .clear
     textView.textColor = .label
@@ -40,6 +44,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     textView.isScrollEnabled = true
     context.coordinator.parent = self
     context.coordinator.updateMarkdownStyle(on: textView)
+    context.coordinator.requestExpansionMeasurement(on: textView)
     return textView
   }
 
@@ -57,11 +62,14 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     textView.accessibilityLabel = accessibilityLabel
     textView.accessibilityIdentifier = accessibilityIdentifier
     updateScrolling(textView)
+    context.coordinator.requestExpansionMeasurement(on: textView)
     context.coordinator.requestFirstResponder(isFocused, on: textView)
   }
 
   static func dismantleUIView(_ uiView: UITextView, coordinator: Coordinator) {
     coordinator.cancelMarkdownParse()
+    coordinator.cancelExpansionMeasurement()
+    (uiView as? ImagePasteTextView)?.onLayout = nil
     uiView.delegate = nil
   }
 
@@ -121,6 +129,9 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     private var parsingSource: String?
     private var parseGeneration = 0
     private var parseTask: Task<Void, Never>?
+    private var expansionMeasurementGeneration = 0
+    private var lastReportedNeedsExpansion: Bool?
+    private var isDismantled = false
 
     init(parent: NativeImagePasteTextView) {
       self.parent = parent
@@ -200,6 +211,69 @@ struct NativeImagePasteTextView: UIViewRepresentable {
       parsingSource = nil
     }
 
+    func cancelExpansionMeasurement() {
+      isDismantled = true
+      expansionMeasurementGeneration += 1
+    }
+
+    func requestExpansionMeasurement(on textView: UITextView) {
+      guard !isDismantled, !parent.isExpanded, parent.onNeedsExpansionChange != nil else { return }
+      expansionMeasurementGeneration += 1
+      let generation = expansionMeasurementGeneration
+      Task { @MainActor [weak self, weak textView] in
+        await Task.yield()
+        guard let self, let textView,
+          !self.isDismantled,
+          self.expansionMeasurementGeneration == generation,
+          !self.parent.isExpanded,
+          self.parent.onNeedsExpansionChange != nil,
+          self.markdownPlan?.source == textView.text,
+          textView.markedTextRange == nil,
+          let needsExpansion = Self.needsExpansion(for: textView)
+        else { return }
+        guard !self.isDismantled,
+          self.expansionMeasurementGeneration == generation,
+          needsExpansion != self.lastReportedNeedsExpansion
+        else { return }
+        self.lastReportedNeedsExpansion = needsExpansion
+        self.parent.onNeedsExpansionChange?(needsExpansion)
+      }
+    }
+
+    /// Counts actual TextKit line fragments at the view's laid-out width.
+    /// Stop as soon as the third visual line appears, including soft wraps.
+    static func needsExpansion(for textView: UITextView) -> Bool? {
+      let width = textView.bounds.width
+      guard width.isFinite, width > 0,
+        width - textView.textContainerInset.left - textView.textContainerInset.right > 0
+      else { return nil }
+      let container = textView.textContainer
+      let manager = textView.layoutManager
+      let glyphCount = manager.numberOfGlyphs
+      var glyph = 0
+      var lineCount = 0
+      while glyph < glyphCount, lineCount < 3 {
+        var lineRange = NSRange(location: NSNotFound, length: 0)
+        _ = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &lineRange)
+        guard lineRange.location != NSNotFound,
+          lineRange.length > 0, NSMaxRange(lineRange) > glyph
+        else { break }
+        lineCount += 1
+        glyph = NSMaxRange(lineRange)
+      }
+      if lineCount > 2 { return true }
+
+      // A final paragraph break owns no glyph. TextKit's extra fragment is
+      // the visible blank line, so it participates in the same threshold.
+      manager.ensureLayout(for: container)
+      if manager.extraLineFragmentTextContainer === container,
+        manager.extraLineFragmentRect.height > 0
+      {
+        lineCount += 1
+      }
+      return lineCount > 2
+    }
+
     private func scheduleMarkdownParse(for source: String, on textView: UITextView) {
       guard parsingSource != source else { return }
       parseTask?.cancel()
@@ -258,6 +332,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
       lastStyledBlock = block
       lastStyledBodySize = bodyFont.pointSize
       lastStyledFocus = focus
+      requestExpansionMeasurement(on: textView)
     }
 
     func textView(
@@ -307,6 +382,12 @@ struct NativeImagePasteTextView: UIViewRepresentable {
 @MainActor
 private final class ImagePasteTextView: UITextView {
   var pasteImage: (() -> Bool)?
+  var onLayout: ((UITextView) -> Void)?
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    onLayout?(self)
+  }
 
   override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
     if action == #selector(paste(_:)), UIPasteboard.general.hasImages { return true }

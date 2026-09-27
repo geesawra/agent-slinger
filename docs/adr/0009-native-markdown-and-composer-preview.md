@@ -43,10 +43,13 @@ between writing and previewing.
   Render with SwiftUI rather than a web view, so received HTML is never
   executed. Route tapped links through an `openURL` policy that accepts only
   absolute HTTP and HTTPS URLs without embedded credentials.
-- Keep compact and expanded composer input in the same draft binding. The
-  expanded native compose sheet keeps editing live and sends after dismissal,
-  so existing running-agent and uncertain-send choices keep their sequence.
-  This follows Apple's [Sheets guidance](https://developer.apple.com/design/human-interface-guidelines/sheets)
+- Keep compact and expanded composer input in the same draft binding, retaining
+  Markdown source while formatting it live. Place Send inside the trailing edge
+  of both composer surfaces with a 44-point touch target. In compact mode, show
+  Expand above Send only after the text exceeds two visual lines, also with a
+  44-point target. The expanded native sheet sends after dismissal, preserving
+  existing running-agent and uncertain-send choices. This follows Apple's
+  [Sheets guidance](https://developer.apple.com/design/human-interface-guidelines/sheets)
   for focused, full-height composition.
 
 ## License and constraints

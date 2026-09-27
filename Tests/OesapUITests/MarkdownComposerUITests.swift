@@ -10,7 +10,11 @@ final class MarkdownComposerUITests: XCTestCase {
     assertNoComposerModeControls(in: app)
     assertOnlyVisibleComposerEditor("chat-composer", in: app)
 
-    let expand = app.buttons["chat-composer-expand"]
+    let compactDraft = "Review these changes."
+    compactEditor.tap()
+    compactEditor.typeText(compactDraft)
+    let compactSurface = app.descendants(matching: .any)["chat-composer-surface"].firstMatch
+    let expand = compactSurface.buttons["chat-composer-expand"]
     XCTAssertTrue(expand.waitForExistence(timeout: 5))
     expand.tap()
 
@@ -18,9 +22,10 @@ final class MarkdownComposerUITests: XCTestCase {
     XCTAssertTrue(editor.waitForExistence(timeout: 5))
     assertNoComposerModeControls(in: app)
     assertOnlyVisibleComposerEditor("expanded-chat-composer", in: app)
-    let source = "# Live heading\n\n**Bold text**\n\n"
-    editor.tap()
-    editor.typeText(source)
+    let markdownSource = "\n\n# Live heading\n\n**Bold text**\n\n"
+    editor.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
+    editor.typeText(markdownSource)
+    let source = compactDraft + markdownSource
     XCTAssertEqual(editor.value as? String, source)
     attachScreenshot(named: "AX5 expanded composer with live Markdown", app: app)
 
@@ -34,20 +39,30 @@ final class MarkdownComposerUITests: XCTestCase {
   func testExpandedComposerStylesMarkdownWhileKeepingTheEditableSource() {
     let app = launchDemo()
     openNewThread(in: app)
-    app.buttons["chat-composer-expand"].tap()
+    let compactEditor = app.textViews["chat-composer"]
+    XCTAssertTrue(compactEditor.waitForExistence(timeout: 5))
+    let compactDraft =
+      "Please review the recent interface changes, preserve their current behavior, and explain the next implementation step."
+    compactEditor.tap()
+    compactEditor.typeText(compactDraft)
+    let compactSurface = app.descendants(matching: .any)["chat-composer-surface"].firstMatch
+    let expand = compactSurface.buttons["chat-composer-expand"]
+    XCTAssertTrue(expand.waitForExistence(timeout: 5))
+    expand.tap()
 
     let editor = app.textViews["expanded-chat-composer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5))
     assertNoComposerModeControls(in: app)
     assertOnlyVisibleComposerEditor("expanded-chat-composer", in: app)
-    let source = "## Live heading\n\n**Bold** and *italic* with `code`.\n\n- First item\n\n"
-    editor.tap()
-    editor.typeText(source)
+    let markdownSource =
+      "\n\n## Live heading\n\n**Bold** and *italic* with `code`.\n\n- First item\n\n"
+    editor.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
+    editor.typeText(markdownSource)
+    let source = compactDraft + markdownSource
     XCTAssertEqual(editor.value as? String, source)
     attachScreenshot(named: "Expanded live Markdown editing", app: app)
 
     app.buttons["expanded-composer-done"].tap()
-    let compactEditor = app.textViews["chat-composer"]
     XCTAssertTrue(compactEditor.waitForExistence(timeout: 5))
     XCTAssertEqual(compactEditor.value as? String, source)
     assertNoComposerModeControls(in: app)
@@ -108,16 +123,78 @@ final class MarkdownComposerUITests: XCTestCase {
     attachScreenshot(named: "AX5 Context Stop and Send controls", app: app)
   }
 
+  func testCompactExpandAppearsAfterMoreThanTwoVisualLines() {
+    let app = launchDemo(agentControl: true)
+    openRunningThread(in: app)
+
+    let surface = app.descendants(matching: .any)["chat-composer-surface"].firstMatch
+    XCTAssertTrue(surface.waitForExistence(timeout: 5))
+    let editor = app.textViews["chat-composer"]
+    XCTAssertTrue(editor.waitForExistence(timeout: 5))
+    let expand = surface.buttons["chat-composer-expand"]
+    let send = surface.buttons["send-message"]
+
+    let shortDraft = "Review"
+    editor.tap()
+    editor.typeText(shortDraft)
+    XCTAssertFalse(expand.exists, "A one-line draft should not show Expand.")
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertGreaterThanOrEqual(send.frame.width, 44)
+    XCTAssertGreaterThanOrEqual(send.frame.height, 44)
+    attachScreenshot(named: "Compact composer short draft without Expand", app: app)
+
+    let longDraft =
+      "Review the recent workspace changes carefully and return a concise review with concrete risks, relevant context, and the next implementation step."
+    let priorEditorHeight = editor.frame.height
+    editor.typeText(String(longDraft.dropFirst(shortDraft.count)))
+    XCTAssertEqual(editor.value as? String, longDraft)
+    XCTAssertTrue(expand.waitForExistence(timeout: 5))
+    XCTAssertTrue(expand.isHittable)
+    XCTAssertTrue(
+      surface.descendants(matching: .any)["chat-composer-expand"].exists,
+      "Expand should be an accessibility child of the compact composer."
+    )
+    XCTAssertTrue(
+      surface.frame.insetBy(dx: -1, dy: -1).contains(expand.frame),
+      "Expand should be geometrically inside the compact composer."
+    )
+    XCTAssertGreaterThanOrEqual(expand.frame.width, 44)
+    XCTAssertGreaterThanOrEqual(expand.frame.height, 44)
+    XCTAssertGreaterThan(editor.frame.height, priorEditorHeight)
+    XCTAssertGreaterThanOrEqual(send.frame.width, 44)
+    XCTAssertGreaterThanOrEqual(send.frame.height, 44)
+    attachScreenshot(named: "Compact composer long draft with embedded Expand", app: app)
+
+    editor.typeText(
+      String(
+        repeating: XCUIKeyboardKey.delete.rawValue,
+        count: longDraft.count - shortDraft.count
+      ))
+    XCTAssertEqual(editor.value as? String, shortDraft)
+    XCTAssertTrue(waitUntilAbsent(expand, timeout: 5), "Expand should hide again at one line.")
+  }
+
   func testExpandedSendDismissesBeforeShowingRunningAgentChoice() {
     let app = launchDemo(agentControl: true)
     openRunningThread(in: app)
-    app.buttons["chat-composer-expand"].tap()
+    let compactEditor = app.textViews["chat-composer"]
+    XCTAssertTrue(compactEditor.waitForExistence(timeout: 5))
+    let compactPrompt =
+      "Continue this active turn and use the existing plan while reviewing the workspace changes, preserving current behavior, and explaining the next implementation step."
+    compactEditor.tap()
+    compactEditor.typeText(compactPrompt)
+    let compactSurface = app.descendants(matching: .any)["chat-composer-surface"].firstMatch
+    let expand = compactSurface.buttons["chat-composer-expand"]
+    XCTAssertTrue(expand.waitForExistence(timeout: 5))
+    expand.tap()
 
     let editor = app.textViews["expanded-chat-composer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5))
-    let prompt = "## Continue this active turn\n\n**Use the existing plan**\n\n"
-    editor.tap()
-    editor.typeText(prompt)
+    XCTAssertEqual(editor.value as? String, compactPrompt)
+    let markdownSource = "\n\n**Use the existing plan**\n\n"
+    editor.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
+    editor.typeText(markdownSource)
+    let prompt = compactPrompt + markdownSource
     XCTAssertEqual(editor.value as? String, prompt)
     assertNoComposerModeControls(in: app)
     let surface = app.descendants(matching: .any)["expanded-composer-surface"].firstMatch
@@ -228,12 +305,18 @@ final class MarkdownComposerUITests: XCTestCase {
     XCTAssertTrue(thread.waitForExistence(timeout: 5))
     XCTAssertTrue(scrollUntilHittable(thread, in: app))
     thread.tap()
-    XCTAssertTrue(app.buttons["chat-composer-expand"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.textViews["chat-composer"].waitForExistence(timeout: 5))
   }
 
   private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
     let expectation = XCTNSPredicateExpectation(
       predicate: NSPredicate(format: "isHittable == true"), object: element)
+    return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+  }
+
+  private func waitUntilAbsent(_ element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+    let expectation = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: element)
     return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
   }
 
