@@ -247,20 +247,24 @@ public actor PaseoProtocolClient: PaseoService {
     guard !intent.idempotencyKey.isEmpty, !intent.clientMessageID.isEmpty,
       !intent.provider.isEmpty, !intent.cwd.isEmpty,
       !intent.initialPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        || !intent.images.isEmpty
     else { throw PaseoProtocolError.requestRejected("New thread details are incomplete.") }
+    try validateImages(intent.images)
     var config: [String: PaseoJSONValue] = [
       "provider": .string(intent.provider), "cwd": .string(intent.cwd),
     ]
     if let model = intent.model, !model.isEmpty { config["model"] = .string(model) }
+    var fields: [String: PaseoJSONValue] = [
+      "idempotencyKey": .string(intent.idempotencyKey),
+      "clientMessageId": .string(intent.clientMessageID),
+      "config": .object(config),
+      "initialPrompt": .string(intent.initialPrompt),
+      "subscribe": .bool(false),
+    ]
+    if !intent.images.isEmpty { fields["images"] = .array(intent.images.map(Self.imageJSON)) }
     let payload = try await request(
       type: "agent.create.request",
-      fields: [
-        "idempotencyKey": .string(intent.idempotencyKey),
-        "clientMessageId": .string(intent.clientMessageID),
-        "config": .object(config),
-        "initialPrompt": .string(intent.initialPrompt),
-        "subscribe": .bool(false),
-      ],
+      fields: fields,
       responseType: "agent.create.response",
       operation: "new thread creation",
       allowError: true,
@@ -303,7 +307,8 @@ public actor PaseoProtocolClient: PaseoService {
         id: id, title: rawAgent["title"]?.stringValue, provider: provider,
         model: rawAgent["model"]?.stringValue, status: status,
         requiresAttention: rawAgent["requiresAttention"]?.boolValue ?? false,
-        attentionReason: rawAgent["attentionReason"]?.stringValue)
+        attentionReason: rawAgent["attentionReason"]?.stringValue,
+        cwd: rawAgent["cwd"]?.stringValue)
     } else {
       agent = nil
     }
@@ -504,7 +509,7 @@ public actor PaseoProtocolClient: PaseoService {
   public func send(agentID: String, text: String) async throws {
     try await sendMessage(
       agentID: agentID, text: text, messageID: UUID().uuidString.lowercased(),
-      activeTurnBehavior: nil)
+      activeTurnBehavior: nil, images: [])
   }
 
   public func send(
@@ -516,20 +521,37 @@ public actor PaseoProtocolClient: PaseoService {
     }
     try await sendMessage(
       agentID: agentID, text: text, messageID: messageID,
-      activeTurnBehavior: activeTurnBehavior)
+      activeTurnBehavior: activeTurnBehavior, images: [])
+  }
+
+  public func send(
+    agentID: String, text: String, messageID: String,
+    activeTurnBehavior: PaseoActiveTurnBehavior, images: [PaseoImage]
+  ) async throws {
+    guard !messageID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("The message ID must not be empty.")
+    }
+    try await sendMessage(
+      agentID: agentID, text: text, messageID: messageID,
+      activeTurnBehavior: activeTurnBehavior, images: images)
   }
 
   private func sendMessage(
     agentID: String, text: String, messageID: String,
-    activeTurnBehavior: PaseoActiveTurnBehavior?
+    activeTurnBehavior: PaseoActiveTurnBehavior?, images: [PaseoImage]
   ) async throws {
     try requireConnected()
+    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Add a message or image before sending.")
+    }
+    try validateImages(images)
     var fields: [String: PaseoJSONValue] = [
       "agentId": .string(agentID), "text": .string(text), "messageId": .string(messageID),
     ]
     if let activeTurnBehavior {
       fields["activeTurnBehavior"] = .string(activeTurnBehavior.rawValue)
     }
+    if !images.isEmpty { fields["images"] = .array(images.map(Self.imageJSON)) }
     let payload = try await request(
       type: "send_agent_message_request",
       fields: fields,
@@ -548,6 +570,55 @@ public actor PaseoProtocolClient: PaseoService {
     guard accepted else {
       throw PaseoProtocolError.requestRejected(
         payload["error"]?.stringValue ?? "The host did not accept the message.")
+    }
+  }
+
+  public func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data {
+    try requireConnected()
+    guard !cwd.isEmpty, !path.isEmpty, maxBytes > 0,
+      maxBytes <= RemoteImageLimits.maximumDisplayBytes
+    else { throw PaseoProtocolError.requestRejected("Invalid image preview request.") }
+    // The legacy JSON response carries base64. Do not request the optional
+    // binary transfer, which requires a separate frame decoder.
+    let payload = try await request(
+      type: "file_explorer_request",
+      fields: [
+        "cwd": .string(cwd), "path": .string(path), "mode": .string("file"),
+        "maxBytes": .number(Double(maxBytes)),
+      ],
+      responseType: "file_explorer_response", operation: "image preview",
+      allowError: true)
+    if let error = payload["error"]?.stringValue, !error.isEmpty {
+      throw PaseoProtocolError.requestRejected(error)
+    }
+    guard payload["mode"]?.stringValue == "file",
+      let file = payload["file"], case .object = file,
+      file["kind"]?.stringValue == "image",
+      file["encoding"]?.stringValue == "base64",
+      let mime = file["mimeType"]?.stringValue, mime.hasPrefix("image/"),
+      let size = file["size"]?.intValue, size >= 0, size <= maxBytes,
+      let encoded = file["content"]?.stringValue,
+      encoded.utf8.count <= ((maxBytes + 2) / 3) * 4 + 4,
+      let bytes = Data(base64Encoded: encoded), bytes.count == size
+    else { throw PaseoProtocolError.malformedMessage("image preview returned invalid image data") }
+    return bytes
+  }
+
+  private static func imageJSON(_ image: PaseoImage) -> PaseoJSONValue {
+    .object([
+      "data": .string(image.data.base64EncodedString()),
+      "mimeType": .string(image.mimeType),
+    ])
+  }
+
+  private func validateImages(_ images: [PaseoImage]) throws {
+    guard images.count <= RemoteImageLimits.maximumCount,
+      images.allSatisfy({
+        !$0.data.isEmpty && $0.data.count <= RemoteImageLimits.maximumOutgoingBytes
+          && $0.mimeType.hasPrefix("image/")
+      })
+    else {
+      throw PaseoProtocolError.requestRejected("An attached image is too large or unsupported.")
     }
   }
 

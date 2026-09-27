@@ -1,19 +1,19 @@
 import SwiftUI
 
 private enum AgentActionSheet: Identifiable {
-  case send(threadID: String, text: String, revision: Int)
+  case send(threadID: String, text: String, images: [RemoteDraftImage], revision: Int)
   case uncertainSend(threadID: String)
 
   var id: String {
     switch self {
-    case .send(let threadID, _, let revision): "send-\(threadID)-\(revision)"
+    case .send(let threadID, _, _, let revision): "send-\(threadID)-\(revision)"
     case .uncertainSend(let threadID): "uncertain-\(threadID)"
     }
   }
 
   var title: String {
     switch self {
-    case .send(_, _, _): "Send to running agent?"
+    case .send(_, _, _, _): "Send to running agent?"
     case .uncertainSend(_): "Check the previous send"
     }
   }
@@ -59,7 +59,7 @@ struct ChatView: View {
   @Bindable var model: OesapModel
   let threadID: String
   @State private var showsUsageDetails = false
-  @FocusState private var composerFocused: Bool
+  @State private var composerFocused = false
   @State private var viewportHeight: CGFloat = 0
   @State private var isNearBottom = true
   @State private var expandedToolCallIDs: Set<String> = []
@@ -167,8 +167,15 @@ struct ChatView: View {
                 )
                 .id(message.id)
               } else {
-                MessageBubble(message: message)
-                  .id(message.id)
+                MessageBubble(
+                  message: message,
+                  threadID: threadID,
+                  timelineGeneration: model.timelineGeneration,
+                  loadRemoteImage: { source, imageThreadID in
+                    try await model.loadRemoteImage(source: source, threadID: imageThreadID)
+                  }
+                )
+                .id(message.id)
               }
             }
 
@@ -267,11 +274,15 @@ struct ChatView: View {
             withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(newValue.id, anchor: .bottom) }
           }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .composerSafeAreaBar {
           ChatComposerBar(
             draft: Binding(
               get: { model.draft(for: threadID) },
               set: { model.setDraft($0, for: threadID) }
+            ),
+            images: Binding(
+              get: { model.draftImages(for: threadID) },
+              set: { _ = model.setDraftImages($0, for: threadID) }
             ),
             isSending: model.isSendingAgentMessage(for: threadID),
             isConnected: model.agentControlAvailable(for: threadID),
@@ -292,6 +303,7 @@ struct ChatView: View {
                 threadID: threadID,
                 revision: model.threadStateRevision(for: threadID))
             },
+            imageImportIdentity: "\(threadID)-\(model.timelineGeneration)",
             refocusAfterSend: thread?.state != .running
               && !model.hasUncertainAgentMessage(for: threadID)
           )
@@ -306,22 +318,24 @@ struct ChatView: View {
             action: action,
             canRetry: model.canRetryAgentMessage(for: threadID),
             isConnected: model.connectionState == .connected,
-            onSteer: { confirmedThreadID, text, revision in
+            onSteer: { confirmedThreadID, text, images, revision in
               actionSheet = nil
               composerFocused = false
               Task {
                 _ = await model.send(
                   threadID: confirmedThreadID, text: text, behavior: .steer,
-                  expectedStateRevision: revision, selectedDuringActiveTurn: true)
+                  expectedStateRevision: revision, selectedDuringActiveTurn: true,
+                  images: images)
               }
             },
-            onInterrupt: { confirmedThreadID, text, revision in
+            onInterrupt: { confirmedThreadID, text, images, revision in
               actionSheet = nil
               composerFocused = false
               Task {
                 _ = await model.send(
                   threadID: confirmedThreadID, text: text, behavior: .interrupt,
-                  expectedStateRevision: revision, selectedDuringActiveTurn: true)
+                  expectedStateRevision: revision, selectedDuringActiveTurn: true,
+                  images: images)
               }
             },
             onRetry: { confirmedThreadID in
@@ -374,7 +388,7 @@ struct ChatView: View {
     }
   }
 
-  private func submitThreadMessage(_ text: String) {
+  private func submitThreadMessage(_ text: String, images: [RemoteDraftImage]) {
     guard let thread else { return }
     if model.hasUncertainAgentMessage(for: threadID) {
       actionSheet = .uncertainSend(threadID: threadID)
@@ -382,13 +396,29 @@ struct ChatView: View {
     }
     let revision = model.threadStateRevision(for: threadID)
     if thread.state == .running {
-      actionSheet = .send(threadID: threadID, text: text, revision: revision)
+      actionSheet = .send(threadID: threadID, text: text, images: images, revision: revision)
     } else {
       Task {
         _ = await model.send(
           threadID: threadID, text: text, behavior: .interrupt,
-          expectedStateRevision: revision, selectedDuringActiveTurn: false)
+          expectedStateRevision: revision, selectedDuringActiveTurn: false,
+          images: images)
       }
+    }
+  }
+}
+
+extension View {
+  @ViewBuilder
+  fileprivate func composerSafeAreaBar<Content: View>(@ViewBuilder content: () -> Content)
+    -> some View
+  {
+    if #available(iOS 26.0, *) {
+      self
+        .scrollEdgeEffectStyle(.soft, for: .bottom)
+        .safeAreaBar(edge: .bottom, spacing: 0, content: content)
+    } else {
+      safeAreaInset(edge: .bottom, spacing: 0, content: content)
     }
   }
 }
@@ -397,8 +427,8 @@ private struct AgentActionSheetView: View {
   let action: AgentActionSheet
   let canRetry: Bool
   let isConnected: Bool
-  var onSteer: (String, String, Int) -> Void
-  var onInterrupt: (String, String, Int) -> Void
+  var onSteer: (String, String, [RemoteDraftImage], Int) -> Void
+  var onInterrupt: (String, String, [RemoteDraftImage], Int) -> Void
   var onRetry: (String) -> Void
   var onClearWarning: (String) -> Void
   @Environment(\.dismiss) private var dismiss
@@ -412,10 +442,10 @@ private struct AgentActionSheetView: View {
         }
         Section {
           switch action {
-          case .send(let threadID, let text, let revision):
+          case .send(let threadID, let text, let images, let revision):
             Button {
               dismiss()
-              onSteer(threadID, text, revision)
+              onSteer(threadID, text, images, revision)
             } label: {
               Text("Steer when supported")
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -424,7 +454,7 @@ private struct AgentActionSheetView: View {
             .accessibilityIdentifier("agent-send-steer")
             Button(role: .destructive) {
               dismiss()
-              onInterrupt(threadID, text, revision)
+              onInterrupt(threadID, text, images, revision)
             } label: {
               Text("Interrupt and send")
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -726,6 +756,9 @@ private struct PermissionCard: View {
 
 private struct MessageBubble: View {
   let message: RemoteMessage
+  let threadID: String
+  let timelineGeneration: Int
+  let loadRemoteImage: (String, String) async throws -> Data
 
   var body: some View {
     HStack {
@@ -734,7 +767,24 @@ private struct MessageBubble: View {
         Text(message.author.label)
           .font(.caption.weight(.semibold))
           .foregroundStyle(Color.primary.opacity(0.75))
-        MessageMarkdownView(source: message.text)
+        MessageMarkdownView(
+          source: message.text,
+          threadID: threadID,
+          loadRemoteImage: loadRemoteImage
+        )
+        .id("\(threadID)-\(timelineGeneration)-\(message.id)")
+        if !message.images.isEmpty {
+          ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+              ForEach(Array(message.images.enumerated()), id: \.element.id) { index, image in
+                ImageAttachmentThumbnail(image: image)
+                  .frame(width: 112, height: 112)
+                  .accessibilityIdentifier("message-image-\(message.id)-\(index)")
+              }
+            }
+          }
+          .scrollIndicators(.hidden)
+        }
         if let timestamp = message.timestamp {
           Text(timestamp, style: .time)
             .font(.caption2)

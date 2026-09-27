@@ -2,11 +2,12 @@ import SwiftUI
 
 struct ChatComposerBar: View {
   @Binding var draft: String
+  @Binding var images: [RemoteDraftImage]
   let isSending: Bool
   let isConnected: Bool
   let error: String?
-  var focus: FocusState<Bool>.Binding
-  var send: (String) -> Void
+  var focus: Binding<Bool>
+  var send: (String, [RemoteDraftImage]) -> Void
   var clearError: () -> Void
   var contextUsage: RemoteContextUsage? = nil
   var isLoadingContextUsage = false
@@ -16,6 +17,7 @@ struct ChatComposerBar: View {
   var isStopEnabled = false
   var stopButtonIdentifier = "agent-stop"
   var onStop: (() -> Void)? = nil
+  var imageImportIdentity = "composer"
   var refocusAfterSend = true
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -24,23 +26,49 @@ struct ChatComposerBar: View {
   @State private var expandedStartsInPreview = false
   @State private var expandedShouldRestoreFocus = false
   @State private var compactPreviewShouldRestoreFocus = false
-  @State private var sendAfterExpandedDismiss = false
+  @State private var pendingExpandedSend: (String, [RemoteDraftImage])?
+  @State private var pendingImageOperations = 0
+  @State private var imagePreparationError: String?
+  @State private var imageImportGeneration = 0
+  @State private var imagePreparationTasks: [UUID: Task<Void, Never>] = [:]
 
   var body: some View {
     controls
       .sheet(isPresented: $showsExpandedComposer, onDismiss: expandedComposerDidDismiss) {
         ExpandedComposerView(
           draft: $draft,
+          images: $images,
           canSend: canSend,
+          pendingImageOperations: pendingImageOperations,
+          imageError: imagePreparationError,
+          imageImportIdentity: imageImportIdentity,
           startsInPreview: expandedStartsInPreview,
           onDismiss: { showsExpandedComposer = false },
+          onImageOperationStarted: beginImageOperation,
+          onImageLoaded: { data, fileName, generation in
+            prepareImage(data, fileName: fileName, generation: generation)
+          },
+          onImageOperationFailed: { message, generation in
+            finishImageOperation(message, generation: generation)
+          },
+          onRemoveImage: removeImage,
           onSend: {
-            sendAfterExpandedDismiss = true
+            pendingExpandedSend = (draft, images)
             showsExpandedComposer = false
           }
         )
       }
       .onChange(of: draft) { _, _ in clearError() }
+      .onChange(of: imageImportIdentity) { _, _ in invalidateImageOperations() }
+      .onChange(of: isConnected) { _, connected in
+        if !connected { invalidateImageOperations() }
+      }
+      .onDisappear {
+        Task { @MainActor in
+          await Task.yield()
+          invalidateImageOperations()
+        }
+      }
   }
 
   @ViewBuilder
@@ -67,7 +95,12 @@ struct ChatComposerBar: View {
 
       accessoryRow
 
+      imageDraftStrip
+
       HStack(alignment: .bottom, spacing: 8) {
+        if !dynamicTypeSize.isAccessibilitySize {
+          imagePicker
+        }
         messageInput
         sendControl
       }
@@ -165,6 +198,7 @@ struct ChatComposerBar: View {
           }
 
           HStack(spacing: 8) {
+            imagePicker
             compactModeControl
             expandControl
             Spacer(minLength: 0)
@@ -189,6 +223,86 @@ struct ChatComposerBar: View {
 
   private var hasAgentStatusControls: Bool {
     onShowContextUsage != nil || ((isAgentRunning || isStopPending) && onStop != nil)
+  }
+
+  private var remainingImageCount: Int {
+    max(0, RemoteImageLimits.maximumCount - images.count - pendingImageOperations)
+  }
+
+  private var imagePicker: some View {
+    ComposerImagePickerButton(
+      remainingCount: remainingImageCount,
+      imageImportIdentity: imageImportIdentity,
+      onOperationStarted: beginImageOperation,
+      onImageLoaded: { data, fileName, generation in
+        prepareImage(data, fileName: fileName, generation: generation)
+      },
+      onOperationFailed: { message, generation in
+        finishImageOperation(message, generation: generation)
+      }
+    )
+  }
+
+  private var imageDraftStrip: some View {
+    ComposerImageDraftStrip(
+      images: $images,
+      isPreparing: pendingImageOperations > 0,
+      error: imagePreparationError,
+      onRemove: removeImage
+    )
+  }
+
+  private func beginImageOperation() -> Int {
+    pendingImageOperations += 1
+    imagePreparationError = nil
+    return imageImportGeneration
+  }
+
+  private func prepareImage(_ data: Data, fileName: String?, generation: Int) {
+    guard generation == imageImportGeneration else { return }
+    let taskID = UUID()
+    imagePreparationTasks[taskID] = Task { @MainActor in
+      defer { imagePreparationTasks[taskID] = nil }
+      do {
+        guard data.count <= RemoteImageLimits.maximumInputBytes else {
+          throw ImageImportServiceError.tooLarge
+        }
+        let image = try await ImagePreparationService().prepare(data: data, fileName: fileName)
+        guard generation == imageImportGeneration else { return }
+        guard images.count < RemoteImageLimits.maximumCount else {
+          imagePreparationError = "Attach up to six images."
+          pendingImageOperations = max(0, pendingImageOperations - 1)
+          return
+        }
+        images.append(image)
+        imagePreparationError = nil
+      } catch {
+        guard generation == imageImportGeneration else { return }
+        imagePreparationError = error.localizedDescription
+      }
+      if generation == imageImportGeneration {
+        pendingImageOperations = max(0, pendingImageOperations - 1)
+      }
+    }
+  }
+
+  private func finishImageOperation(_ message: String, generation: Int) {
+    guard generation == imageImportGeneration else { return }
+    imagePreparationError = message
+    pendingImageOperations = max(0, pendingImageOperations - 1)
+  }
+
+  private func invalidateImageOperations() {
+    imageImportGeneration += 1
+    for task in imagePreparationTasks.values {
+      task.cancel()
+    }
+    imagePreparationTasks.removeAll()
+    pendingImageOperations = 0
+  }
+
+  private func removeImage(_ id: String) {
+    images.removeAll { $0.id == id }
   }
 
   @ViewBuilder
@@ -261,24 +375,43 @@ struct ChatComposerBar: View {
 
   @ViewBuilder
   private var messageField: some View {
-    let field = TextField("Message agent…", text: $draft, axis: .vertical)
-      .lineLimit(dynamicTypeSize.isAccessibilitySize ? 1...2 : 1...5)
-      .submitLabel(.send)
-      .focused(focus)
-      .accessibilityLabel("Message agent")
-      .accessibilityIdentifier("chat-composer")
-      .onSubmit(sendDraft)
-      .textFieldStyle(.plain)
-      .padding(.horizontal, 14)
-      .padding(.vertical, 10)
-      .frame(minHeight: 48, alignment: .leading)
+    let input = ZStack(alignment: .topLeading) {
+      NativeImagePasteTextView(
+        text: $draft,
+        isFocused: focus,
+        accessibilityLabel: "Message agent",
+        accessibilityIdentifier: "chat-composer",
+        isExpanded: false,
+        canSubmit: canSend,
+        onSubmit: sendDraft,
+        onPasteImage: { data, generation in
+          prepareImage(data, fileName: nil, generation: generation)
+        },
+        onPasteStarted: beginImageOperation,
+        onPasteFailed: { message, generation in
+          finishImageOperation(message, generation: generation)
+        }
+      )
+      .frame(minHeight: 48)
+
+      if draft.isEmpty {
+        Text("Message agent…")
+          .font(.body)
+          .foregroundStyle(Color.secondary)
+          .padding(.horizontal, 16)
+          .padding(.top, 12)
+          .allowsHitTesting(false)
+          .accessibilityHidden(true)
+      }
+    }
+    .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
 
     if #available(iOS 26.0, *) {
-      field.glassEffect(
+      input.glassEffect(
         .regular,
         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     } else {
-      field.background(
+      input.background(
         Color(uiColor: .secondarySystemBackground),
         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
@@ -360,12 +493,13 @@ struct ChatComposerBar: View {
   }
 
   private var canSend: Bool {
-    isConnected && !isSending && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    isConnected && !isSending && pendingImageOperations == 0
+      && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty)
   }
 
   private func sendDraft() {
     guard canSend else { return }
-    send(draft)
+    send(draft, images)
     focus.wrappedValue = refocusAfterSend
   }
 
@@ -393,9 +527,11 @@ struct ChatComposerBar: View {
   }
 
   private func expandedComposerDidDismiss() {
-    if sendAfterExpandedDismiss {
-      sendAfterExpandedDismiss = false
-      sendDraft()
+    if let pendingExpandedSend {
+      self.pendingExpandedSend = nil
+      guard canSend else { return }
+      send(pendingExpandedSend.0, pendingExpandedSend.1)
+      focus.wrappedValue = refocusAfterSend
     } else if expandedShouldRestoreFocus {
       Task { @MainActor in
         await Task.yield()
@@ -407,12 +543,20 @@ struct ChatComposerBar: View {
 
 private struct ExpandedComposerView: View {
   @Binding var draft: String
+  @Binding var images: [RemoteDraftImage]
   let canSend: Bool
+  let pendingImageOperations: Int
+  let imageError: String?
+  let imageImportIdentity: String
   let startsInPreview: Bool
   let onDismiss: () -> Void
+  let onImageOperationStarted: () -> Int
+  let onImageLoaded: (Data, String?, Int) -> Void
+  let onImageOperationFailed: (String, Int) -> Void
+  let onRemoveImage: (String) -> Void
   let onSend: () -> Void
 
-  @FocusState private var editorFocused: Bool
+  @State private var editorFocused = false
   @State private var isPreview = false
 
   var body: some View {
@@ -424,6 +568,23 @@ private struct ExpandedComposerView: View {
         }
         .pickerStyle(.segmented)
         .accessibilityIdentifier("expanded-composer-mode")
+
+        ComposerImagePickerButton(
+          remainingCount: max(
+            0, RemoteImageLimits.maximumCount - images.count - pendingImageOperations),
+          imageImportIdentity: imageImportIdentity,
+          onOperationStarted: onImageOperationStarted,
+          onImageLoaded: onImageLoaded,
+          onOperationFailed: onImageOperationFailed
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+
+        ComposerImageDraftStrip(
+          images: $images,
+          isPreparing: pendingImageOperations > 0,
+          error: imageError,
+          onRemove: onRemoveImage
+        )
 
         if isPreview {
           preview
@@ -469,11 +630,19 @@ private struct ExpandedComposerView: View {
 
   private var editor: some View {
     ZStack(alignment: .topLeading) {
-      TextEditor(text: $draft)
-        .focused($editorFocused)
-        .scrollContentBackground(.hidden)
-        .accessibilityLabel("Message agent")
-        .accessibilityIdentifier("expanded-chat-composer")
+      NativeImagePasteTextView(
+        text: $draft,
+        isFocused: $editorFocused,
+        accessibilityLabel: "Message agent",
+        accessibilityIdentifier: "expanded-chat-composer",
+        isExpanded: true,
+        canSubmit: canSend,
+        onSubmit: onSend,
+        onPasteImage: { data, generation in onImageLoaded(data, nil, generation) },
+        onPasteStarted: onImageOperationStarted,
+        onPasteFailed: onImageOperationFailed
+      )
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
 
       if draft.isEmpty {
         Text("Write a message. Markdown is supported.")

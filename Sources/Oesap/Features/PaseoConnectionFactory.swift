@@ -197,7 +197,8 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
         provider: intent.provider,
         model: intent.model,
         cwd: intent.cwd,
-        initialPrompt: intent.prompt))
+        initialPrompt: intent.prompt,
+        images: intent.images.map { PaseoImage(data: $0.data, mimeType: $0.mimeType) }))
     let thread = result.agent.map { agent in
       RemoteThread(
         id: agent.id,
@@ -206,7 +207,7 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
         model: agent.model,
         state: Self.mapState(agent.status),
         requiresAttention: agent.requiresAttention,
-        attentionReason: agent.attentionReason)
+        attentionReason: agent.attentionReason, cwd: agent.cwd)
     }
     return RemoteNewThreadResult(
       thread: thread, promptAccepted: result.promptAccepted, error: result.error,
@@ -344,6 +345,15 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
   func send(
     agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
   ) async throws {
+    try await send(
+      agentID: agentID, text: text, messageID: messageID,
+      behavior: behavior, images: [])
+  }
+
+  func send(
+    agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior,
+    images: [RemoteDraftImage]
+  ) async throws {
     let activeTurnBehavior: PaseoActiveTurnBehavior =
       switch behavior {
       case .interrupt: .interrupt
@@ -351,7 +361,12 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       }
     try await client.send(
       agentID: agentID, text: text, messageID: messageID,
-      activeTurnBehavior: activeTurnBehavior)
+      activeTurnBehavior: activeTurnBehavior,
+      images: images.map { PaseoImage(data: $0.data, mimeType: $0.mimeType) })
+  }
+
+  func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data {
+    try await client.readImage(cwd: cwd, path: path, maxBytes: maxBytes)
   }
 
   func stop(agentID: String) async throws -> RemoteAgentControlSnapshot? {
@@ -600,7 +615,8 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       requiresAttention: thread.requiresAttention,
       attentionReason: thread.attentionReason,
       contextUsage: mapContextUsage(
-        used: thread.contextWindowUsedTokens, max: thread.contextWindowMaxTokens)
+        used: thread.contextWindowUsedTokens, max: thread.contextWindowMaxTokens),
+      cwd: thread.cwd
     )
   }
 
@@ -697,7 +713,9 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     switch type {
     case "user_message":
       guard let text = object["text"]?.stringValue else { return nil }
-      return RemoteMessage(id: id, author: .user, text: text, timestamp: date)
+      return RemoteMessage(
+        id: id, author: .user, text: text, timestamp: date,
+        clientMessageID: object["clientMessageId"]?.stringValue)
     case "assistant_message", "reasoning":
       guard let text = object["text"]?.stringValue else { return nil }
       return RemoteMessage(id: id, author: .agent, text: text, timestamp: date)

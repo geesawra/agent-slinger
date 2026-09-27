@@ -6,7 +6,7 @@ struct NewChatView: View {
   var onOpenAgent: () -> Void
   var onCreated: (String) -> Void
 
-  @FocusState private var composerFocused: Bool
+  @State private var composerFocused = false
   @State private var hasInitiallyFocusedComposer = false
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   private var project: RemoteProject? { model.projects.first { $0.id == projectID } }
@@ -59,12 +59,17 @@ struct NewChatView: View {
           get: { model.draft(for: draftKey) },
           set: { model.setDraft($0, for: draftKey) }
         ),
+        images: Binding(
+          get: { model.draftImages(for: draftKey) },
+          set: { _ = model.setDraftImages($0, for: draftKey) }
+        ),
         isSending: model.sendingMessage,
         isConnected: canStartThread,
         error: model.messageError,
         focus: $composerFocused,
         send: sendFirstMessage,
-        clearError: model.clearMessageError
+        clearError: model.clearMessageError,
+        imageImportIdentity: "\(draftKey)-\(model.timelineGeneration)"
       )
     }
     .navigationTitle("New thread")
@@ -274,7 +279,8 @@ struct NewChatView: View {
     model.connectionState == .connected && model.canCreateThreads && configuration != nil
   }
 
-  private func sendFirstMessage(_ text: String) {
+  private func sendFirstMessage(_ text: String, images: [RemoteDraftImage]) {
+    guard model.setDraftImages(images, for: draftKey) else { return }
     Task {
       guard let threadID = await model.sendFirstMessage(projectID: projectID, text: text) else {
         return

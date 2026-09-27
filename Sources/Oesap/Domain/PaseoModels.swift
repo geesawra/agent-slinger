@@ -135,10 +135,11 @@ public struct PaseoAgentCreationIntent: Sendable, Equatable {
   public let model: String?
   public let cwd: String
   public let initialPrompt: String
+  public let images: [PaseoImage]
 
   public init(
     idempotencyKey: String, clientMessageID: String, provider: String, model: String?,
-    cwd: String, initialPrompt: String
+    cwd: String, initialPrompt: String, images: [PaseoImage] = []
   ) {
     self.idempotencyKey = idempotencyKey
     self.clientMessageID = clientMessageID
@@ -146,6 +147,17 @@ public struct PaseoAgentCreationIntent: Sendable, Equatable {
     self.model = model
     self.cwd = cwd
     self.initialPrompt = initialPrompt
+    self.images = images
+  }
+}
+
+public struct PaseoImage: Sendable, Equatable {
+  public let data: Data
+  public let mimeType: String
+
+  public init(data: Data, mimeType: String) {
+    self.data = data
+    self.mimeType = mimeType
   }
 }
 
@@ -173,10 +185,11 @@ public struct PaseoCreatedAgent: Sendable, Equatable {
   public let status: String
   public let requiresAttention: Bool
   public let attentionReason: String?
+  public let cwd: String?
 
   public init(
     id: String, title: String?, provider: String, model: String?, status: String,
-    requiresAttention: Bool, attentionReason: String?
+    requiresAttention: Bool, attentionReason: String?, cwd: String? = nil
   ) {
     self.id = id
     self.title = title
@@ -185,6 +198,7 @@ public struct PaseoCreatedAgent: Sendable, Equatable {
     self.status = status
     self.requiresAttention = requiresAttention
     self.attentionReason = attentionReason
+    self.cwd = cwd
   }
 }
 
@@ -515,6 +529,11 @@ public protocol PaseoService: Sendable {
     agentID: String, text: String, messageID: String,
     activeTurnBehavior: PaseoActiveTurnBehavior
   ) async throws
+  func send(
+    agentID: String, text: String, messageID: String,
+    activeTurnBehavior: PaseoActiveTurnBehavior, images: [PaseoImage]
+  ) async throws
+  func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data
   func cancelAgent(agentID: String) async throws -> PaseoAgentControlSnapshot?
   func pendingPermissions() async throws -> [PaseoPermissionRequest]
   func answerPermission(agentID: String, requestID: String, decision: PaseoPermissionDecision)
@@ -533,6 +552,20 @@ extension PaseoService {
     activeTurnBehavior: PaseoActiveTurnBehavior
   ) async throws {
     throw PaseoProtocolError.unsupportedCapability("explicit agent message control")
+  }
+  public func send(
+    agentID: String, text: String, messageID: String,
+    activeTurnBehavior: PaseoActiveTurnBehavior, images: [PaseoImage]
+  ) async throws {
+    if images.isEmpty {
+      return try await send(
+        agentID: agentID, text: text, messageID: messageID,
+        activeTurnBehavior: activeTurnBehavior)
+    }
+    throw PaseoProtocolError.unsupportedCapability("image messages")
+  }
+  public func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data {
+    throw PaseoProtocolError.unsupportedCapability("image file preview")
   }
   public func cancelAgent(agentID: String) async throws -> PaseoAgentControlSnapshot? {
     throw PaseoProtocolError.unsupportedCapability("agent cancellation")

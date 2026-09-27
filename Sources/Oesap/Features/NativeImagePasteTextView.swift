@@ -1,0 +1,210 @@
+import SwiftUI
+import UIKit
+import UniformTypeIdentifiers
+
+/// A native text view is used for both composer sizes so UIKit can keep its
+/// standard text-paste behavior while routing pasted images into the draft.
+@MainActor
+struct NativeImagePasteTextView: UIViewRepresentable {
+  @Binding var text: String
+  @Binding var isFocused: Bool
+  let accessibilityLabel: String
+  let accessibilityIdentifier: String
+  let isExpanded: Bool
+  let canSubmit: Bool
+  let onSubmit: () -> Void
+  let onPasteImage: (Data, Int) -> Void
+  let onPasteStarted: () -> Int
+  let onPasteFailed: (String, Int) -> Void
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator(parent: self)
+  }
+
+  func makeUIView(context: Context) -> UITextView {
+    let textView = ImagePasteTextView()
+    textView.delegate = context.coordinator
+    textView.pasteImage = { [weak coordinator = context.coordinator] in
+      coordinator?.pasteImageFromClipboard() ?? false
+    }
+    textView.backgroundColor = .clear
+    textView.textColor = .label
+    textView.font = .preferredFont(forTextStyle: .body)
+    textView.adjustsFontForContentSizeCategory = true
+    textView.textContainerInset = UIEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+    textView.textContainer.lineFragmentPadding = 0
+    textView.returnKeyType = isExpanded ? .default : .send
+    textView.accessibilityLabel = accessibilityLabel
+    textView.accessibilityIdentifier = accessibilityIdentifier
+    textView.text = text
+    textView.isScrollEnabled = true
+    context.coordinator.parent = self
+    return textView
+  }
+
+  func updateUIView(_ textView: UITextView, context: Context) {
+    context.coordinator.parent = self
+    if textView.text != text { textView.text = text }
+    textView.font = .preferredFont(forTextStyle: .body)
+    textView.returnKeyType = isExpanded ? .default : .send
+    textView.accessibilityLabel = accessibilityLabel
+    textView.accessibilityIdentifier = accessibilityIdentifier
+    updateScrolling(textView)
+    context.coordinator.requestFirstResponder(isFocused, on: textView)
+  }
+
+  func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+    let proposedWidth = proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+    let width = proposedWidth ?? uiView.bounds.width
+    guard width.isFinite, width > 0 else { return nil }
+    if isExpanded {
+      let proposedHeight = proposal.height.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+      let boundsHeight =
+        uiView.bounds.height.isFinite && uiView.bounds.height > 0
+        ? uiView.bounds.height : 320
+      let height = proposedHeight ?? boundsHeight
+      return CGSize(width: width, height: height)
+    }
+
+    let measured = uiView.sizeThatFits(
+      CGSize(width: width, height: .greatestFiniteMagnitude)
+    ).height
+    let maximumHeight = maximumCompactHeight(for: uiView)
+    let height = min(max(48, measured), maximumHeight)
+    return CGSize(width: width, height: height)
+  }
+
+  private func updateScrolling(_ textView: UITextView) {
+    guard !isExpanded, textView.bounds.width.isFinite, textView.bounds.width > 0 else {
+      if isExpanded { textView.isScrollEnabled = true }
+      return
+    }
+    let measured = textView.sizeThatFits(
+      CGSize(width: textView.bounds.width, height: .greatestFiniteMagnitude)
+    ).height
+    textView.isScrollEnabled = measured > maximumCompactHeight(for: textView)
+  }
+
+  private func maximumCompactHeight(for textView: UITextView) -> CGFloat {
+    let lines: CGFloat =
+      textView.traitCollection.preferredContentSizeCategory
+        .isAccessibilityCategory ? 2 : 5
+    return max(
+      48,
+      (textView.font ?? .preferredFont(forTextStyle: .body)).lineHeight * lines + 20
+    )
+  }
+
+  final class Coordinator: NSObject, UITextViewDelegate {
+    var parent: NativeImagePasteTextView
+    private var programmaticFocusTarget: Bool?
+    private var focusUpdateGeneration = 0
+
+    init(parent: NativeImagePasteTextView) {
+      self.parent = parent
+    }
+
+    func textViewDidChange(_ textView: UITextView) {
+      parent.text = textView.text
+    }
+
+    func textViewDidBeginEditing(_ textView: UITextView) {
+      guard textView.isFirstResponder else { return }
+      if programmaticFocusTarget == true {
+        programmaticFocusTarget = nil
+        return
+      }
+      parent.isFocused = true
+    }
+
+    func textViewDidEndEditing(_ textView: UITextView) {
+      guard !textView.isFirstResponder else { return }
+      if programmaticFocusTarget == false {
+        programmaticFocusTarget = nil
+        return
+      }
+      parent.isFocused = false
+    }
+
+    func requestFirstResponder(_ shouldFocus: Bool, on textView: UITextView) {
+      focusUpdateGeneration += 1
+      let update = focusUpdateGeneration
+      Task { @MainActor [weak self, weak textView] in
+        await Task.yield()
+        guard let self, let textView,
+          self.focusUpdateGeneration == update,
+          textView.isFirstResponder != shouldFocus,
+          textView.window != nil
+        else { return }
+        self.programmaticFocusTarget = shouldFocus
+        if shouldFocus {
+          textView.becomeFirstResponder()
+        } else {
+          textView.resignFirstResponder()
+        }
+        Task { @MainActor [weak self] in
+          try? await Task.sleep(nanoseconds: 500_000_000)
+          guard self?.focusUpdateGeneration == update else { return }
+          self?.programmaticFocusTarget = nil
+        }
+      }
+    }
+
+    func textView(
+      _ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String
+    ) -> Bool {
+      guard !parent.isExpanded, text == "\n" else { return true }
+      if parent.canSubmit {
+        parent.onSubmit()
+      }
+      return false
+    }
+
+    func pasteImageFromClipboard() -> Bool {
+      let imageProviders = UIPasteboard.general.itemProviders.compactMap {
+        provider -> (NSItemProvider, String)? in
+        guard
+          let imageType = provider.registeredTypeIdentifiers.first(where: {
+            UTType($0)?.conforms(to: .image) == true
+          })
+        else { return nil }
+        return (provider, imageType)
+      }
+      guard !imageProviders.isEmpty else { return false }
+      let onPasteImage = parent.onPasteImage
+      let onPasteStarted = parent.onPasteStarted
+      let onPasteFailed = parent.onPasteFailed
+      for (provider, imageType) in imageProviders.prefix(RemoteImageLimits.maximumCount) {
+        let generation = onPasteStarted()
+        provider.loadDataRepresentation(forTypeIdentifier: imageType) { data, error in
+          Task { @MainActor in
+            if let data {
+              onPasteImage(data, generation)
+            } else {
+              onPasteFailed(
+                error?.localizedDescription ?? "Couldn’t read the pasted image.", generation)
+            }
+          }
+        }
+      }
+      return true
+    }
+  }
+}
+
+/// Handle image data only after the user invokes the system Paste action.
+/// Ordinary text pastes keep UITextView's native editing path.
+@MainActor
+private final class ImagePasteTextView: UITextView {
+  var pasteImage: (() -> Bool)?
+
+  override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+    if action == #selector(paste(_:)), UIPasteboard.general.hasImages { return true }
+    return super.canPerformAction(action, withSender: sender)
+  }
+
+  override func paste(_ sender: Any?) {
+    if pasteImage?() == true { return }
+    super.paste(sender)
+  }
+}

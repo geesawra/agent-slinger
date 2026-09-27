@@ -23,6 +23,10 @@ final class URLSessionPaseoSocket: PaseoSocket {
     } else {
       task = session.webSocketTask(with: url)
     }
+    // An 8 MiB image preview arrives as base64 JSON; relay ciphertext is
+    // base64-encoded again. Allow that bounded frame while still rejecting
+    // unexpectedly large inbound messages.
+    task.maximumMessageSize = 32 * 1_024 * 1_024
   }
 
   var closeCode: Int { task.closeCode.rawValue }

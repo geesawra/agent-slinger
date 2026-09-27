@@ -8,7 +8,9 @@ struct OesapApp: App {
     #if DEBUG
       let arguments = ProcessInfo.processInfo.arguments
       let factory: any OesapConnectionFactory
-      if arguments.contains("--demo-tools") {
+      if arguments.contains("--demo-images") {
+        factory = DemoConnectionFactory(mode: .images)
+      } else if arguments.contains("--demo-tools") {
         factory = DemoToolCallConnectionFactory()
       } else if arguments.contains("--demo-agent-control") {
         factory = DemoConnectionFactory(mode: .agentControl)

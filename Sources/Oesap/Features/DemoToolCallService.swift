@@ -59,7 +59,8 @@
       return [
         RemoteThread(
           id: "demo-tools-agent", title: "Inspect a tool call", provider: "Codex",
-          model: "demo", state: .running, requiresAttention: false, attentionReason: nil)
+          model: "demo", state: .running, requiresAttention: false, attentionReason: nil,
+          cwd: "/demo/worktree")
       ]
     }
 
@@ -74,10 +75,16 @@
       let initial = [
         RemoteMessage(
           id: "demo-tools-user-welcome", author: .user,
-          text: "Can you inspect the test output and proposed change?", timestamp: start),
+          text: "Can you inspect the test output and proposed change?", timestamp: start,
+          images: [
+            RemoteDraftImage(
+              id: "demo-preview", data: DemoImageFixture.pngData, mimeType: "image/png",
+              fileName: "demo-preview.png")
+          ]),
         RemoteMessage(
           id: "demo-tools-agent-welcome", author: .agent,
-          text: "Expand the tool cards to inspect shell output, a file preview, and an edit diff.",
+          text:
+            "Expand the tool cards to inspect shell output, a file preview, and an edit diff.\n\n![Demo image](artifacts/demo-preview.png)",
           timestamp: start.addingTimeInterval(1)),
       ]
       let toolMessages = toolCalls.enumerated().map { index, call in
@@ -99,6 +106,15 @@
     }
 
     func send(agentID: String, text: String) async throws {
+      try await sendDemo(
+        agentID: agentID, text: text,
+        messageID: UUID().uuidString.lowercased(), images: [])
+    }
+
+    private func sendDemo(
+      agentID: String, text: String, messageID: String,
+      images: [RemoteDraftImage]
+    ) async throws {
       try ensureConnected()
       guard agentID == "demo-tools-agent" else {
         throw RemoteServiceError.unavailable("The demo agent was not found.")
@@ -106,7 +122,8 @@
       let messageIndex = sentMessages[agentID, default: []].count
       let timestamp = Date(timeIntervalSince1970: 1_780_000_400 + Double(messageIndex * 3))
       let userMessage = RemoteMessage(
-        id: "demo-tools-user-\(messageIndex)", author: .user, text: text, timestamp: timestamp)
+        id: "demo-tools-user-\(messageIndex)", author: .user, text: text, timestamp: timestamp,
+        clientMessageID: messageID, images: images)
       let reply = RemoteMessage(
         id: "demo-tools-reply-\(messageIndex)", author: .agent,
         text: "The same tool call row updated from running to completed.",
@@ -131,7 +148,22 @@
     func send(
       agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
     ) async throws {
-      try await send(agentID: agentID, text: text)
+      try await sendDemo(agentID: agentID, text: text, messageID: messageID, images: [])
+    }
+
+    func send(
+      agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior,
+      images: [RemoteDraftImage]
+    ) async throws {
+      try await sendDemo(agentID: agentID, text: text, messageID: messageID, images: images)
+    }
+
+    func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data {
+      try ensureConnected()
+      guard cwd == "/demo/worktree", path == "artifacts/demo-preview.png",
+        DemoImageFixture.pngData.count <= maxBytes
+      else { throw RemoteServiceError.unavailable("The demo image was not found.") }
+      return DemoImageFixture.pngData
     }
 
     func pendingPermissions() async throws -> [RemotePermission] {

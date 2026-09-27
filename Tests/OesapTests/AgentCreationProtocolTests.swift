@@ -183,6 +183,37 @@ final class AgentCreationProtocolTests: XCTestCase {
     await client.disconnect()
   }
 
+  func testImageOnlyCreationSerializesFirstPromptImages() async throws {
+    let transport = AgentCreationFixtureTransport()
+    let client = PaseoProtocolClient(transport: transport, clientID: "creation-image")
+    try await connect(client, transport: transport, features: ["creationLifecycle": true])
+    let image = PaseoImage(data: Data([1, 2, 3]), mimeType: "image/png")
+    let task = Task {
+      try await client.createAgent(
+        PaseoAgentCreationIntent(
+          idempotencyKey: "creation-image-key", clientMessageID: "image-message",
+          provider: "codex", model: nil, cwd: "/fixture/project",
+          initialPrompt: "", images: [image]))
+    }
+    let request = try await nextRequest(transport)
+    XCTAssertEqual(request.type, "agent.create.request")
+    XCTAssertEqual(request.fields["initialPrompt"] as? String, "")
+    XCTAssertEqual(request.fields["clientMessageId"] as? String, "image-message")
+    XCTAssertEqual(
+      request.fields["images"] as? [[String: String]],
+      [["data": "AQID", "mimeType": "image/png"]])
+    await reply(
+      transport, type: "agent.create.response",
+      payload: [
+        "requestId": request.requestID, "agent": NSNull(), "error": "provider startup failed",
+        "creation": creationSnapshot(
+          key: "creation-image-key", phase: "failed", agentID: "reserved-agent",
+          error: "provider startup failed", failedStage: "agent", outcomeUnknown: false),
+      ])
+    _ = try await task.value
+    await client.disconnect()
+  }
+
   func testCreationLifecycleGatePreventsCreateMutation() async throws {
     let transport = AgentCreationFixtureTransport()
     let client = PaseoProtocolClient(transport: transport, clientID: "creation-gate")

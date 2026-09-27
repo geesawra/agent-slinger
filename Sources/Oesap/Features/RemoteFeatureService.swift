@@ -146,6 +146,7 @@ struct RemoteNewThreadIntent: Sendable, Equatable {
   var model: String?
   var cwd: String
   var prompt: String
+  var images: [RemoteDraftImage] = []
 }
 
 struct RemoteNewThreadResult: Sendable, Equatable {
@@ -198,6 +199,7 @@ struct RemoteThread: Identifiable, Sendable, Equatable {
   var requiresAttention: Bool
   var attentionReason: String?
   var contextUsage: RemoteContextUsage? = nil
+  var cwd: String? = nil
 }
 
 enum RemoteActiveTurnBehavior: String, Sendable, Equatable {
@@ -243,6 +245,8 @@ struct RemoteMessage: Identifiable, Sendable, Equatable {
   var text: String
   var timestamp: Date?
   var toolCall: RemoteToolCall? = nil
+  var clientMessageID: String? = nil
+  var images: [RemoteDraftImage] = []
 }
 
 struct RemoteToolCall: Sendable, Equatable {
@@ -349,6 +353,11 @@ protocol OesapRemoteService: Sendable {
   func send(
     agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
   ) async throws
+  func send(
+    agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior,
+    images: [RemoteDraftImage]
+  ) async throws
+  func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data
   func stop(agentID: String) async throws -> RemoteAgentControlSnapshot?
   func pendingPermissions() async throws -> [RemotePermission]
   func answerPermission(_ permission: RemotePermission, allow: Bool) async throws
@@ -372,6 +381,20 @@ extension OesapRemoteService {
     agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
   ) async throws {
     throw RemoteServiceError.unavailable("Explicit active-turn send behavior is not supported.")
+  }
+  func send(
+    agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior,
+    images: [RemoteDraftImage]
+  ) async throws {
+    if images.isEmpty {
+      return try await send(
+        agentID: agentID, text: text, messageID: messageID,
+        behavior: behavior)
+    }
+    throw RemoteServiceError.unavailable("Image messages are not supported by this service.")
+  }
+  func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data {
+    throw RemoteServiceError.unavailable("Image previews are not supported by this service.")
   }
   func stop(agentID: String) async throws -> RemoteAgentControlSnapshot? {
     throw RemoteServiceError.unavailable("Stopping agents is not supported by this service.")
@@ -412,6 +435,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       case usageUnavailable
       case usageFailure
       case agentControl
+      case images
     }
 
     private let mode: Mode
@@ -436,7 +460,8 @@ enum RemoteServiceError: LocalizedError, Sendable {
         usageSupported: mode != .usageUnsupported,
         usageUnavailable: mode == .usageUnavailable,
         usageFailure: mode == .usageFailure,
-        agentControlSupported: mode == .agentControl)
+        agentControlSupported: mode == .agentControl,
+        imageFixtures: mode == .images)
       currentService = service
       return service
     }
@@ -464,6 +489,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
     private let usageUnavailable: Bool
     private let usageFailure: Bool
     private let agentControlSupported: Bool
+    private let imageFixtures: Bool
     private var continuations:
       [String: AsyncThrowingStream<RemoteTimelineUpdate, Error>.Continuation] = [:]
     private var sentMessages: [String: [RemoteMessage]] = [:]
@@ -479,7 +505,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       creationSupported: Bool = true, overviewEmpty: Bool = false,
       overviewFailure: Bool = false, usageSupported: Bool = true,
       usageUnavailable: Bool = false, usageFailure: Bool = false,
-      agentControlSupported: Bool = false
+      agentControlSupported: Bool = false, imageFixtures: Bool = false
     ) {
       self.isEmpty = isEmpty
       self.failsSending = failsSending
@@ -490,6 +516,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       self.usageUnavailable = usageUnavailable
       self.usageFailure = usageFailure
       self.agentControlSupported = agentControlSupported
+      self.imageFixtures = imageFixtures
     }
 
     func serverID() async -> String? {
@@ -594,12 +621,16 @@ enum RemoteServiceError: LocalizedError, Sendable {
       if let previous = creations[intent.idempotencyKey] { return previous }
       let id = "demo-created-\(creations.count + 1)"
       let thread = RemoteThread(
-        id: id, title: String(intent.prompt.prefix(56)), provider: intent.provider,
-        model: intent.model, state: .running, requiresAttention: false, attentionReason: nil)
+        id: id, title: intent.prompt.isEmpty ? "Image request" : String(intent.prompt.prefix(56)),
+        provider: intent.provider,
+        model: intent.model, state: .running, requiresAttention: false, attentionReason: nil,
+        cwd: intent.cwd)
       createdThreads.insert(thread, at: 0)
       let timestamp = Date(timeIntervalSince1970: 1_780_000_300)
       sentMessages[id] = [
-        RemoteMessage(id: "\(id)-prompt", author: .user, text: intent.prompt, timestamp: timestamp),
+        RemoteMessage(
+          id: "\(id)-prompt", author: .user, text: intent.prompt, timestamp: timestamp,
+          clientMessageID: intent.clientMessageID, images: intent.images),
         RemoteMessage(
           id: "\(id)-reply", author: .agent, text: "Demo reply to the new thread.",
           timestamp: timestamp.addingTimeInterval(1)),
@@ -658,7 +689,8 @@ enum RemoteServiceError: LocalizedError, Sendable {
           state: stoppedAgents.contains("demo-agent-running") ? .idle : .running,
           requiresAttention: false,
           attentionReason: nil,
-          contextUsage: RemoteContextUsage(usedTokens: 64_000, maxTokens: 200_000)
+          contextUsage: RemoteContextUsage(usedTokens: 64_000, maxTokens: 200_000),
+          cwd: "/demo/oesap"
         ),
         RemoteThread(
           id: "demo-agent-attention",
@@ -685,7 +717,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       if cursor != nil {
         return RemoteTimeline(messages: [], historyMayBeIncomplete: false)
       }
-      let initial: [RemoteMessage]
+      var initial: [RemoteMessage]
       let baseTime = Date(timeIntervalSince1970: 1_780_000_000)
       if agentID.hasPrefix("demo-created-") {
         initial = []
@@ -699,7 +731,13 @@ enum RemoteServiceError: LocalizedError, Sendable {
         initial = [
           RemoteMessage(
             id: "demo-welcome-user", author: .user, text: "Can you add the first remote screen?",
-            timestamp: baseTime),
+            timestamp: baseTime,
+            images: imageFixtures
+              ? [
+                RemoteDraftImage(
+                  id: "demo-image", data: DemoImageFixture.pngData, mimeType: "image/png",
+                  fileName: "demo-preview.png")
+              ] : []),
           RemoteMessage(
             id: "demo-welcome-agent", author: .agent,
             text:
@@ -716,6 +754,14 @@ enum RemoteServiceError: LocalizedError, Sendable {
               """,
             timestamp: baseTime.addingTimeInterval(1)),
         ]
+        if imageFixtures && agentID == "demo-agent-running" {
+          initial.append(
+            RemoteMessage(
+              id: "demo-image-reply", author: .agent,
+              text:
+                "Here is a generated preview:\n\n![Synthetic image](artifacts/demo-preview.png)",
+              timestamp: baseTime.addingTimeInterval(2)))
+        }
       }
       return RemoteTimeline(
         messages: initial + sentMessages[agentID, default: []], historyMayBeIncomplete: false)
@@ -742,6 +788,15 @@ enum RemoteServiceError: LocalizedError, Sendable {
     func send(
       agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
     ) async throws {
+      try await send(
+        agentID: agentID, text: text, messageID: messageID,
+        behavior: behavior, images: [])
+    }
+
+    func send(
+      agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior,
+      images: [RemoteDraftImage]
+    ) async throws {
       try ensureConnected()
       if failsSending {
         throw RemoteServiceError.connectionLost("The demo could not confirm delivery.")
@@ -754,7 +809,8 @@ enum RemoteServiceError: LocalizedError, Sendable {
       let index = sentMessages[agentID, default: []].count
       let timestamp = Date(timeIntervalSince1970: 1_780_000_100 + Double(index))
       let userMessage = RemoteMessage(
-        id: "demo-user-\(index)", author: .user, text: text, timestamp: timestamp)
+        id: "demo-user-\(index)", author: .user, text: text, timestamp: timestamp,
+        clientMessageID: messageID, images: images)
       sentMessages[agentID, default: []].append(userMessage)
       continuations[agentID]?.yield(.message(userMessage, cursor: nil, isDelta: false))
       let reply = RemoteMessage(
@@ -765,6 +821,14 @@ enum RemoteServiceError: LocalizedError, Sendable {
       )
       sentMessages[agentID, default: []].append(reply)
       continuations[agentID]?.yield(.message(reply, cursor: nil, isDelta: false))
+    }
+
+    func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data {
+      try ensureConnected()
+      guard imageFixtures, cwd == "/demo/oesap", path == "artifacts/demo-preview.png",
+        DemoImageFixture.pngData.count <= maxBytes
+      else { throw RemoteServiceError.unavailable("The demo image was not found.") }
+      return DemoImageFixture.pngData
     }
 
     func stop(agentID: String) async throws -> RemoteAgentControlSnapshot? {

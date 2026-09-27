@@ -68,6 +68,7 @@ final class OesapModel {
     let messageID: String
     let text: String
     let draftText: String
+    let images: [RemoteDraftImage]
     let behavior: RemoteActiveTurnBehavior
     let receiptSupport: Bool
   }
@@ -79,6 +80,9 @@ final class OesapModel {
   @ObservationIgnored private var agentStopTokens: [String: UUID] = [:]
   @ObservationIgnored private var threadStateRevisions: [String: Int] = [:]
   private var drafts: [String: String] = [:]
+  private var imageDrafts: [String: [RemoteDraftImage]] = [:]
+  @ObservationIgnored private var acceptedMessageImages: [String: [String: [RemoteDraftImage]]] =
+    [:]
   @ObservationIgnored private var connectionObservationTask: Task<Void, Never>?
   @ObservationIgnored private var connectionGeneration = 0
   @ObservationIgnored private var olderTimelineCursor: RemoteTimelineCursor?
@@ -371,6 +375,8 @@ final class OesapModel {
     answeringPermissionID = nil
     historyMayBeIncomplete = false
     drafts.removeAll()
+    imageDrafts.removeAll()
+    acceptedMessageImages.removeAll()
     loadingAgentOptions = false
     agentConfigurationError = nil
     timelineHasOlder = false
@@ -687,6 +693,38 @@ final class OesapModel {
     drafts[threadID] = value
   }
 
+  func draftImages(for threadID: String) -> [RemoteDraftImage] {
+    imageDrafts[threadID, default: []]
+  }
+
+  @discardableResult
+  func setDraftImages(_ images: [RemoteDraftImage], for threadID: String) -> Bool {
+    guard Self.validImages(images) else {
+      messageError = "Attach up to six images, each no larger than 2 MB."
+      return false
+    }
+    imageDrafts[threadID] = images
+    return true
+  }
+
+  @discardableResult
+  func addDraftImage(_ image: RemoteDraftImage, for threadID: String) -> Bool {
+    setDraftImages(draftImages(for: threadID) + [image], for: threadID)
+  }
+
+  func removeDraftImage(id: String, for threadID: String) {
+    imageDrafts[threadID]?.removeAll { $0.id == id }
+  }
+
+  private static func validImages(_ images: [RemoteDraftImage]) -> Bool {
+    images.count <= RemoteImageLimits.maximumCount
+      && Set(images.map(\.id)).count == images.count
+      && images.allSatisfy {
+        !$0.data.isEmpty && $0.data.count <= RemoteImageLimits.maximumOutgoingBytes
+          && $0.mimeType.hasPrefix("image/")
+      }
+  }
+
   func agentActionFeedback(for threadID: String) -> RemoteAgentActionFeedback? {
     guard let key = agentControlKey(for: threadID) else { return nil }
     if let stopFeedback = agentActionFeedback[key] { return stopFeedback }
@@ -811,7 +849,13 @@ final class OesapModel {
 
   func sendFirstMessage(projectID: String, text: String) async -> String? {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty, !sendingMessage else { return nil }
+    let draftKey = newThreadDraftKey(for: projectID)
+    let images = draftImages(for: draftKey)
+    let pendingIntent = scope(for: projectID).flatMap { pendingNewThreadIntents[$0] }
+    guard !trimmed.isEmpty || !images.isEmpty || pendingIntent != nil, !sendingMessage else {
+      return nil
+    }
+    guard pendingIntent != nil || Self.validImages(images) else { return nil }
     guard connectionState == .connected, let service, canCreateThreads else {
       messageError =
         "This Paseo host must support new thread creation. Reconnect or update the host."
@@ -841,10 +885,9 @@ final class OesapModel {
         provider: configuration.provider,
         model: configuration.model,
         cwd: rootPath,
-        prompt: trimmed)
+        prompt: trimmed, images: images)
       pendingNewThreadIntents[scope] = intent
     }
-    let draftKey = newThreadDraftKey(for: projectID)
     if drafts[draftKey, default: ""].isEmpty { drafts[draftKey] = text }
     let generation = connectionGeneration
     let selectionGeneration = projectSelectionGeneration
@@ -876,14 +919,22 @@ final class OesapModel {
         return nil
       }
       let currentDraft = drafts[draftKey] ?? ""
+      let submittedImageIDs = Set(intent.images.map(\.id))
+      let currentImages = imageDrafts[draftKey] ?? []
       if result.promptAccepted {
+        if !intent.images.isEmpty {
+          acceptedMessageImages[thread.id, default: [:]][intent.clientMessageID] = intent.images
+        }
         if currentDraft != text || trimmed != intent.prompt {
           drafts[thread.id] = currentDraft
         }
+        imageDrafts[thread.id] = currentImages.filter { !submittedImageIDs.contains($0.id) }
       } else {
         drafts[thread.id] = currentDraft.isEmpty ? intent.prompt : currentDraft
+        imageDrafts[thread.id] = currentImages
       }
       drafts[draftKey] = ""
+      imageDrafts[draftKey] = []
       if !result.promptAccepted {
         messageError =
           "The thread was created, but delivery of its first message wasn’t confirmed. Your draft stays in this app while it is open. Check the timeline before sending again. \(result.error ?? "")"
@@ -925,10 +976,13 @@ final class OesapModel {
   @discardableResult
   func send(
     threadID: String, text: String, behavior: RemoteActiveTurnBehavior,
-    expectedStateRevision: Int, selectedDuringActiveTurn: Bool
+    expectedStateRevision: Int, selectedDuringActiveTurn: Bool,
+    images suppliedImages: [RemoteDraftImage]? = nil
   ) async -> Bool {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty, connectionState == .connected, let service,
+    let images = suppliedImages ?? draftImages(for: threadID)
+    guard !trimmed.isEmpty || !images.isEmpty, Self.validImages(images),
+      connectionState == .connected, let service,
       selectedThreadID == threadID,
       let key = agentControlKey(for: threadID)
     else { return false }
@@ -946,7 +1000,7 @@ final class OesapModel {
 
     let intent = PendingAgentMessage(
       messageID: UUID().uuidString.lowercased(), text: trimmed, draftText: text,
-      behavior: behavior, receiptSupport: agentRequestReceiptsSupported)
+      images: images, behavior: behavior, receiptSupport: agentRequestReceiptsSupported)
     pendingAgentMessages[key] = intent
     agentActionFeedback[key] = nil
     let token = UUID()
@@ -1080,7 +1134,7 @@ final class OesapModel {
           threadID: threadID, generation: generation,
           selectionGeneration: selectionGeneration)
       else { return }
-      messages = history.messages
+      messages = history.messages.map { imageOverlay($0, threadID: threadID) }
       historyMayBeIncomplete = history.historyMayBeIncomplete
       timelineHasOlder = history.hasOlder
       olderTimelineCursor = history.olderCursor
@@ -1116,7 +1170,7 @@ final class OesapModel {
               threadID: threadID, generation: generation,
               selectionGeneration: selectionGeneration)
           else { return }
-          messages = refreshedHistory.messages
+          messages = refreshedHistory.messages.map { imageOverlay($0, threadID: threadID) }
           historyMayBeIncomplete = refreshedHistory.historyMayBeIncomplete
           timelineHasOlder = refreshedHistory.hasOlder
           olderTimelineCursor = refreshedHistory.olderCursor
@@ -1199,7 +1253,9 @@ final class OesapModel {
           selectionGeneration: selectionGeneration)
       else { return }
       let knownIDs = Set(messages.map(\.id))
-      messages = older.messages.filter { !knownIDs.contains($0.id) } + messages
+      messages =
+        older.messages.filter { !knownIDs.contains($0.id) }
+        .map { imageOverlay($0, threadID: threadID) } + messages
       timelineHasOlder = older.hasOlder
       olderTimelineCursor = older.olderCursor
       historyMayBeIncomplete = historyMayBeIncomplete || older.historyMayBeIncomplete
@@ -1443,6 +1499,8 @@ final class OesapModel {
     agentSendTokens.removeAll()
     agentStopTokens.removeAll()
     threadStateRevisions.removeAll()
+    imageDrafts.removeAll()
+    acceptedMessageImages.removeAll()
   }
 
   private static func isKnownStoppedState(_ state: RemoteThread.State) -> Bool {
@@ -1477,7 +1535,7 @@ final class OesapModel {
     do {
       try await service.send(
         agentID: threadID, text: intent.text, messageID: intent.messageID,
-        behavior: intent.behavior)
+        behavior: intent.behavior, images: intent.images)
       guard agentSendTokens[key] == token,
         pendingAgentMessages[key]?.messageID == intent.messageID,
         connectionGeneration == generation,
@@ -1486,6 +1544,12 @@ final class OesapModel {
       agentSendTokens[key] = nil
       pendingAgentMessages[key] = nil
       if drafts[threadID] == intent.draftText { drafts[threadID] = "" }
+      let submittedImageIDs = Set(intent.images.map(\.id))
+      imageDrafts[threadID]?.removeAll { submittedImageIDs.contains($0.id) }
+      if !intent.images.isEmpty {
+        acceptedMessageImages[threadID, default: [:]][intent.messageID] = intent.images
+        messages = messages.map { imageOverlay($0, threadID: threadID) }
+      }
       agentSendFeedback[key] = RemoteAgentActionFeedback(
         phase: .accepted, message: "Message accepted by host.")
       return true
@@ -1541,6 +1605,7 @@ final class OesapModel {
 
   private func appendMessage(_ message: RemoteMessage, cursor: RemoteTimelineCursor?, isDelta: Bool)
   {
+    let message = selectedThreadID.map { imageOverlay(message, threadID: $0) } ?? message
     if let cursor, let latest = latestTimelineCursor, cursor.epoch == latest.epoch {
       if cursor.sequence < latest.sequence { return }
       if cursor.sequence == latest.sequence,
@@ -1563,6 +1628,78 @@ final class OesapModel {
       messages.append(message)
     }
     if let cursor { latestTimelineCursor = cursor }
+  }
+
+  private func imageOverlay(_ message: RemoteMessage, threadID: String) -> RemoteMessage {
+    guard message.author == .user else { return message }
+    var result = message
+    if let clientMessageID = message.clientMessageID
+      ?? (acceptedMessageImages[threadID]?[message.id] != nil ? message.id : nil),
+      let images = acceptedMessageImages[threadID]?[clientMessageID]
+    {
+      result.images = images
+    }
+    return result
+  }
+
+  /// Fetches an image referenced by an assistant's Markdown from the current
+  /// daemon. The source is a host path, never a path on the iPhone.
+  func loadRemoteImage(source: String, threadID: String) async throws -> Data {
+    guard connectionState == .connected, selectedThreadID == threadID,
+      let service, let projectID = selectedProjectID,
+      let thread = threads.first(where: { $0.id == threadID }),
+      let workspaceRoot = (thread.cwd?.isEmpty == false ? thread.cwd : nil)
+        ?? projects.first(where: { $0.id == projectID })?.rootPath,
+      let target = Self.imageReadTarget(source: source, workspaceRoot: workspaceRoot)
+    else { throw RemoteServiceError.unavailable("Image preview is unavailable for this thread.") }
+    let generation = connectionGeneration
+    let selectionGeneration = threadSelectionGeneration
+    let serverID = connectedServerID
+    let data = try await service.readImage(
+      cwd: target.cwd, path: target.path, maxBytes: RemoteImageLimits.maximumDisplayBytes)
+    guard connectionGeneration == generation,
+      threadSelectionGeneration == selectionGeneration,
+      selectedThreadID == threadID, connectedServerID == serverID, !Task.isCancelled
+    else { throw CancellationError() }
+    return data
+  }
+
+  private static func imageReadTarget(source: String, workspaceRoot: String)
+    -> (cwd: String, path: String)?
+  {
+    let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let lower = trimmed.lowercased()
+    guard !lower.hasPrefix("http:"), !lower.hasPrefix("https:"),
+      !lower.hasPrefix("data:"), !lower.hasPrefix("blob:")
+    else { return nil }
+    let path: String
+    if lower.hasPrefix("file://") {
+      guard let url = URL(string: trimmed), url.isFileURL,
+        url.host == nil || url.host == "" || url.host == "localhost"
+      else { return nil }
+      path = url.path
+    } else {
+      if trimmed.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*:"#, options: .regularExpression)
+        != nil && trimmed.range(of: #"^[A-Za-z]:[\\/]"#, options: .regularExpression) == nil
+      {
+        return nil
+      }
+      path = trimmed
+    }
+    if path == "~" || path.hasPrefix("~/") { return ("~", path) }
+    if path.hasPrefix("/") {
+      let root =
+        workspaceRoot.hasSuffix("/")
+        ? String(workspaceRoot.dropLast()) : workspaceRoot
+      let cwd = path == root || path.hasPrefix(root + "/") ? workspaceRoot : "/"
+      return (cwd, path)
+    }
+    if path.range(of: #"^[A-Za-z]:[\\/]"#, options: .regularExpression) != nil {
+      return (String(path.prefix(2)) + "/", path)
+    }
+    guard workspaceRoot.hasPrefix("/") else { return nil }
+    return (workspaceRoot, path)
   }
 
   private func isCurrentTimeline(

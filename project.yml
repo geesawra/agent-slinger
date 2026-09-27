@@ -16,6 +16,9 @@ packages:
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui
     exactVersion: 2.4.1
+  swift-cmark:
+    url: https://github.com/swiftlang/swift-cmark
+    exactVersion: 0.9.0
 
 targets:
   Oesap:
@@ -30,6 +33,10 @@ targets:
     dependencies:
       - package: MarkdownUI
         product: MarkdownUI
+      - package: swift-cmark
+        product: cmark-gfm
+      - package: swift-cmark
+        product: cmark-gfm-extensions
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oesap.app

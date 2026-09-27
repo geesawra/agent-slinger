@@ -414,7 +414,7 @@ final class OesapUITests: XCTestCase {
     attachScreenshot(named: "Full shell output")
     app.buttons["tool-call-full-output-done"].tap()
 
-    let composer = app.textFields["chat-composer"]
+    let composer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(composer.waitForExistence(timeout: 5))
     composer.tap()
     composer.typeText("Please finish checking the output")
@@ -439,7 +439,7 @@ final class OesapUITests: XCTestCase {
     app.buttons["new-thread-button"].tap()
 
     XCTAssertTrue(app.navigationBars["New thread"].waitForExistence(timeout: 5))
-    let composer = app.textFields["chat-composer"]
+    let composer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(composer.waitForExistence(timeout: 5))
     XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
     attachScreenshot(named: "Blank focused new thread")
@@ -485,7 +485,7 @@ final class OesapUITests: XCTestCase {
     app.buttons["save-agent-configuration"].tap()
 
     XCTAssertTrue(app.navigationBars["New thread"].waitForExistence(timeout: 5))
-    let resumedComposer = app.textFields["chat-composer"]
+    let resumedComposer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(resumedComposer.waitForExistence(timeout: 5))
     XCTAssertEqual(resumedComposer.value as? String, "Inspect the project structure")
     resumedComposer.tap()
@@ -513,7 +513,7 @@ final class OesapUITests: XCTestCase {
       app.staticTexts[
         "This host can’t start threads from Oesap yet."
       ].waitForExistence(timeout: 5))
-    let composer = app.textFields["chat-composer"]
+    let composer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(composer.waitForExistence(timeout: 5))
     composer.typeText("Keep this draft for the host update")
     XCTAssertFalse(app.buttons["send-message"].isEnabled)

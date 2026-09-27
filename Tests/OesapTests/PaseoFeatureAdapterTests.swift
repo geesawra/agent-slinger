@@ -24,6 +24,47 @@ final class PaseoFeatureAdapterTests: XCTestCase {
     XCTAssertEqual(snapshot?.attentionReason, "Review")
   }
 
+  func testHistoryAndLiveMessagesKeepImageSourceTextAndClientReceiptIdentity() async throws {
+    let client = AdapterTestClient()
+    let adapter = PaseoRemoteServiceAdapter(client: client)
+    let historyItem = PaseoTimelineEntry(
+      id: "epoch-1:5-5", provider: "codex",
+      item: .object([
+        "type": .string("user_message"), "text": .string("See image"),
+        "clientMessageId": .string("local-image-id"),
+        "images": .array([.object(["futureField": .bool(true)])]),
+      ]), turnID: nil, timestamp: "2026-09-25T12:30:45.123Z",
+      startSequence: 5, endSequence: 5, collapsed: [])
+    await client.setTimelinePages(tail: [toolPage([historyItem], end: 5)])
+    let stream = try await adapter.events(agentID: "agent-1")
+    let history = try await adapter.history(agentID: "agent-1", before: nil)
+    XCTAssertEqual(history.messages.first?.clientMessageID, "local-image-id")
+    XCTAssertEqual(
+      history.messages.first?.images, [],
+      "The daemon timeline does not retain submitted image bytes")
+
+    let next = Task { () throws -> RemoteTimelineUpdate? in
+      var iterator = stream.makeAsyncIterator()
+      return try await iterator.next()
+    }
+    await client.emit(
+      .item(
+        agentID: "agent-1",
+        event: .object([
+          "type": .string("timeline"),
+          "item": .object([
+            "type": .string("assistant_message"),
+            "text": .string("![chart](artifacts/chart.png)"),
+            "messageId": .string("assistant-image"),
+          ]),
+        ]), timestamp: "2026-09-25T12:30:46Z", sequence: 6, epoch: "epoch-1"))
+    guard case .message(let message, _, _) = try await next.value else {
+      return XCTFail("Expected live assistant message")
+    }
+    XCTAssertEqual(message.text, "![chart](artifacts/chart.png)")
+    await adapter.disconnect()
+  }
+
   func testHistoryWatermarkDropsBufferedOverlapAndKeepsLaterLiveMessage() async throws {
     let client = AdapterTestClient()
     let adapter = PaseoRemoteServiceAdapter(client: client)

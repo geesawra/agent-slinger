@@ -26,6 +26,52 @@ final class FeatureStateTests: XCTestCase {
     XCTAssertEqual(model.draft(for: "thread-A"), "ready to send")
   }
 
+  func testImageOnlySendCapturesImagesAndClearsOnlySubmittedImages() async throws {
+    let gate = TestGate()
+    let service = FakeRemoteService(sendGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let first = RemoteDraftImage(id: "first", data: Data([1]), mimeType: "image/png")
+    let second = RemoteDraftImage(id: "second", data: Data([2]), mimeType: "image/jpeg")
+    XCTAssertTrue(model.addDraftImage(first, for: "thread-A"))
+    let sending = Task { await model.send(threadID: "thread-A", text: "") }
+    await gate.waitUntilEntered()
+    XCTAssertTrue(model.addDraftImage(second, for: "thread-A"))
+    await gate.open()
+    let accepted = await sending.value
+    XCTAssertTrue(accepted)
+    XCTAssertEqual(model.draftImages(for: "thread-A"), [second])
+    let sent = await service.sentMessages()
+    XCTAssertEqual(sent.first?.text, "")
+    XCTAssertEqual(sent.first?.images, [first])
+    await model.disconnect()
+  }
+
+  func testImageRetryReplaysOriginalBytesDespiteDraftEdit() async throws {
+    let service = FakeRemoteService(failSendCalls: [1])
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let original = RemoteDraftImage(id: "original", data: Data([1]), mimeType: "image/png")
+    let replacement = RemoteDraftImage(id: "new", data: Data([2]), mimeType: "image/png")
+    model.setDraft("First", for: "thread-A")
+    XCTAssertTrue(model.addDraftImage(original, for: "thread-A"))
+    let first = await model.send(threadID: "thread-A", text: "First")
+    XCTAssertFalse(first)
+    model.setDraft("Edited", for: "thread-A")
+    XCTAssertTrue(model.setDraftImages([replacement], for: "thread-A"))
+    let retried = await model.retryAgentMessage(threadID: "thread-A")
+    XCTAssertTrue(retried)
+    let sent = await service.sentMessages()
+    XCTAssertEqual(sent.count, 2)
+    XCTAssertEqual(sent[0], sent[1])
+    XCTAssertEqual(sent[0].images, [original])
+    XCTAssertEqual(model.draft(for: "thread-A"), "Edited")
+    XCTAssertEqual(model.draftImages(for: "thread-A"), [replacement])
+    await model.disconnect()
+  }
+
   func testLateProjectRefreshCannotResurrectDisconnectedWorkspace() async throws {
     let gate = TestGate()
     let service = FakeRemoteService(projectGate: gate)
@@ -220,6 +266,67 @@ final class FeatureStateTests: XCTestCase {
     XCTAssertFalse(attempted)
     let secondSends = await second.sentMessages()
     XCTAssertTrue(secondSends.isEmpty)
+    await model.disconnect()
+  }
+
+  func testImagesFromPreviousHostAreClearedWhenThreadIDsOverlap() async throws {
+    let first = FakeRemoteService(serverIDValue: "host-A")
+    let second = FakeRemoteService(serverIDValue: "host-B")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [first], reconnectServices: [second]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    XCTAssertTrue(
+      model.addDraftImage(
+        RemoteDraftImage(id: "host-A-image", data: Data([1]), mimeType: "image/png"),
+        for: "thread-A"))
+    await model.reconnect()
+    XCTAssertEqual(model.draftImages(for: "thread-A"), [])
+    await model.disconnect()
+  }
+
+  func testHostImageReadUsesThreadWorkingDirectoryAndRejectsSchemes() async throws {
+    let service = FakeRemoteService(
+      projects: [.init(id: "A", name: "Project A", subtitle: nil, rootPath: "/fixture/A")],
+      threadCWD: "/fixture/A/worktree")
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let bytes = try await model.loadRemoteImage(
+      source: "artifacts/chart.png", threadID: "thread-A")
+    XCTAssertEqual(bytes, Data([1, 2, 3]))
+    let reads = await service.recordedImageReads()
+    XCTAssertEqual(reads.first?.cwd, "/fixture/A/worktree")
+    XCTAssertEqual(reads.first?.path, "artifacts/chart.png")
+    XCTAssertEqual(reads.first?.maxBytes, RemoteImageLimits.maximumDisplayBytes)
+    do {
+      _ = try await model.loadRemoteImage(source: "javascript:alert(1)", threadID: "thread-A")
+      XCTFail("A URL scheme must not be interpreted as a host file path")
+    } catch {}
+    let readsAfterRejection = await service.recordedImageReads()
+    XCTAssertEqual(readsAfterRejection.count, 1)
+    await model.disconnect()
+  }
+
+  func testHostImageReadDropsResultAfterThreadSelectionChanges() async throws {
+    let gate = TestGate()
+    let service = FakeRemoteService(
+      projects: [.init(id: "A", name: "Project A", subtitle: nil, rootPath: "/fixture/A")],
+      threadCWD: "/fixture/A/worktree", imageReadGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let loading = Task {
+      try await model.loadRemoteImage(source: "artifacts/chart.png", threadID: "thread-A")
+    }
+    await gate.waitUntilEntered()
+    model.selectThread("another-thread")
+    await gate.open()
+    do {
+      _ = try await loading.value
+      XCTFail("An image from the previous selection must be discarded")
+    } catch is CancellationError {}
     await model.disconnect()
   }
 
@@ -465,6 +572,62 @@ final class FeatureStateTests: XCTestCase {
     XCTAssertEqual(intent.model, "model-B")
     XCTAssertEqual(intent.cwd, "/fixture/A")
     XCTAssertEqual(intent.prompt, "Build it")
+    await model.disconnect()
+  }
+
+  func testImageOnlyFirstMessageCreatesThreadAndTransfersNewerDraftImages() async throws {
+    let gate = TestGate()
+    let service = FakeRemoteService(
+      projects: [.init(id: "A", name: "Project A", subtitle: nil, rootPath: "/fixture/A")],
+      creationGate: gate)
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(connectServices: [service]),
+      agentConfigurationStore: isolatedAgentStore())
+    await model.connect(.empty)
+    XCTAssertTrue(
+      model.saveAgentConfiguration(
+        RemoteAgentConfiguration(provider: "codex", model: nil), for: "A"))
+    let draftKey = model.newThreadDraftKey(for: "A")
+    let first = RemoteDraftImage(id: "first", data: Data([1]), mimeType: "image/png")
+    let second = RemoteDraftImage(id: "second", data: Data([2]), mimeType: "image/png")
+    XCTAssertTrue(model.addDraftImage(first, for: draftKey))
+    let creating = Task { await model.sendFirstMessage(projectID: "A", text: "") }
+    await gate.waitUntilEntered()
+    XCTAssertTrue(model.addDraftImage(second, for: draftKey))
+    await gate.open()
+    let threadID = await creating.value
+    XCTAssertEqual(threadID, "new-thread")
+    let intents = await service.creationIntents()
+    XCTAssertEqual(intents.first?.prompt, "")
+    XCTAssertEqual(intents.first?.images, [first])
+    XCTAssertEqual(model.draftImages(for: draftKey), [])
+    XCTAssertEqual(model.draftImages(for: "new-thread"), [second])
+    await model.disconnect()
+  }
+
+  func testImageOnlyCreationRetryKeepsOriginalImageAfterDraftRemoval() async throws {
+    let service = FakeRemoteService(
+      projects: [.init(id: "A", name: "Project A", subtitle: nil, rootPath: "/fixture/A")],
+      failFirstCreation: true)
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(connectServices: [service]),
+      agentConfigurationStore: isolatedAgentStore())
+    await model.connect(.empty)
+    XCTAssertTrue(
+      model.saveAgentConfiguration(
+        RemoteAgentConfiguration(provider: "codex", model: nil), for: "A"))
+    let draftKey = model.newThreadDraftKey(for: "A")
+    let image = RemoteDraftImage(id: "image", data: Data([1]), mimeType: "image/png")
+    XCTAssertTrue(model.addDraftImage(image, for: draftKey))
+    let firstResult = await model.sendFirstMessage(projectID: "A", text: "")
+    XCTAssertNil(firstResult)
+    model.removeDraftImage(id: image.id, for: draftKey)
+    let result = await model.sendFirstMessage(projectID: "A", text: "")
+    XCTAssertEqual(result, "new-thread")
+    let intents = await service.creationIntents()
+    XCTAssertEqual(intents.count, 2)
+    XCTAssertEqual(intents[0], intents[1])
+    XCTAssertEqual(intents[0].images, [image])
     await model.disconnect()
   }
 
@@ -1208,6 +1371,7 @@ private actor FakeRemoteService: OesapRemoteService {
     let text: String
     let messageID: String
     let behavior: RemoteActiveTurnBehavior
+    let images: [RemoteDraftImage]
   }
 
   private let projectsValue: [RemoteProject]
@@ -1245,6 +1409,9 @@ private actor FakeRemoteService: OesapRemoteService {
   private let initialThreadContext: RemoteContextUsage?
   private let contextGate: TestGate?
   private let contextError: Error?
+  private let threadCWD: String?
+  private let imageReadGate: TestGate?
+  private var imageReadTargets: [(cwd: String, path: String, maxBytes: Int)] = []
   private var usageCalls = 0
   private var submittedCreations: [RemoteNewThreadIntent] = []
   private var projectCalls = 0
@@ -1283,7 +1450,8 @@ private actor FakeRemoteService: OesapRemoteService {
     usageErrorCalls: Set<Int> = [], usageGate: TestGate? = nil,
     usageGateAtCall: Int = 1, contextReport: RemoteContextUsage? = nil,
     initialThreadContext: RemoteContextUsage? = nil, contextGate: TestGate? = nil,
-    contextError: Error? = nil
+    contextError: Error? = nil, threadCWD: String? = nil,
+    imageReadGate: TestGate? = nil
   ) {
     self.projectsValue = projects
     self.projectsError = projectsError
@@ -1320,6 +1488,8 @@ private actor FakeRemoteService: OesapRemoteService {
     self.initialThreadContext = initialThreadContext
     self.contextGate = contextGate
     self.contextError = contextError
+    self.threadCWD = threadCWD
+    self.imageReadGate = imageReadGate
   }
 
   func serverID() async -> String? { serverIDValue }
@@ -1404,7 +1574,8 @@ private actor FakeRemoteService: OesapRemoteService {
         id: "thread-\(projectID)", title: "Thread \(projectID)",
         provider: nil, model: nil, state: initialThreadState,
         requiresAttention: false, attentionReason: nil,
-        contextUsage: initialThreadContext ?? contextReport)
+        contextUsage: initialThreadContext ?? contextReport,
+        cwd: threadCWD)
     ]
   }
 
@@ -1444,9 +1615,19 @@ private actor FakeRemoteService: OesapRemoteService {
   func send(
     agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
   ) async throws {
+    try await send(
+      agentID: agentID, text: text, messageID: messageID,
+      behavior: behavior, images: [])
+  }
+
+  func send(
+    agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior,
+    images: [RemoteDraftImage]
+  ) async throws {
     sentAgentMessages.append(
       SentAgentMessage(
-        agentID: agentID, text: text, messageID: messageID, behavior: behavior))
+        agentID: agentID, text: text, messageID: messageID, behavior: behavior,
+        images: images))
     let callNumber = sentAgentMessages.count
     if sendGateAgentID == nil || sendGateAgentID == agentID { await sendGate?.wait() }
     if failsSending || failSendCalls.contains(callNumber) {
@@ -1455,6 +1636,16 @@ private actor FakeRemoteService: OesapRemoteService {
   }
 
   func sentMessages() -> [SentAgentMessage] { sentAgentMessages }
+
+  func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data {
+    imageReadTargets.append((cwd, path, maxBytes))
+    await imageReadGate?.wait()
+    return Data([1, 2, 3])
+  }
+
+  func recordedImageReads() -> [(cwd: String, path: String, maxBytes: Int)] {
+    imageReadTargets
+  }
 
   func stop(agentID: String) async throws -> RemoteAgentControlSnapshot? {
     stopCalls += 1

@@ -454,6 +454,55 @@ final class ProtocolClientTests: XCTestCase {
     await client.disconnect()
   }
 
+  func testImageOnlySendUsesPaseoImageArrayAndStableMessageID() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(client, transport: transport)
+    let image = PaseoImage(data: Data([1, 2, 3]), mimeType: "image/png")
+    let sending = Task {
+      try await client.send(
+        agentID: "agent-1", text: "", messageID: "image-message",
+        activeTurnBehavior: .interrupt, images: [image])
+    }
+    let request = try await nextRequest(transport)
+    XCTAssertEqual(request.message["type"] as? String, "send_agent_message_request")
+    XCTAssertEqual(request.message["text"] as? String, "")
+    XCTAssertEqual(request.message["messageId"] as? String, "image-message")
+    let images = try XCTUnwrap(request.message["images"] as? [[String: String]])
+    XCTAssertEqual(images, [["data": "AQID", "mimeType": "image/png"]])
+    await transport.push(
+      sessionFrame(
+        type: "send_agent_message_response",
+        payload:
+          #"{"requestId":"\#(request.requestID)","agentId":"agent-1","accepted":true,"error":null}"#
+      ))
+    try await sending.value
+    await client.disconnect()
+  }
+
+  func testImagePreviewReadsBoundedLegacyFileExplorerResponse() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(client, transport: transport)
+    let reading = Task {
+      try await client.readImage(cwd: "/fixture/worktree", path: "out/chart.png", maxBytes: 8)
+    }
+    let request = try await nextRequest(transport)
+    XCTAssertEqual(request.message["type"] as? String, "file_explorer_request")
+    XCTAssertEqual(request.message["mode"] as? String, "file")
+    XCTAssertEqual(request.message["maxBytes"] as? Int, 8)
+    XCTAssertNil(request.message["acceptBinary"])
+    await transport.push(
+      sessionFrame(
+        type: "file_explorer_response",
+        payload:
+          #"{"requestId":"\#(request.requestID)","cwd":"/fixture/worktree","path":"out/chart.png","mode":"file","directory":null,"file":{"path":"out/chart.png","kind":"image","encoding":"base64","content":"AQID","mimeType":"image/png","size":3,"modifiedAt":"2026-09-27T00:00:00Z"},"error":null}"#
+      ))
+    let bytes = try await reading.value
+    XCTAssertEqual(bytes, Data([1, 2, 3]))
+    await client.disconnect()
+  }
+
   func testStopCorrelatesResponseAndHandlesSnapshotNullAndRefusal() async throws {
     let transport = FixturePaseoTransport()
     let client = PaseoProtocolClient(transport: transport)

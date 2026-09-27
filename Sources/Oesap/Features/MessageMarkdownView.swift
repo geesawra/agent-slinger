@@ -8,17 +8,44 @@ struct MessageMarkdownView: View {
 
   @State private var parsedSource: String?
   @State private var parsedContent: MarkdownContent?
+  @State private var imageSources: [String: MarkdownImageSource] = [:]
+  @State private var viewerItem: ImageAttachmentViewerItem?
+  @State private var imageLoader: ReceivedImageLoader
+
+  init(
+    source: String,
+    threadID: String? = nil,
+    loadRemoteImage: ReceivedImageLoader.HostFileLoader? = nil
+  ) {
+    self.source = source
+    _imageLoader = State(
+      initialValue: ReceivedImageLoader(threadID: threadID, hostFileLoader: loadRemoteImage))
+  }
 
   var body: some View {
     Group {
       if parsedSource == source, let parsedContent {
         Markdown(parsedContent)
           .markdownTheme(.basic)
-          .markdownImageProvider(DisabledMarkdownImageProvider())
-          .markdownInlineImageProvider(DisabledInlineMarkdownImageProvider())
+          .markdownImageProvider(
+            ReceivedMarkdownImageProvider(
+              imagesByID: imageSources,
+              loader: imageLoader,
+              onOpen: { image in viewerItem = .remote(image, loader: imageLoader) }
+            )
+          )
+          .markdownInlineImageProvider(
+            ReceivedMarkdownInlineImageProvider(imagesByID: imageSources, loader: imageLoader)
+          )
           .environment(
             \.openURL,
             OpenURLAction { url in
+              if let id = MarkdownImageActionPolicy.imageID(url),
+                let image = imageSources[id]
+              {
+                viewerItem = .remote(image, loader: imageLoader)
+                return .handled
+              }
               guard let safeURL = MarkdownLinkPolicy.validatedURL(url) else {
                 return .discarded
               }
@@ -35,14 +62,19 @@ struct MessageMarkdownView: View {
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
+    .fullScreenCover(item: $viewerItem) { item in
+      ImageAttachmentViewer(item: item)
+    }
     .task(id: source) {
       parsedSource = nil
       parsedContent = nil
+      imageSources = [:]
 
       do {
         let result = try await MessageMarkdownContentParser.shared.parse(source)
         try Task.checkCancellation()
         parsedContent = result.content
+        imageSources = result.imagesByID
         parsedSource = source
       } catch is CancellationError {
         // A newer streamed message source owns the view now.
@@ -79,6 +111,7 @@ private struct MessageMarkdownContentResult: @unchecked Sendable {
   // this main-actor view. Keep this wrapper local rather than adding a
   // retroactive Sendable conformance to the dependency's public type.
   let content: MarkdownContent
+  let imagesByID: [String: MarkdownImageSource]
 }
 
 private actor MessageMarkdownContentParser {
@@ -86,22 +119,10 @@ private actor MessageMarkdownContentParser {
 
   func parse(_ source: String) throws -> MessageMarkdownContentResult {
     try Task.checkCancellation()
-    let content = MarkdownContent(source)
+    let transformed = MarkdownImageTransformer.transform(source)
     try Task.checkCancellation()
-    return MessageMarkdownContentResult(content: content)
-  }
-}
-
-private struct DisabledMarkdownImageProvider: ImageProvider {
-  func makeImage(url: URL?) -> some View {
-    Label("Image unavailable", systemImage: "photo")
-      .font(.caption)
-      .foregroundStyle(.secondary)
-  }
-}
-
-private struct DisabledInlineMarkdownImageProvider: InlineImageProvider {
-  func image(with url: URL, label: String) async throws -> Image {
-    Image(systemName: "photo")
+    let content = MarkdownContent(transformed.markdown)
+    try Task.checkCancellation()
+    return MessageMarkdownContentResult(content: content, imagesByID: transformed.imagesByID)
   }
 }
