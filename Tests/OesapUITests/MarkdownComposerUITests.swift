@@ -5,55 +5,54 @@ final class MarkdownComposerUITests: XCTestCase {
     let app = launchDemo(accessibilitySize: true)
     openNewThread(in: app)
 
+    let compactEditor = app.textViews["chat-composer"]
+    XCTAssertTrue(compactEditor.waitForExistence(timeout: 5))
+    assertNoComposerModeControls(in: app)
+    assertOnlyVisibleComposerEditor("chat-composer", in: app)
+
     let expand = app.buttons["chat-composer-expand"]
     XCTAssertTrue(expand.waitForExistence(timeout: 5))
     expand.tap()
 
     let editor = app.textViews["expanded-chat-composer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5))
-    let source = "# Keep this heading\n\n**Keep this formatting**\n- and this list"
+    assertNoComposerModeControls(in: app)
+    assertOnlyVisibleComposerEditor("expanded-chat-composer", in: app)
+    let source = "# Live heading\n\n**Bold text**\n\n"
     editor.tap()
     editor.typeText(source)
     XCTAssertEqual(editor.value as? String, source)
-    attachScreenshot(named: "Expanded Markdown composer at AX5", app: app)
+    attachScreenshot(named: "AX5 expanded composer with live Markdown", app: app)
 
     app.buttons["expanded-composer-done"].tap()
-    let compactComposer = app.descendants(matching: .any)["chat-composer"]
-    XCTAssertTrue(compactComposer.waitForExistence(timeout: 5))
-    XCTAssertEqual(compactComposer.value as? String, source)
-    app.buttons["chat-composer-mode"].tap()
-    XCTAssertTrue(app.staticTexts["Keep this heading"].waitForExistence(timeout: 5))
-    attachScreenshot(named: "Compact Markdown preview at AX5", app: app)
-    app.buttons["chat-composer-mode"].tap()
-    XCTAssertEqual(compactComposer.value as? String, source)
+    XCTAssertTrue(compactEditor.waitForExistence(timeout: 5))
+    XCTAssertEqual(compactEditor.value as? String, source)
+    assertNoComposerModeControls(in: app)
+    assertOnlyVisibleComposerEditor("chat-composer", in: app)
   }
 
-  func testExpandedPreviewRendersMarkdownAndKeepsTheEditableSource() {
+  func testExpandedComposerStylesMarkdownWhileKeepingTheEditableSource() {
     let app = launchDemo()
     openNewThread(in: app)
     app.buttons["chat-composer-expand"].tap()
 
     let editor = app.textViews["expanded-chat-composer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5))
-    let source = "## Draft heading\n\n**Bold draft**\n\n- First item"
+    assertNoComposerModeControls(in: app)
+    assertOnlyVisibleComposerEditor("expanded-chat-composer", in: app)
+    let source = "## Live heading\n\n**Bold** and *italic* with `code`.\n\n- First item\n\n"
     editor.tap()
     editor.typeText(source)
-    attachScreenshot(named: "Expanded Markdown editor", app: app)
-
-    let previewMode = app.segmentedControls["expanded-composer-mode"].buttons["Preview"]
-    XCTAssertTrue(previewMode.waitForExistence(timeout: 5))
-    previewMode.tap()
-    XCTAssertTrue(app.staticTexts["Draft heading"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.staticTexts["Bold draft"].exists)
-    XCTAssertFalse(app.staticTexts["## Draft heading"].exists)
-    attachScreenshot(named: "Expanded Markdown preview", app: app)
-
-    app.segmentedControls["expanded-composer-mode"].buttons["Write"].tap()
     XCTAssertEqual(editor.value as? String, source)
+    attachScreenshot(named: "Expanded live Markdown editing", app: app)
+
     app.buttons["expanded-composer-done"].tap()
-    app.buttons["chat-composer-mode"].tap()
-    XCTAssertTrue(app.staticTexts["Bold draft"].waitForExistence(timeout: 5))
-    attachScreenshot(named: "Compact composer Markdown preview", app: app)
+    let compactEditor = app.textViews["chat-composer"]
+    XCTAssertTrue(compactEditor.waitForExistence(timeout: 5))
+    XCTAssertEqual(compactEditor.value as? String, source)
+    assertNoComposerModeControls(in: app)
+    assertOnlyVisibleComposerEditor("chat-composer", in: app)
+    attachScreenshot(named: "Compact live Markdown editing", app: app)
   }
 
   func testAgentReplyRendersMarkdownInChat() {
@@ -116,9 +115,12 @@ final class MarkdownComposerUITests: XCTestCase {
 
     let editor = app.textViews["expanded-chat-composer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5))
-    let prompt = "Continue this active turn from the expanded composer"
+    let prompt = "## Continue this active turn\n\n**Use the existing plan**\n\n"
     editor.tap()
     editor.typeText(prompt)
+    XCTAssertEqual(editor.value as? String, prompt)
+    assertNoComposerModeControls(in: app)
+    attachScreenshot(named: "Expanded live Markdown before send", app: app)
     app.buttons["expanded-send-message"].tap()
 
     let sendChoice = app.navigationBars["Send to running agent?"]
@@ -130,8 +132,11 @@ final class MarkdownComposerUITests: XCTestCase {
     steer.tap()
 
     XCTAssertTrue(
-      app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", prompt))
-        .firstMatch.waitForExistence(timeout: 5))
+      app.staticTexts.containing(
+        NSPredicate(format: "label CONTAINS %@", "Continue this active turn")
+      )
+      .firstMatch.waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Use the existing plan"].exists)
     let receipt = app.descendants(matching: .any)["agent-message-status-demo-agent-running"]
     XCTAssertTrue(
       app.staticTexts.containing(
@@ -210,6 +215,28 @@ final class MarkdownComposerUITests: XCTestCase {
     let expectation = XCTNSPredicateExpectation(
       predicate: NSPredicate(format: "isHittable == true"), object: element)
     return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+  }
+
+  private func assertNoComposerModeControls(
+    in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line
+  ) {
+    XCTAssertFalse(app.buttons["chat-composer-mode"].exists, file: file, line: line)
+    XCTAssertFalse(app.segmentedControls["expanded-composer-mode"].exists, file: file, line: line)
+    XCTAssertFalse(
+      app.descendants(matching: .any)["expanded-composer-preview"].exists, file: file, line: line)
+  }
+
+  private func assertOnlyVisibleComposerEditor(
+    _ identifier: String, in app: XCUIApplication,
+    file: StaticString = #filePath, line: UInt = #line
+  ) {
+    let identifiers = ["chat-composer", "expanded-chat-composer"]
+    let visibleEditors =
+      identifiers
+      .map { app.textViews[$0] }
+      .filter { $0.exists && $0.isHittable }
+    XCTAssertEqual(visibleEditors.count, 1, file: file, line: line)
+    XCTAssertEqual(visibleEditors.first?.identifier, identifier, file: file, line: line)
   }
 
   private func scrollUntilHittable(

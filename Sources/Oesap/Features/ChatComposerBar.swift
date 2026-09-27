@@ -21,11 +21,8 @@ struct ChatComposerBar: View {
   var refocusAfterSend = true
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-  @State private var isCompactPreview = false
   @State private var showsExpandedComposer = false
-  @State private var expandedStartsInPreview = false
   @State private var expandedShouldRestoreFocus = false
-  @State private var compactPreviewShouldRestoreFocus = false
   @State private var pendingExpandedSend: (String, [RemoteDraftImage])?
   @State private var pendingImageOperations = 0
   @State private var imagePreparationError: String?
@@ -42,7 +39,6 @@ struct ChatComposerBar: View {
           pendingImageOperations: pendingImageOperations,
           imageError: imagePreparationError,
           imageImportIdentity: imageImportIdentity,
-          startsInPreview: expandedStartsInPreview,
           onDismiss: { showsExpandedComposer = false },
           onImageOperationStarted: beginImageOperation,
           onImageLoaded: { data, fileName, generation in
@@ -101,40 +97,8 @@ struct ChatComposerBar: View {
         if !dynamicTypeSize.isAccessibilitySize {
           imagePicker
         }
-        messageInput
-        sendControl
-      }
-    }
-  }
-
-  @ViewBuilder
-  private var compactModeControl: some View {
-    let button = Button(action: toggleCompactMode) {
-      Image(systemName: isCompactPreview ? "square.and.pencil" : "eye")
-        .font(.system(size: 16, weight: .medium))
-        .frame(width: 44, height: 44)
-        .contentShape(Rectangle())
-    }
-    .accessibilityLabel(isCompactPreview ? "Write draft" : "Preview draft")
-    .accessibilityValue(isCompactPreview ? "Preview" : "Write")
-    .accessibilityIdentifier("chat-composer-mode")
-
-    if #available(iOS 26.0, *) {
-      button
-        .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
-        .tint(Color(uiColor: .label))
-    } else {
-      button.buttonStyle(.bordered).buttonBorderShape(.circle)
-    }
-  }
-
-  private var messageInput: some View {
-    Group {
-      if isCompactPreview {
-        compactPreview
-      } else {
         messageField
+        sendControl
       }
     }
   }
@@ -161,29 +125,6 @@ struct ChatComposerBar: View {
     }
   }
 
-  private var compactPreview: some View {
-    ScrollView {
-      Group {
-        if draft.isEmpty {
-          Text("Nothing to preview yet")
-            .foregroundStyle(Color.secondary)
-        } else {
-          MessageMarkdownView(source: draft)
-        }
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.horizontal, 14)
-      .padding(.vertical, 10)
-    }
-    .frame(minHeight: 48, maxHeight: dynamicTypeSize.isAccessibilitySize ? 220 : 144)
-    .background(
-      Color(uiColor: .secondarySystemBackground),
-      in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-    )
-    .accessibilityElement(children: .contain)
-    .accessibilityIdentifier("chat-composer-preview")
-  }
-
   private var accessoryRow: some View {
     Group {
       if dynamicTypeSize.isAccessibilitySize {
@@ -199,7 +140,6 @@ struct ChatComposerBar: View {
 
           HStack(spacing: 8) {
             imagePicker
-            compactModeControl
             expandControl
             Spacer(minLength: 0)
           }
@@ -208,7 +148,6 @@ struct ChatComposerBar: View {
       } else {
         HStack(spacing: 8) {
           contextUsageControl
-          compactModeControl
           expandControl
           Spacer(minLength: 0)
           stopControl
@@ -503,25 +442,8 @@ struct ChatComposerBar: View {
     focus.wrappedValue = refocusAfterSend
   }
 
-  private func toggleCompactMode() {
-    if isCompactPreview {
-      isCompactPreview = false
-      if compactPreviewShouldRestoreFocus {
-        Task { @MainActor in
-          await Task.yield()
-          focus.wrappedValue = true
-        }
-      }
-    } else {
-      compactPreviewShouldRestoreFocus = focus.wrappedValue
-      focus.wrappedValue = false
-      isCompactPreview = true
-    }
-  }
-
   private func openExpandedComposer() {
-    expandedStartsInPreview = isCompactPreview
-    expandedShouldRestoreFocus = !isCompactPreview && focus.wrappedValue
+    expandedShouldRestoreFocus = focus.wrappedValue
     focus.wrappedValue = false
     showsExpandedComposer = true
   }
@@ -548,7 +470,6 @@ private struct ExpandedComposerView: View {
   let pendingImageOperations: Int
   let imageError: String?
   let imageImportIdentity: String
-  let startsInPreview: Bool
   let onDismiss: () -> Void
   let onImageOperationStarted: () -> Int
   let onImageLoaded: (Data, String?, Int) -> Void
@@ -557,18 +478,10 @@ private struct ExpandedComposerView: View {
   let onSend: () -> Void
 
   @State private var editorFocused = false
-  @State private var isPreview = false
 
   var body: some View {
     NavigationStack {
       VStack(spacing: 12) {
-        Picker("Message view", selection: $isPreview) {
-          Text("Write").tag(false)
-          Text("Preview").tag(true)
-        }
-        .pickerStyle(.segmented)
-        .accessibilityIdentifier("expanded-composer-mode")
-
         ComposerImagePickerButton(
           remainingCount: max(
             0, RemoteImageLimits.maximumCount - images.count - pendingImageOperations),
@@ -586,11 +499,7 @@ private struct ExpandedComposerView: View {
           onRemove: onRemoveImage
         )
 
-        if isPreview {
-          preview
-        } else {
-          editor
-        }
+        editor
       }
       .padding()
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -605,19 +514,7 @@ private struct ExpandedComposerView: View {
           sendButton
         }
       }
-      .onChange(of: isPreview) { _, previewing in
-        guard !previewing else {
-          editorFocused = false
-          return
-        }
-        Task { @MainActor in
-          await Task.yield()
-          editorFocused = true
-        }
-      }
       .onAppear {
-        isPreview = startsInPreview
-        guard !startsInPreview else { return }
         Task { @MainActor in
           await Task.yield()
           editorFocused = true
@@ -655,24 +552,6 @@ private struct ExpandedComposerView: View {
     .padding(10)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
-  }
-
-  private var preview: some View {
-    ScrollView {
-      Group {
-        if draft.isEmpty {
-          Text("Nothing to preview yet")
-            .foregroundStyle(Color.secondary)
-        } else {
-          MessageMarkdownView(source: draft)
-        }
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding()
-    }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
-    .accessibilityIdentifier("expanded-composer-preview")
   }
 
   @ViewBuilder
