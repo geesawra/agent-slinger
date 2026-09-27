@@ -23,9 +23,10 @@ unavailable or failed provider reports, and optional reset metadata.
 
 ## Decision
 
-- Put a compact context gauge in the chat agent-status card. Tapping it opens a
-  native usage sheet with reported token counts and the matching provider quota
-  only when the agent provider ID exactly matches a host report ID.
+- Put a full-width context-usage disclosure row below the chat agent status.
+  Tapping it opens a native usage sheet with reported token counts and the
+  matching provider quota only when the agent provider ID exactly matches a
+  host report ID.
 - Label context data as last reported. Show a percentage only when both token
   counts are finite and the context-window size is positive. A partial report
   remains visible without a percentage; missing usage is not shown as zero.

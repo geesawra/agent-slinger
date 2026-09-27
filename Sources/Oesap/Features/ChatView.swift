@@ -481,22 +481,10 @@ private struct AgentStatusCard: View {
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   var body: some View {
-    Group {
-      if dynamicTypeSize.isAccessibilitySize {
-        VStack(alignment: .leading, spacing: 10) {
-          statusInformation.frame(maxWidth: .infinity, alignment: .leading)
-          HStack {
-            Spacer(minLength: 0)
-            usageButton
-          }
-        }
-      } else {
-        HStack(alignment: .top, spacing: 12) {
-          statusInformation
-          Spacer(minLength: 0)
-          usageButton
-        }
-      }
+    VStack(alignment: .leading, spacing: 12) {
+      statusInformation.frame(maxWidth: .infinity, alignment: .leading)
+      Divider()
+      usageButton
     }
     .padding(14)
     .frame(maxWidth: .infinity, alignment: .leading)

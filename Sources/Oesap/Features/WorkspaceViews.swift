@@ -13,7 +13,6 @@ struct WorkspaceRootView: View {
   @Bindable var model: OesapModel
   @State private var path: [OesapRoute] = []
   @State private var confirmsDisconnect = false
-  @State private var showsPrivacyInformation = false
 
   var body: some View {
     NavigationStack(path: $path) {
@@ -44,11 +43,6 @@ struct WorkspaceRootView: View {
                 path.append(.usage)
               }
               .accessibilityIdentifier("host-usage-button")
-
-              Button("Privacy & Host Data", systemImage: "hand.raised") {
-                showsPrivacyInformation = true
-              }
-              .accessibilityIdentifier("privacy-information-workspace")
 
               Divider()
 
@@ -118,9 +112,6 @@ struct WorkspaceRootView: View {
       Text(
         "Saved connection credentials will be removed, and unsent drafts will be discarded. Agents on your Paseo host will keep running."
       )
-    }
-    .sheet(isPresented: $showsPrivacyInformation) {
-      PrivacyInformationView()
     }
     .tint(.accentColor)
   }

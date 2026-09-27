@@ -4,7 +4,6 @@ struct ConnectionSetupView: View {
   @Bindable var model: OesapModel
   @State private var connection = RemoteConnection.empty
   @State private var connectingTask: Task<Void, Never>?
-  @State private var showsPrivacyInformation = false
   @FocusState private var focusedField: Field?
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -22,9 +21,6 @@ struct ConnectionSetupView: View {
         } else {
           connectionMethodPicker.pickerStyle(.segmented)
         }
-        Button("Privacy & Host Data") { showsPrivacyInformation = true }
-          .foregroundStyle(Color.primary)
-          .accessibilityIdentifier("privacy-information-connection")
       } header: {
         Text("Connect to Paseo").foregroundStyle(Color.primary.opacity(0.75))
       } footer: {
@@ -151,9 +147,6 @@ struct ConnectionSetupView: View {
     }
     .navigationTitle("Oesap")
     .navigationBarTitleDisplayMode(.large)
-    .sheet(isPresented: $showsPrivacyInformation) {
-      PrivacyInformationView()
-    }
     .task { await model.refreshSavedConnectionState() }
   }
 

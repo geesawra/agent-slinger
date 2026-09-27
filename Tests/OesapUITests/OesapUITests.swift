@@ -175,7 +175,7 @@ final class OesapUITests: XCTestCase {
     attachScreenshot(named: "Partial agent overview project error")
   }
 
-  func testContextGaugeShowsLastReportAndHostUsageShowsProviderQuotas() {
+  func testContextDisclosureShowsLastReportAndHostUsageShowsProviderQuotas() {
     continueAfterFailure = false
     let app = launchDemo()
     connect(app)
@@ -188,7 +188,7 @@ final class OesapUITests: XCTestCase {
     let contextValue = (contextButton.value as? String) ?? ""
     let contextAccessibility = "\(contextButton.label) \(contextValue)"
     XCTAssertTrue(contextAccessibility.contains("32%"))
-    attachScreenshot(named: "Chat context usage gauge")
+    attachScreenshot(named: "Chat context usage")
     contextButton.tap()
 
     XCTAssertTrue(app.navigationBars["Usage details"].waitForExistence(timeout: 5))

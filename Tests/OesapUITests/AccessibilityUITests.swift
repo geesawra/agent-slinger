@@ -5,12 +5,8 @@ final class AccessibilityUITests: XCTestCase {
     let app = launchDemo()
     XCTAssertTrue(app.navigationBars["Oesap"].waitForExistence(timeout: 5))
     fillEndpoint(app)
-    let privacyEntry = app.buttons["privacy-information-connection"]
-    XCTAssertTrue(
-      scrollUntilHittable(privacyEntry, in: app, whenMissing: .earlier),
-      "Privacy information should be visible from connection setup."
-    )
     let connectButton = app.buttons["connect-button"]
+    XCTAssertTrue(scrollUntilHittable(connectButton, in: app, whenMissing: .earlier))
     XCTAssertTrue(connectButton.isEnabled)
     XCTAssertTrue(connectButton.isHittable, "Connect should be visible during the audit.")
     attachScreenshot(named: "Accessibility audit — connection", app: app)
@@ -19,8 +15,6 @@ final class AccessibilityUITests: XCTestCase {
         .contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .trait,
       ])
 
-    openPrivacyInformation(
-      app, entryIdentifier: "privacy-information-connection", returnScreen: "Oesap")
     connect(app, endpointIsFilled: true)
     XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
     attachScreenshot(named: "Accessibility audit — projects", app: app)
@@ -44,29 +38,12 @@ final class AccessibilityUITests: XCTestCase {
         .contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .trait,
       ])
 
-    app.navigationBars.buttons.firstMatch.tap()
-    app.navigationBars.buttons.firstMatch.tap()
-    XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
-    let connectionOptions = app.buttons["connection-options"]
-    XCTAssertTrue(connectionOptions.waitForExistence(timeout: 5))
-    connectionOptions.tap()
-    openPrivacyInformation(
-      app, entryIdentifier: "privacy-information-workspace", returnScreen: "Projects")
   }
 
   func testAccessibilitySizeAndDarkModeKeepChatAndPermissionControlsReachable() {
     let app = launchDemo(accessibilitySize: true, darkMode: true)
-    XCTAssertTrue(app.buttons["privacy-information-connection"].waitForExistence(timeout: 5))
     attachScreenshot(named: "AX5 dark connection", app: app)
-    openPrivacyInformation(
-      app, entryIdentifier: "privacy-information-connection", returnScreen: "Oesap")
     connect(app)
-
-    let connectionOptions = app.buttons["connection-options"]
-    XCTAssertTrue(connectionOptions.waitForExistence(timeout: 5))
-    connectionOptions.tap()
-    openPrivacyInformation(
-      app, entryIdentifier: "privacy-information-workspace", returnScreen: "Projects")
 
     let project = app.buttons["project-demo-project"]
     XCTAssertTrue(scrollUntilHittable(project, in: app))
@@ -322,24 +299,6 @@ final class AccessibilityUITests: XCTestCase {
     XCTAssertTrue(scrollUntilHittable(connectButton, in: app))
     connectButton.tap()
     XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
-  }
-
-  private func openPrivacyInformation(
-    _ app: XCUIApplication,
-    entryIdentifier: String,
-    returnScreen: String
-  ) {
-    let entry = app.buttons[entryIdentifier]
-    XCTAssertTrue(scrollUntilHittable(entry, in: app, whenMissing: .earlier))
-    entry.tap()
-
-    XCTAssertTrue(app.navigationBars["Privacy & Host Data"].waitForExistence(timeout: 5))
-    let done = app.buttons["privacy-information-done"]
-    XCTAssertTrue(done.waitForExistence(timeout: 5))
-    XCTAssertTrue(done.isHittable)
-    attachScreenshot(named: "Privacy information — \(returnScreen)", app: app)
-    done.tap()
-    XCTAssertTrue(app.navigationBars[returnScreen].waitForExistence(timeout: 5))
   }
 
   private func scrollUntilHittable(

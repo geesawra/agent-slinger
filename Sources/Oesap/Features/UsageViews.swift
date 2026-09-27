@@ -46,52 +46,55 @@ struct ContextUsageIndicator: View {
   }
 
   var body: some View {
-    VStack(spacing: 3) {
+    Group {
       if dynamicTypeSize.isAccessibilitySize {
-        Text("Context")
-          .font(.caption.weight(.medium))
-          .foregroundStyle(Color.primary.opacity(0.75))
-        Text(statusValue)
-          .font(.body.weight(.semibold))
-          .multilineTextAlignment(.trailing)
-      } else if let fraction {
-        Gauge(value: visualFraction(fraction), in: 0...1) {
+        VStack(alignment: .leading, spacing: 4) {
           Text("Context")
-        } currentValueLabel: {
-          Text(fractionPercentLabel(fraction))
+            .font(.body.weight(.medium))
+          HStack(spacing: 8) {
+            loadingIndicator
+            Text(statusValue)
+              .font(.body.weight(.semibold))
+            Spacer(minLength: 0)
+            disclosureIndicator
+          }
         }
-        .gaugeStyle(.accessoryCircular)
-        .frame(width: 52, height: 52)
-      } else if isLoading {
-        ProgressView()
-          .frame(height: 38)
-        Text("Context")
-          .font(.caption2.weight(.medium))
-        Text("Loading")
-          .font(.caption2)
-          .foregroundStyle(Color.primary.opacity(0.75))
       } else {
-        Image(systemName: "chart.bar.xaxis")
-          .font(.title3)
-          .foregroundStyle(.secondary)
-          .frame(height: 38)
-        Text("Context")
-          .font(.caption2.weight(.medium))
-        Text("Unavailable")
-          .font(.caption2)
-          .foregroundStyle(Color.primary.opacity(0.75))
+        HStack(spacing: 8) {
+          Text("Context")
+            .font(.subheadline)
+          Spacer(minLength: 8)
+          loadingIndicator
+          Text(statusValue)
+            .font(.subheadline.weight(.medium))
+            .multilineTextAlignment(.trailing)
+          disclosureIndicator
+        }
       }
     }
-    .frame(
-      minWidth: dynamicTypeSize.isAccessibilitySize ? 88 : 64,
-      minHeight: dynamicTypeSize.isAccessibilitySize ? 44 : 64
-    )
+    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
     .contentShape(Rectangle())
     .accessibilityElement(children: .ignore)
     .accessibilityLabel("Last reported context usage")
     .accessibilityValue(
       fraction.map { "\(fractionPercentLabel($0)) used" }
         ?? (isLoading ? "Loading" : "Unavailable"))
+  }
+
+  @ViewBuilder
+  private var loadingIndicator: some View {
+    if isLoading && fraction == nil {
+      ProgressView()
+        .controlSize(.small)
+        .accessibilityHidden(true)
+    }
+  }
+
+  private var disclosureIndicator: some View {
+    Image(systemName: "chevron.right")
+      .font(.caption.weight(.semibold))
+      .foregroundStyle(.tertiary)
+      .accessibilityHidden(true)
   }
 
   private var statusValue: String {
