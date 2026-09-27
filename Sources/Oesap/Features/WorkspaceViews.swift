@@ -3,6 +3,8 @@ import SwiftUI
 enum OesapRoute: Hashable {
   case agentOverview
   case usage
+  case settings
+  case addInstance
   case project(String)
   case chat(String)
   case newChat(String)
@@ -13,6 +15,7 @@ struct WorkspaceRootView: View {
   @Bindable var model: OesapModel
   @State private var path: [OesapRoute] = []
   @State private var confirmsDisconnect = false
+  @State private var observedInstanceID: String?
 
   var body: some View {
     NavigationStack(path: $path) {
@@ -30,7 +33,7 @@ struct WorkspaceRootView: View {
             }
           }
         } else {
-          ConnectionSetupView(model: model)
+          ConnectionSetupView(model: model, onOpenSettings: { path.append(.settings) })
         }
       }
       .toolbar {
@@ -43,6 +46,11 @@ struct WorkspaceRootView: View {
                 path.append(.usage)
               }
               .accessibilityIdentifier("host-usage-button")
+
+              Button("Settings", systemImage: "gearshape") {
+                path.append(.settings)
+              }
+              .accessibilityIdentifier("settings-button")
 
               Divider()
 
@@ -70,6 +78,19 @@ struct WorkspaceRootView: View {
           }
         case .usage:
           ProviderUsageView(model: model)
+        case .settings:
+          SettingsView(
+            model: model,
+            onAddInstance: { path.append(.addInstance) },
+            onSelected: { path.removeAll() }
+          )
+        case .addInstance:
+          ConnectionSetupView(
+            model: model,
+            title: "Add Paseo instance",
+            showsReconnectAction: false,
+            onConnected: { path.removeAll() }
+          )
         case .project(let id):
           ThreadListView(
             model: model,
@@ -98,6 +119,21 @@ struct WorkspaceRootView: View {
         }
       }
     }
+    .onChange(of: model.activeInstanceID) { _, newValue in
+      guard newValue != observedInstanceID else { return }
+      observedInstanceID = newValue
+      // Keep the selector visible when its active instance changes, so a
+      // failed switch remains actionable. All workspace routes are stale.
+      if path.contains(.settings) {
+        path = [.settings]
+      } else {
+        path.removeAll()
+      }
+    }
+    .task {
+      observedInstanceID = model.activeInstanceID
+      await model.refreshSavedInstances()
+    }
     .confirmationDialog(
       "Disconnect from this host?", isPresented: $confirmsDisconnect, titleVisibility: .visible
     ) {
@@ -110,7 +146,7 @@ struct WorkspaceRootView: View {
       Button("Cancel", role: .cancel) {}
     } message: {
       Text(
-        "Saved connection credentials will be removed, and unsent drafts will be discarded. Agents on your Paseo host will keep running."
+        "Credentials for the selected instance will be removed. Other saved instances will remain on this device. Unsent drafts will be discarded. Agents on your Paseo host will keep running."
       )
     }
     .tint(.accentColor)
@@ -437,7 +473,7 @@ private struct ConnectionStatusRow: View {
           .font(.subheadline)
           .foregroundStyle(Color.primary.opacity(0.75))
           Button("Reconnect") { Task { await model.reconnect() } }
-            .disabled(model.connectionState.isBusy || !model.hasSavedConnection)
+            .disabled(model.connectionState.isBusy || model.activeInstanceID == nil)
             .padding(.top, 3)
         }
       }

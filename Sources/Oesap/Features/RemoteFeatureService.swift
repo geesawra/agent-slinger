@@ -13,14 +13,22 @@ struct RemoteConnection: Sendable, Equatable {
   var usesTLS: Bool
   var password: String
   var pairingLink: String
+  var name: String = ""
 
   static let empty = RemoteConnection(
     method: .direct,
     endpoint: "",
     usesTLS: true,
     password: "",
-    pairingLink: ""
+    pairingLink: "",
+    name: ""
   )
+}
+
+struct SavedPaseoInstance: Identifiable, Sendable, Equatable {
+  var id: String
+  var name: String
+  var subtitle: String
 }
 
 struct RemoteProject: Identifiable, Sendable, Equatable {
@@ -380,9 +388,22 @@ extension OesapRemoteService {
 
 protocol OesapConnectionFactory: Sendable {
   func savedConnectionExists() async -> Bool
+  func listSavedInstances() async throws -> [SavedPaseoInstance]
+  func activeInstanceID() async throws -> String?
+  func selectSavedInstance(id: String) async throws -> any OesapRemoteService
+  func removeSavedInstance(id: String) async throws
   func connect(_ connection: RemoteConnection) async throws -> any OesapRemoteService
   func reconnect() async throws -> any OesapRemoteService
   func disconnect() async throws
+}
+
+extension OesapConnectionFactory {
+  func listSavedInstances() async throws -> [SavedPaseoInstance] { [] }
+  func activeInstanceID() async throws -> String? { nil }
+  func selectSavedInstance(id: String) async throws -> any OesapRemoteService {
+    throw RemoteServiceError.unavailable("Selecting saved Paseo instances is not supported here.")
+  }
+  func removeSavedInstance(id: String) async throws {}
 }
 
 enum RemoteServiceError: LocalizedError, Sendable {
@@ -416,19 +437,88 @@ enum RemoteServiceError: LocalizedError, Sendable {
 
     private let mode: Mode
     private var currentService: DemoRemoteService?
+    private var savedInstances: [SavedPaseoInstance] = []
+    private var selectedInstanceID: String?
 
     init(mode: Mode = .normal) {
       self.mode = mode
     }
 
-    func savedConnectionExists() async -> Bool { false }
+    func savedConnectionExists() async -> Bool { !savedInstances.isEmpty }
+
+    func listSavedInstances() async throws -> [SavedPaseoInstance] { savedInstances }
+
+    func activeInstanceID() async throws -> String? { selectedInstanceID }
+
+    func selectSavedInstance(id: String) async throws -> any OesapRemoteService {
+      guard savedInstances.contains(where: { $0.id == id }) else {
+        throw RemoteServiceError.unavailable("That saved Paseo instance is no longer available.")
+      }
+      await currentService?.disconnect()
+      let service = makeService()
+      currentService = service
+      selectedInstanceID = id
+      return service
+    }
 
     func connect(_ connection: RemoteConnection) async throws -> any OesapRemoteService {
       if mode == .failure {
         throw RemoteServiceError.authentication(
           "The demo rejected this connection. Check the credentials and try again.")
       }
-      let service = DemoRemoteService(
+      let service = makeService()
+      let trimmedName = connection.name.trimmingCharacters(in: .whitespacesAndNewlines)
+      let name: String
+      if !trimmedName.isEmpty {
+        name = trimmedName
+      } else if !connection.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        name = connection.endpoint
+      } else {
+        name = connection.method == .relay ? "Demo relay" : "Demo host"
+      }
+      let subtitle =
+        switch connection.method {
+        case .direct:
+          "Direct · \(connection.usesTLS ? "TLS" : "No TLS") · \(connection.endpoint)"
+        case .relay:
+          "Relay pairing · encrypted"
+        }
+      let instance = SavedPaseoInstance(id: UUID().uuidString, name: name, subtitle: subtitle)
+      savedInstances.append(instance)
+      selectedInstanceID = instance.id
+      currentService = service
+      return service
+    }
+
+    func reconnect() async throws -> any OesapRemoteService {
+      guard let selectedInstanceID,
+        savedInstances.contains(where: { $0.id == selectedInstanceID }),
+        let currentService
+      else {
+        throw RemoteServiceError.connectionLost("There is no active demo connection to restore.")
+      }
+      return currentService
+    }
+
+    func removeSavedInstance(id: String) async throws {
+      savedInstances.removeAll(where: { $0.id == id })
+      guard selectedInstanceID == id else { return }
+      selectedInstanceID = nil
+      await currentService?.disconnect()
+      currentService = nil
+    }
+
+    func disconnect() async throws {
+      if let selectedInstanceID {
+        savedInstances.removeAll(where: { $0.id == selectedInstanceID })
+      }
+      selectedInstanceID = nil
+      await currentService?.disconnect()
+      currentService = nil
+    }
+
+    private func makeService() -> DemoRemoteService {
+      DemoRemoteService(
         isEmpty: mode == .empty, failsSending: mode == .sendFailure,
         creationSupported: mode != .creationUnsupported,
         overviewEmpty: mode == .overviewEmpty,
@@ -437,20 +527,6 @@ enum RemoteServiceError: LocalizedError, Sendable {
         usageUnavailable: mode == .usageUnavailable,
         usageFailure: mode == .usageFailure,
         agentControlSupported: mode == .agentControl)
-      currentService = service
-      return service
-    }
-
-    func reconnect() async throws -> any OesapRemoteService {
-      guard let currentService else {
-        throw RemoteServiceError.connectionLost("There is no active demo connection to restore.")
-      }
-      return currentService
-    }
-
-    func disconnect() async throws {
-      await currentService?.disconnect()
-      currentService = nil
     }
   }
 
