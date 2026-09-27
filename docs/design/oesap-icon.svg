@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#1B9366"/>
+  <!-- Three overlapping workspaces rise toward the active agent. -->
+  <rect x="160" y="477" width="372" height="372" rx="71" fill="#C8E3D4"/>
+  <rect x="326" y="337" width="372" height="372" rx="71" fill="#E4EEE6"/>
+  <rect x="493" y="197" width="372" height="372" rx="71" fill="#FAF8EE"/>
+  <rect x="722" y="257" width="86" height="86" rx="24" fill="#90F5B7"/>
+</svg>
