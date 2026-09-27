@@ -12,12 +12,24 @@ settings:
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     DEVELOPMENT_TEAM: ""
 
+packages:
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    exactVersion: 2.4.1
+
 targets:
   Oesap:
     type: application
     platform: iOS
     sources:
       - path: Sources/Oesap
+        excludes:
+          - Resources/ThirdPartyNotices.txt
+      - path: Sources/Oesap/Resources/ThirdPartyNotices.txt
+        buildPhase: resources
+    dependencies:
+      - package: MarkdownUI
+        product: MarkdownUI
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oesap.app
@@ -48,6 +60,8 @@ targets:
       - path: Tests/OesapTests
     dependencies:
       - target: Oesap
+      - package: MarkdownUI
+        product: MarkdownUI
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oesap.app.tests

@@ -734,10 +734,7 @@ private struct MessageBubble: View {
         Text(message.author.label)
           .font(.caption.weight(.semibold))
           .foregroundStyle(Color.primary.opacity(0.75))
-        Text(message.text)
-          .font(.body)
-          .textSelection(.enabled)
-          .foregroundStyle(.primary)
+        MessageMarkdownView(source: message.text)
         if let timestamp = message.timestamp {
           Text(timestamp, style: .time)
             .font(.caption2)
@@ -755,7 +752,7 @@ private struct MessageBubble: View {
       )
       if message.author != .user { Spacer(minLength: 30) }
     }
-    .accessibilityElement(children: .combine)
+    .accessibilityElement(children: .contain)
     .accessibilityIdentifier("message-\(message.id)")
   }
 }

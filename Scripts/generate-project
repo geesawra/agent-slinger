@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
 required_version="2.46.0"
 if ! command -v xcodegen >/dev/null 2>&1; then
     printf 'XcodeGen %s is required. Install it before generating the project.\n' "$required_version" >&2
@@ -13,4 +16,16 @@ if [[ "$actual_version" != "$required_version" ]]; then
     exit 1
 fi
 
+# Xcode stores its Swift package lock inside the generated (git-ignored)
+# project. Keep the canonical copy at the repository root and restore it after
+# project generation. On the first run after resolving packages, adopt Xcode's
+# generated lock as the canonical copy.
+generated_lock="Oesap.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+if [[ ! -f Package.resolved && -f "$generated_lock" ]]; then
+    cp "$generated_lock" Package.resolved
+fi
 xcodegen generate --spec project.yml
+if [[ -f Package.resolved ]]; then
+    mkdir -p "$(dirname "$generated_lock")"
+    cp Package.resolved "$generated_lock"
+fi

@@ -38,50 +38,36 @@ struct ContextUsageIndicator: View {
   let usage: RemoteContextUsage?
   var isLoading = false
 
-  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
   private var fraction: Double? {
     guard let fraction = usage?.fractionUsed, fraction.isFinite else { return nil }
     return fraction
   }
 
   var body: some View {
-    Group {
-      if dynamicTypeSize.isAccessibilitySize {
-        HStack(spacing: 6) {
-          if let fraction {
-            Image(systemName: "chart.pie.fill")
-              .font(.subheadline)
-              .foregroundStyle(Color.primary)
-              .accessibilityHidden(true)
-            Text(fractionPercentLabel(fraction))
-              .font(.subheadline.weight(.medium))
-              .foregroundStyle(Color.primary)
-          } else if isLoading {
-            ProgressView()
-              .controlSize(.small)
-              .tint(Color.secondary)
-              .accessibilityHidden(true)
-          } else {
-            Image(systemName: "chart.pie")
-              .font(.subheadline)
-              .foregroundStyle(Color.secondary)
-              .accessibilityHidden(true)
-            Text("—")
-              .font(.caption)
-              .foregroundStyle(Color.primary)
-          }
-          disclosureIndicator
-        }
+    HStack(spacing: 6) {
+      if let fraction {
+        Image(systemName: "chart.pie.fill")
+          .font(.subheadline)
+          .foregroundStyle(Color.primary)
+          .accessibilityHidden(true)
+        Text(fractionPercentLabel(fraction))
+          .font(.subheadline.weight(.medium))
+          .foregroundStyle(Color.primary)
+      } else if isLoading {
+        ProgressView()
+          .controlSize(.small)
+          .tint(Color.secondary)
+          .accessibilityHidden(true)
       } else {
-        HStack(spacing: 6) {
-          Text(statusLabel)
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(Color.primary)
-          loadingIndicator
-          disclosureIndicator
-        }
+        Image(systemName: "chart.pie")
+          .font(.subheadline)
+          .foregroundStyle(Color.secondary)
+          .accessibilityHidden(true)
+        Text("—")
+          .font(.caption)
+          .foregroundStyle(Color.primary)
       }
+      disclosureIndicator
     }
     .frame(minHeight: 44, alignment: .leading)
     .contentShape(Rectangle())
@@ -92,16 +78,6 @@ struct ContextUsageIndicator: View {
         ?? (isLoading ? "Loading" : "Unavailable"))
   }
 
-  @ViewBuilder
-  private var loadingIndicator: some View {
-    if isLoading && fraction == nil {
-      ProgressView()
-        .controlSize(.small)
-        .tint(Color.secondary)
-        .accessibilityHidden(true)
-    }
-  }
-
   private var disclosureIndicator: some View {
     Image(systemName: "chevron.right")
       .font(.caption.weight(.semibold))
@@ -109,10 +85,6 @@ struct ContextUsageIndicator: View {
       .accessibilityHidden(true)
   }
 
-  private var statusLabel: String {
-    fraction.map { "Context \(fractionPercentLabel($0))" }
-      ?? "Context \(isLoading ? "Loading" : "Unavailable")"
-  }
 }
 
 private struct UsageValueRow: View {

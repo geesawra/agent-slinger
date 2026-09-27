@@ -703,7 +703,17 @@ enum RemoteServiceError: LocalizedError, Sendable {
           RemoteMessage(
             id: "demo-welcome-agent", author: .agent,
             text:
-              "I’m checking the project structure now. The timeline will keep updating while this thread is open.",
+              """
+              ## Project check-in
+
+              I’ve mapped the workspace and found a clear first step.
+
+              - **Status:** connected to the demo host
+              - **Plan:** keep the conversation easy to scan
+              - **Build:** `xcodebuild -scheme Oesap build`
+
+              I’ll keep the draft intact if the connection drops.
+              """,
             timestamp: baseTime.addingTimeInterval(1)),
         ]
       }
