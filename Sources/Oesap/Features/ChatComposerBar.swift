@@ -248,7 +248,7 @@ struct ChatComposerBar: View {
     }
     .buttonStyle(style)
     .tint(Color(uiColor: .label))
-    .accessibilityHint("Opens agent settings and usage details.")
+    .accessibilityHint("Opens model, effort, and permission settings.")
     .accessibilityIdentifier("context-usage-button")
   }
 
@@ -273,14 +273,9 @@ struct ChatComposerBar: View {
         if isStopPending {
           ProgressView()
             .tint(Color.secondary)
-        } else if dynamicTypeSize.isAccessibilitySize {
+        } else {
           Image(systemName: "square.fill")
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Color.primary)
-        } else {
-          Label("Stop", systemImage: "square.fill")
-            .labelStyle(.titleAndIcon)
-            .font(.subheadline)
             .foregroundStyle(Color.primary)
         }
       }

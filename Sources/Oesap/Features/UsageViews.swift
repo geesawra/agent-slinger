@@ -10,24 +10,26 @@ struct ProviderUsageView: View {
   }
 }
 
-struct UsageDetailsSheet: View {
+struct SessionInfoSheet: View {
   @Bindable var model: OesapModel
-  let contextThreadID: String
+  let threadID: String
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @Environment(\.dismiss) private var dismiss
 
   var body: some View {
     NavigationStack {
-      UsageListContent(model: model, contextThreadID: contextThreadID)
-        .navigationTitle("Usage details")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-          ToolbarItem(placement: .topBarTrailing) {
-            Button("Done") { dismiss() }
-              .accessibilityIdentifier("usage-details-done")
-          }
+      UsageListContent(
+        model: model, contextThreadID: threadID, includesSessionInformation: true
+      )
+      .navigationTitle("Session info")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button("Done") { dismiss() }
+            .accessibilityIdentifier("session-info-done")
         }
+      }
     }
     .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.medium, .large])
     .presentationDragIndicator(.visible)
@@ -46,26 +48,27 @@ struct ContextUsageIndicator: View {
   var body: some View {
     HStack(spacing: 6) {
       if let fraction {
-        Image(systemName: "chart.pie.fill")
-          .font(.subheadline)
-          .foregroundStyle(Color.primary)
-          .accessibilityHidden(true)
-        Text(fractionPercentLabel(fraction))
-          .font(.subheadline.weight(.medium))
-          .foregroundStyle(Color.primary)
+        Gauge(value: visualFraction(fraction), in: 0...1) {
+          Text("Context window used")
+        }
+        .gaugeStyle(.accessoryCircularCapacity)
+        .tint(Color.accentColor)
+        .frame(width: 58, height: 58)
+        .scaleEffect(22.0 / 58.0)
+        .frame(width: 22, height: 22)
+        .accessibilityHidden(true)
       } else if isLoading {
         ProgressView()
           .controlSize(.small)
           .tint(Color.secondary)
+          .frame(width: 22, height: 22)
           .accessibilityHidden(true)
       } else {
         Image(systemName: "chart.pie")
           .font(.subheadline)
           .foregroundStyle(Color.secondary)
+          .frame(width: 22, height: 22)
           .accessibilityHidden(true)
-        Text("—")
-          .font(.caption)
-          .foregroundStyle(Color.primary)
       }
       disclosureIndicator
     }
@@ -120,6 +123,7 @@ private struct UsageValueRow: View {
 struct UsageListContent: View {
   @Bindable var model: OesapModel
   let contextThreadID: String?
+  var includesSessionInformation = false
 
   private var contextThread: RemoteThread? {
     guard let contextThreadID else { return nil }
@@ -135,6 +139,9 @@ struct UsageListContent: View {
   var body: some View {
     List {
       if let contextThread {
+        if includesSessionInformation {
+          sessionInformationSection(thread: contextThread)
+        }
         contextSection(thread: contextThread)
       }
 
@@ -172,6 +179,10 @@ struct UsageListContent: View {
             .foregroundStyle(Color.primary.opacity(0.75))
         }
       }
+
+      if includesSessionInformation, let contextThread {
+        sessionIdentitySection(thread: contextThread)
+      }
     }
     .refreshable { await refreshUsage() }
     .toolbar {
@@ -197,6 +208,35 @@ struct UsageListContent: View {
       }
     }
     .task { await refreshUsage() }
+  }
+
+  private func sessionInformationSection(thread: RemoteThread) -> some View {
+    Section("Session") {
+      LabeledContent("Status") {
+        Label(thread.state.label, systemImage: thread.state.symbol)
+          .accessibilityIdentifier("session-info-status")
+      }
+      if thread.requiresAttention || thread.state == .waiting {
+        LabeledContent("Attention", value: "Required")
+      }
+      if let reason = thread.attentionReason {
+        Text(verbatim: reason)
+          .font(.subheadline)
+          .foregroundStyle(Color.primary.opacity(0.75))
+          .accessibilityIdentifier("session-info-attention-reason")
+      }
+      UsageValueRow(label: "Provider", value: thread.provider ?? "Not reported", font: .body)
+      UsageValueRow(label: "Model", value: thread.model ?? "Not reported", font: .body)
+    }
+  }
+
+  private func sessionIdentitySection(thread: RemoteThread) -> some View {
+    Section("Workspace and session") {
+      UsageValueRow(label: "Workspace", value: thread.cwd ?? "Not reported", font: .body)
+        .textSelection(.enabled)
+      UsageValueRow(label: "Session ID", value: thread.id, font: .body)
+        .textSelection(.enabled)
+    }
   }
 
   private func refreshUsage() async {

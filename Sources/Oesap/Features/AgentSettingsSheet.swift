@@ -25,7 +25,6 @@ struct AgentSettingsSheet: View {
     NavigationStack {
       List {
         settingsSection
-        contextSection
       }
       .refreshable { await model.refreshSessionDetails(threadID: threadID) }
       .navigationTitle("Agent settings")
@@ -233,40 +232,6 @@ struct AgentSettingsSheet: View {
     .accessibilityIdentifier("session-effort-picker")
   }
 
-  private var contextSection: some View {
-    Section("Last reported context") {
-      if let usage = model.contextUsage(for: threadID), !usage.isEmpty {
-        if let fraction = usage.fractionUsed, fraction.isFinite {
-          Gauge(value: min(max(fraction, 0), 1), in: 0...1) {
-            Text("Context window used")
-          } currentValueLabel: {
-            Text(fraction.formatted(.percent.precision(.fractionLength(0))))
-          }
-          .accessibilityIdentifier("session-context-gauge")
-        }
-        if let used = usage.usedTokens, used.isFinite {
-          LabeledContent("Used", value: "\(tokenCount(used)) tokens")
-        }
-        if let maximum = usage.maxTokens, maximum.isFinite {
-          LabeledContent("Context window", value: "\(tokenCount(maximum)) tokens")
-        }
-      } else if model.loadingContextUsage {
-        ProgressView("Loading context usage…")
-      } else {
-        Text("No context usage has been reported for this session.")
-          .foregroundStyle(.secondary)
-      }
-      NavigationLink {
-        UsageListContent(model: model, contextThreadID: threadID)
-          .navigationTitle("Usage details")
-          .navigationBarTitleDisplayMode(.inline)
-      } label: {
-        Label("Usage details", systemImage: "chart.bar.xaxis")
-      }
-      .accessibilityIdentifier("session-usage-details-link")
-    }
-  }
-
   private func modelLabel(_ id: String?, in settings: RemoteAgentSettings) -> String {
     guard let id else { return "Provider default" }
     return settings.models.first(where: { $0.id == id })?.label ?? id
@@ -283,7 +248,4 @@ struct AgentSettingsSheet: View {
     return settings.availableModes.first(where: { $0.id == id })?.label ?? id
   }
 
-  private func tokenCount(_ value: Double) -> String {
-    value.formatted(.number.precision(.fractionLength(0...2)))
-  }
 }

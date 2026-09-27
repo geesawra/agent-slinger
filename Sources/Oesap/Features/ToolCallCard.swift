@@ -459,7 +459,7 @@ extension RemoteToolCall.Status {
 
   fileprivate var color: Color {
     switch self {
-    case .running: .blue
+    case .running: .accentColor
     case .completed: .green
     case .failed: .red
     case .canceled, .unknown: .secondary

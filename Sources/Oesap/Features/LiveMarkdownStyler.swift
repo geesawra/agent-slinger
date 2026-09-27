@@ -463,7 +463,8 @@ enum LiveMarkdownStyler {
       switch style.ink {
       case .primary: color = textColor
       case .secondary: color = .secondaryLabel
-      case .link: color = .link
+      case .link:
+        color = UIColor(named: "AccentColor", in: .main, compatibleWith: traitCollection) ?? .link
       case .hidden: color = .clear
       }
       let paragraph = NSMutableParagraphStyle()

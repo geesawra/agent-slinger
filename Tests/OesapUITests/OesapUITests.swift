@@ -64,7 +64,13 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(waitUntilHittable(cancel))
     cancel.tap()
 
-    XCTAssertTrue(app.staticTexts["Running"].waitForExistence(timeout: 5))
+    let info = app.buttons["session-info-button"]
+    XCTAssertTrue(info.isHittable)
+    info.tap()
+    XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      app.descendants(matching: .any)["session-info-status"].label.contains("Running"))
+    app.buttons["session-info-done"].tap()
     XCTAssertEqual(composer.value as? String, "Keep this draft if I cancel Stop")
   }
 
@@ -202,27 +208,29 @@ final class OesapUITests: XCTestCase {
     let contextValue = (contextButton.value as? String) ?? ""
     let contextAccessibility = "\(contextButton.label) \(contextValue)"
     XCTAssertTrue(contextAccessibility.contains("32%"))
-    attachScreenshot(named: "Chat context usage")
-    contextButton.tap()
-
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
-    let settingsList = app.collectionViews.firstMatch
-    XCTAssertTrue(settingsList.waitForExistence(timeout: 5))
-    let contextGauge = app.descendants(matching: .any)["session-context-gauge"]
-    XCTAssertTrue(scrollElementIntoView(contextGauge, in: settingsList))
-    let usageLink = app.descendants(matching: .any)["session-usage-details-link"]
-    XCTAssertTrue(scrollElementIntoView(usageLink, in: settingsList))
-    usageLink.tap()
-    XCTAssertTrue(app.navigationBars["Usage details"].waitForExistence(timeout: 5))
+    let timeline = app.scrollViews["chat-timeline-scroll"]
+    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+    for _ in 0..<5 { timeline.swipeDown() }
+    attachScreenshot(named: "Agent chat without status header")
+    let infoButton = app.buttons["session-info-button"]
+    XCTAssertTrue(infoButton.waitForExistence(timeout: 5))
+    infoButton.tap()
+    XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
+    let sessionStatus = app.descendants(matching: .any)["session-info-status"]
+    XCTAssertTrue(sessionStatus.waitForExistence(timeout: 5))
+    XCTAssertTrue(sessionStatus.label.contains("Running"))
+    XCTAssertTrue(staticText(containing: "codex", in: app).exists)
+    XCTAssertTrue(staticText(containing: "gpt-6-sol", in: app).exists)
     XCTAssertTrue(staticText(containing: "Last reported context", in: app).exists)
     let usageList = app.collectionViews.firstMatch
     XCTAssertTrue(usageList.waitForExistence(timeout: 5))
-    let expanded = expandUsageDetailsSheet(app)
+    attachScreenshot(named: "Session info and usage")
+    let expanded = expandSessionInfoSheet(app)
     if !expanded {
-      attachScreenshot(named: "Usage details sheet expansion failure")
-      attachAccessibilitySnapshot(named: "Usage details sheet accessibility", app: app)
+      attachScreenshot(named: "Session info sheet expansion failure")
+      attachAccessibilitySnapshot(named: "Session info sheet accessibility", app: app)
     }
-    XCTAssertTrue(expanded, "Usage details should expand before scrolling.")
+    XCTAssertTrue(expanded, "Session info should expand before scrolling.")
 
     let usedTokens = staticText(containing: "64,000 tokens", in: app)
     XCTAssertTrue(scrollElementIntoView(usedTokens, in: usageList))
@@ -242,9 +250,7 @@ final class OesapUITests: XCTestCase {
     let creditBalance = staticText(containing: "12.50", in: app)
     XCTAssertTrue(scrollElementIntoView(creditBalance, in: usageList))
     attachScreenshot(named: "Selected provider credit balance")
-    app.navigationBars["Usage details"].buttons.firstMatch.tap()
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
-    app.buttons["agent-settings-done"].tap()
+    app.buttons["session-info-done"].tap()
 
     app.navigationBars.buttons.firstMatch.tap()
     XCTAssertTrue(app.navigationBars["Oesap demo"].waitForExistence(timeout: 5))
@@ -283,6 +289,8 @@ final class OesapUITests: XCTestCase {
     assertMinimumTapTarget(context, named: "Context and settings")
     context.tap()
     XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    XCTAssertFalse(app.descendants(matching: .any)["session-context-gauge"].exists)
+    XCTAssertFalse(app.descendants(matching: .any)["session-usage-details-link"].exists)
 
     let modelPicker = app.descendants(matching: .any)["session-model-picker"]
     let effortPicker = app.descendants(matching: .any)["session-effort-picker"]
@@ -394,22 +402,23 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(contextButton.waitForExistence(timeout: 5))
     XCTAssertTrue(contextButton.isHittable, "Context should remain in the accessory row at AX5.")
     assertMinimumTapTarget(contextButton, named: "Context usage")
-    let timeline = app.scrollViews["chat-timeline-scroll"]
-    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
-    let running = app.staticTexts["Running"]
-    for _ in 0..<8 where !running.isHittable { timeline.swipeDown() }
-    XCTAssertTrue(running.waitForExistence(timeout: 5))
-    XCTAssertTrue(running.isHittable)
     attachScreenshot(named: "Chat at accessibility text size")
-    contextButton.tap()
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.buttons["agent-settings-done"].isHittable)
-    attachScreenshot(named: "Agent settings at accessibility text size")
+    let infoButton = app.buttons["session-info-button"]
+    XCTAssertTrue(infoButton.waitForExistence(timeout: 5))
+    infoButton.tap()
+    XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.descendants(matching: .any)["session-info-status"].label.contains("Running"))
     let accessibilityUsageList = app.collectionViews.firstMatch
     XCTAssertTrue(accessibilityUsageList.waitForExistence(timeout: 5))
     let accessibilityUsed = staticText(containing: "64,000 tokens", in: app)
     XCTAssertTrue(scrollElementIntoView(accessibilityUsed, in: accessibilityUsageList))
-    attachScreenshot(named: "Usage token details at accessibility text size")
+    attachScreenshot(named: "Session info and usage at accessibility text size")
+    app.buttons["session-info-done"].tap()
+    contextButton.tap()
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["agent-settings-done"].isHittable)
+    XCTAssertFalse(app.descendants(matching: .any)["session-context-gauge"].exists)
+    attachScreenshot(named: "Agent settings at accessibility text size")
   }
 
   func testFailedSendKeepsTheDraftForRetry() {
@@ -741,7 +750,7 @@ final class OesapUITests: XCTestCase {
     return element.exists && element.isHittable
   }
 
-  private func expandUsageDetailsSheet(_ app: XCUIApplication) -> Bool {
+  private func expandSessionInfoSheet(_ app: XCUIApplication) -> Bool {
     let grabber = app.buttons["Sheet Grabber"]
     guard grabber.waitForExistence(timeout: 5) else { return false }
     if grabber.frame.minY < 200 { return true }

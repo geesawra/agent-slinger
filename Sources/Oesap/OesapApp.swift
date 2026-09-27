@@ -47,9 +47,11 @@ struct OesapApp: App {
     WindowGroup {
       #if DEBUG
         WorkspaceRootView(model: model)
+          .tint(Color.accentColor)
           .preferredColorScheme(uiTestDarkMode ? .dark : nil)
       #else
         WorkspaceRootView(model: model)
+          .tint(Color.accentColor)
       #endif
     }
   }

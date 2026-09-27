@@ -59,6 +59,7 @@ struct ChatView: View {
   @Bindable var model: OesapModel
   let threadID: String
   @State private var showsAgentSettings = false
+  @State private var showsSessionInfo = false
   @State private var composerFocused = false
   @State private var viewportHeight: CGFloat = 0
   @State private var isNearBottom = true
@@ -101,8 +102,17 @@ struct ChatView: View {
                 symbol: "exclamationmark.triangle.fill", tint: .orange)
             }
 
-            if let thread {
-              AgentStatusCard(thread: thread)
+            if let thread,
+              thread.requiresAttention || thread.state == .waiting || thread.state == .failed
+            {
+              InlineNotice(
+                text: thread.attentionReason
+                  ?? (thread.state == .failed
+                    ? "This agent run failed." : "This agent needs your attention."),
+                symbol: thread.state == .failed
+                  ? "exclamationmark.triangle.fill" : "hand.raised.fill",
+                tint: .orange
+              )
             }
 
             if let permission = model.permissions.first(where: { $0.agentID == threadID }) {
@@ -313,8 +323,24 @@ struct ChatView: View {
         }
         .navigationTitle(thread?.title ?? "Agent thread")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+          ToolbarItem(placement: .topBarTrailing) {
+            Button {
+              composerFocused = false
+              showsSessionInfo = true
+            } label: {
+              Image(systemName: "info.circle")
+            }
+            .accessibilityLabel("Session info")
+            .accessibilityHint("Shows the session status, details, and usage.")
+            .accessibilityIdentifier("session-info-button")
+          }
+        }
         .sheet(isPresented: $showsAgentSettings) {
           AgentSettingsSheet(model: model, threadID: threadID)
+        }
+        .sheet(isPresented: $showsSessionInfo) {
+          SessionInfoSheet(model: model, threadID: threadID)
         }
         .sheet(item: $actionSheet) { action in
           AgentActionSheetView(
@@ -496,81 +522,6 @@ private struct AgentActionSheetView: View {
         ToolbarItem(placement: .cancellationAction) {
           Button("Cancel") { dismiss() }
             .accessibilityIdentifier("agent-action-cancel")
-        }
-      }
-    }
-  }
-}
-
-private struct AgentStatusCard: View {
-  let thread: RemoteThread
-
-  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-  var body: some View {
-    statusInformation
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.vertical, 4)
-  }
-
-  private var statusInformation: some View {
-    HStack(alignment: .top, spacing: 12) {
-      if !dynamicTypeSize.isAccessibilitySize {
-        Image(systemName: thread.state.symbol)
-          .font(.title2)
-          .foregroundStyle(thread.requiresAttention ? Color.orange : Color.accentColor)
-          .frame(width: 34)
-          .accessibilityHidden(true)
-      }
-      VStack(alignment: .leading, spacing: 4) {
-        if dynamicTypeSize.isAccessibilitySize {
-          VStack(alignment: .leading, spacing: 4) {
-            Text(thread.state.label)
-              .font(.headline)
-              .fixedSize(horizontal: false, vertical: true)
-            if thread.requiresAttention {
-              Label {
-                Text("Attention").foregroundStyle(.primary)
-              } icon: {
-                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-              }
-              .font(.caption.weight(.semibold))
-            }
-          }
-        } else {
-          HStack(spacing: 8) {
-            Text(thread.state.label)
-              .font(.headline)
-              .fixedSize(horizontal: false, vertical: true)
-            if thread.requiresAttention {
-              Label {
-                Text("Attention").foregroundStyle(.primary)
-              } icon: {
-                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-              }
-              .font(.caption.weight(.semibold))
-            }
-          }
-        }
-        if let reason = thread.attentionReason {
-          Text(verbatim: reason)
-            .font(.subheadline)
-            .foregroundStyle(Color.primary.opacity(0.75))
-        }
-        if dynamicTypeSize.isAccessibilitySize {
-          VStack(alignment: .leading, spacing: 3) {
-            if let provider = thread.provider { Text(verbatim: provider) }
-            if let model = thread.model { Text(verbatim: model) }
-          }
-          .font(.footnote)
-          .foregroundStyle(Color.primary.opacity(0.75))
-        } else {
-          HStack(spacing: 12) {
-            if let provider = thread.provider { Text(verbatim: provider) }
-            if let model = thread.model { Text(verbatim: model) }
-          }
-          .font(.footnote)
-          .foregroundStyle(Color.primary.opacity(0.75))
         }
       }
     }

@@ -34,6 +34,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     }
     textView.backgroundColor = .clear
     textView.textColor = .label
+    textView.tintColor = UIColor(named: "AccentColor") ?? .link
     textView.font = .preferredFont(forTextStyle: .body)
     textView.adjustsFontForContentSizeCategory = true
     textView.textContainerInset = UIEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
