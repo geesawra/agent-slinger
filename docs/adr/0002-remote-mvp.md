@@ -22,9 +22,9 @@ failure as an empty workspace.
   connection lifecycle, and Keychain operations remain below that boundary.
 - The app displays loading, empty, offline, error, and agent-attention states.
   A failed send keeps the user's draft for retry.
-- Reconnection is explicit and bounded. It reloads the visible workspace and
-  restores the selected project/thread timeline when those resources remain
-  available.
+- Reconnection uses bounded retries after a user action or when the app
+  returns from the background. It reloads the visible workspace and restores
+  the selected project/thread timeline when those resources remain available.
 - A deterministic launch-argument demo service supports offline UI coverage;
   it is not a production connection option.
 

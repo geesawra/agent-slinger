@@ -126,6 +126,9 @@ final class OesapModel {
   @ObservationIgnored private var connectionObservationTask: Task<Void, Never>?
   @ObservationIgnored private var connectionGeneration = 0
   @ObservationIgnored private var startupConnectionStarted = false
+  @ObservationIgnored private var shouldReconnectAfterBackground = false
+  @ObservationIgnored private var appIsInBackground = false
+  @ObservationIgnored private var foregroundReconnectScheduled = false
   @ObservationIgnored private var savedInstancesRefreshGeneration = 0
   @ObservationIgnored private var olderTimelineCursor: RemoteTimelineCursor?
   @ObservationIgnored private var latestTimelineCursor: RemoteTimelineCursor?
@@ -492,6 +495,7 @@ final class OesapModel {
 
   func start() async {
     guard !startupConnectionStarted else { return }
+    defer { scheduleForegroundReconnectIfNeeded() }
     startupConnectionStarted = true
     await refreshSavedInstances()
     loadingSavedConnections = false
@@ -499,6 +503,50 @@ final class OesapModel {
       let instanceID = activeInstanceID ?? savedInstances.first?.id
     else { return }
     _ = await selectSavedInstance(instanceID)
+  }
+
+  func appDidEnterBackground() {
+    appIsInBackground = true
+    shouldReconnectAfterBackground = true
+  }
+
+  func appDidBecomeActive() async {
+    appIsInBackground = false
+    guard shouldReconnectAfterBackground else { return }
+
+    if loadingSavedConnections {
+      await refreshSavedInstances()
+    }
+    guard !appIsInBackground else { return }
+    guard !loadingSavedConnections else { return }
+    guard hasSavedConnection, activeInstanceID != nil else {
+      shouldReconnectAfterBackground = false
+      return
+    }
+    guard !connectionState.isBusy else { return }
+    shouldReconnectAfterBackground = false
+    await reconnect()
+  }
+
+  private func scheduleForegroundReconnectIfNeeded() {
+    guard shouldReconnectAfterBackground, !appIsInBackground,
+      !loadingSavedConnections, !connectionState.isBusy,
+      !foregroundReconnectScheduled
+    else { return }
+    foregroundReconnectScheduled = true
+    Task { [weak self] in
+      guard let self else { return }
+      self.foregroundReconnectScheduled = false
+      guard self.shouldReconnectAfterBackground, !self.appIsInBackground,
+        !self.loadingSavedConnections, !self.connectionState.isBusy
+      else { return }
+      guard self.hasSavedConnection, self.activeInstanceID != nil else {
+        self.shouldReconnectAfterBackground = false
+        return
+      }
+      self.shouldReconnectAfterBackground = false
+      await self.reconnect()
+    }
   }
 
   func refreshSavedInstances() async {
@@ -525,6 +573,7 @@ final class OesapModel {
 
   func connect(_ connection: RemoteConnection) async {
     guard !connectionState.isBusy else { return }
+    defer { scheduleForegroundReconnectIfNeeded() }
     let previousService = service
     let preserveInitialSelection =
       previousService == nil && activeInstanceID == nil
@@ -604,6 +653,7 @@ final class OesapModel {
   @discardableResult
   func selectSavedInstance(_ id: String) async -> Bool {
     guard !connectionState.isBusy else { return false }
+    defer { scheduleForegroundReconnectIfNeeded() }
     guard savedInstances.contains(where: { $0.id == id }) else {
       instanceError = "This saved Paseo instance is no longer available. Refresh and try again."
       return false
@@ -723,6 +773,7 @@ final class OesapModel {
 
   func reconnect() async {
     guard !connectionState.isBusy else { return }
+    defer { scheduleForegroundReconnectIfNeeded() }
     let priorServerID = agentControlServerID ?? connectedServerID
     prepareAgentActionsForConnectionChange()
     let generation = invalidateConnection()
@@ -1561,9 +1612,11 @@ final class OesapModel {
   }
 
   func send(threadID: String, text: String) async -> Bool {
-    await send(
-      threadID: threadID, text: text, behavior: .interrupt,
-      expectedStateRevision: threadStateRevision(for: threadID), selectedDuringActiveTurn: false)
+    let isRunning = threads.first(where: { $0.id == threadID })?.state == .running
+    return await send(
+      threadID: threadID, text: text, behavior: isRunning ? .steer : .interrupt,
+      expectedStateRevision: threadStateRevision(for: threadID),
+      selectedDuringActiveTurn: isRunning)
   }
 
   @discardableResult
@@ -2145,7 +2198,9 @@ final class OesapModel {
       else { return false }
       agentSendTokens[key] = nil
       pendingAgentMessages[key] = nil
-      if drafts[threadID] == intent.draftText { drafts[threadID] = "" }
+      if drafts[threadID] == intent.draftText {
+        drafts[threadID] = ""
+      }
       let submittedImageIDs = Set(intent.images.map(\.id))
       imageDrafts[threadID]?.removeAll { submittedImageIDs.contains($0.id) }
       if !intent.images.isEmpty {

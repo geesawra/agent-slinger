@@ -4,7 +4,6 @@ struct AgentOverviewView: View {
   @Bindable var model: OesapModel
   var onOpenThread: (String) -> Void
 
-  @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @State private var filter = AgentOverviewFilter.active
   @State private var navigationError: String?
@@ -134,10 +133,6 @@ struct AgentOverviewView: View {
     }
     .refreshable { await model.refreshAgentOverview() }
     .onAppear { Task { await model.refreshAgentOverview() } }
-    .onChange(of: scenePhase) { _, phase in
-      guard phase == .active else { return }
-      Task { await model.refreshAgentOverview() }
-    }
     .onChange(of: model.timelineGeneration) { _, _ in
       guard model.connectionState == .connected else { return }
       Task { await model.refreshAgentOverview() }

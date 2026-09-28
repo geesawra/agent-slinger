@@ -8,6 +8,7 @@ struct ChatComposerBar: View {
   let error: String?
   var focus: Binding<Bool>
   var send: (String, [RemoteDraftImage]) -> Void
+  var interrupt: ((String, [RemoteDraftImage]) -> Void)? = nil
   var clearError: () -> Void
   var contextUsage: RemoteContextUsage? = nil
   var isLoadingContextUsage = false
@@ -22,9 +23,11 @@ struct ChatComposerBar: View {
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @State private var showsExpandedComposer = false
+  @State private var pendingExpandedStop = false
   @State private var showsCompactExpandControl = false
   @State private var expandedShouldRestoreFocus = false
   @State private var pendingExpandedSend: (String, [RemoteDraftImage])?
+  @State private var pendingExpandedInterrupt: (String, [RemoteDraftImage])?
   @State private var pendingImageOperations = 0
   @State private var imagePreparationError: String?
   @State private var imageImportGeneration = 0
@@ -37,6 +40,11 @@ struct ChatComposerBar: View {
           draft: $draft,
           images: $images,
           canSend: canSend,
+          showsStopAction: showsStopAction,
+          isAgentRunning: isAgentRunning,
+          isStopPending: isStopPending,
+          isStopEnabled: isStopEnabled,
+          stopButtonIdentifier: stopButtonIdentifier,
           pendingImageOperations: pendingImageOperations,
           imageError: imagePreparationError,
           imageImportIdentity: imageImportIdentity,
@@ -49,6 +57,14 @@ struct ChatComposerBar: View {
             finishImageOperation(message, generation: generation)
           },
           onRemoveImage: removeImage,
+          onStop: {
+            pendingExpandedStop = true
+            showsExpandedComposer = false
+          },
+          onInterrupt: {
+            pendingExpandedInterrupt = (draft, images)
+            showsExpandedComposer = false
+          },
           onSend: {
             pendingExpandedSend = (draft, images)
             showsExpandedComposer = false
@@ -132,9 +148,8 @@ struct ChatComposerBar: View {
 
   private var accessoryRow: some View {
     HStack(spacing: 8) {
-      contextUsageControl
       Spacer(minLength: 0)
-      stopControl
+      contextUsageControl
     }
     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
     .accessibilityElement(children: .contain)
@@ -142,7 +157,7 @@ struct ChatComposerBar: View {
   }
 
   private var hasAgentStatusControls: Bool {
-    onShowContextUsage != nil || ((isAgentRunning || isStopPending) && onStop != nil)
+    onShowContextUsage != nil
   }
 
   private var remainingImageCount: Int {
@@ -267,7 +282,7 @@ struct ChatComposerBar: View {
 
   @ViewBuilder
   private var stopControl: some View {
-    if let onStop, isAgentRunning || isStopPending {
+    if let onStop, showsStopAction {
       #if targetEnvironment(macCatalyst)
         makeStopButton(action: onStop, style: .bordered)
       #else
@@ -373,7 +388,11 @@ struct ChatComposerBar: View {
       if showsCompactExpandControl {
         expandControl
       }
-      sendControl
+      if showsStopAction {
+        stopControl
+      } else {
+        sendControl
+      }
     }
     .frame(width: 44, alignment: .bottom)
   }
@@ -407,7 +426,22 @@ struct ChatComposerBar: View {
     .offset(y: -2)
     .contentShape(Rectangle())
     .disabled(!canSend)
-    .accessibilityLabel(isSending ? "Sending message" : "Send message")
+    .contextMenu {
+      if isAgentRunning, interrupt != nil {
+        Button(action: sendDraft) {
+          Label("Steer current turn", systemImage: "arrow.turn.up.right")
+        }
+        Button(action: interruptDraft) {
+          Label("Interrupt and send", systemImage: "stop.fill")
+        }
+      }
+    }
+    .accessibilityLabel(
+      isSending ? "Sending message" : isAgentRunning ? "Steer current turn" : "Send message")
+    .accessibilityHint(
+      isAgentRunning
+        ? "Sends this message to the active turn using Paseo steering. Long press to interrupt and restart instead."
+        : "")
     .accessibilityIdentifier("send-message")
   }
 
@@ -458,13 +492,26 @@ struct ChatComposerBar: View {
   }
 
   private var canSend: Bool {
-    isConnected && !isSending && pendingImageOperations == 0
+    isConnected && !isSending && !isStopPending && pendingImageOperations == 0
       && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty)
+  }
+
+  private var showsStopAction: Bool {
+    guard onStop != nil, !isSending else { return false }
+    if isStopPending { return true }
+    return isAgentRunning && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && images.isEmpty && pendingImageOperations == 0
   }
 
   private func sendDraft() {
     guard canSend else { return }
     send(draft, images)
+    focus.wrappedValue = refocusAfterSend
+  }
+
+  private func interruptDraft() {
+    guard canSend else { return }
+    (interrupt ?? send)(draft, images)
     focus.wrappedValue = refocusAfterSend
   }
 
@@ -475,7 +522,15 @@ struct ChatComposerBar: View {
   }
 
   private func expandedComposerDidDismiss() {
-    if let pendingExpandedSend {
+    if pendingExpandedStop {
+      pendingExpandedStop = false
+      onStop?()
+    } else if let pendingExpandedInterrupt {
+      self.pendingExpandedInterrupt = nil
+      guard canSend else { return }
+      (interrupt ?? send)(pendingExpandedInterrupt.0, pendingExpandedInterrupt.1)
+      focus.wrappedValue = refocusAfterSend
+    } else if let pendingExpandedSend {
       self.pendingExpandedSend = nil
       guard canSend else { return }
       send(pendingExpandedSend.0, pendingExpandedSend.1)
@@ -493,6 +548,11 @@ private struct ExpandedComposerView: View {
   @Binding var draft: String
   @Binding var images: [RemoteDraftImage]
   let canSend: Bool
+  let showsStopAction: Bool
+  let isAgentRunning: Bool
+  let isStopPending: Bool
+  let isStopEnabled: Bool
+  let stopButtonIdentifier: String
   let pendingImageOperations: Int
   let imageError: String?
   let imageImportIdentity: String
@@ -501,6 +561,8 @@ private struct ExpandedComposerView: View {
   let onImageLoaded: (Data, String?, Int) -> Void
   let onImageOperationFailed: (String, Int) -> Void
   let onRemoveImage: (String) -> Void
+  let onStop: () -> Void
+  let onInterrupt: () -> Void
   let onSend: () -> Void
 
   @State private var editorFocused = false
@@ -598,27 +660,68 @@ private struct ExpandedComposerView: View {
 
   @ViewBuilder
   private var sendButton: some View {
-    let button = Button(action: onSend) {
-      Image(systemName: "arrow.up")
-        .font(.system(size: 16, weight: .semibold))
+    if showsStopAction {
+      let button = Button(action: onStop) {
+        Group {
+          if isStopPending {
+            ProgressView().tint(Color.secondary)
+          } else {
+            Image(systemName: "square.fill")
+              .font(.system(size: 12, weight: .semibold))
+          }
+        }
         .frame(width: 32, height: 32)
         .contentShape(Circle())
-    }
-    .disabled(!canSend)
-    .controlSize(.small)
-    .buttonBorderShape(.circle)
-    .accessibilityLabel("Send message")
-    .accessibilityIdentifier("expanded-send-message")
-    if #available(iOS 26.0, *) {
-      button
-        .buttonStyle(.glassProminent)
-        .frame(width: 44, height: 44)
-        .contentShape(Rectangle())
+      }
+      .disabled(!isStopEnabled || isStopPending)
+      .controlSize(.small)
+      .buttonBorderShape(.circle)
+      .accessibilityLabel(isStopPending ? "Stopping agent" : "Stop agent")
+      .accessibilityIdentifier(stopButtonIdentifier)
+      if #available(iOS 26.0, *) {
+        button
+          .buttonStyle(.glass)
+          .frame(width: 44, height: 44)
+          .contentShape(Rectangle())
+      } else {
+        button
+          .buttonStyle(.bordered)
+          .frame(width: 44, height: 44)
+          .contentShape(Rectangle())
+      }
     } else {
-      button
-        .buttonStyle(.borderedProminent)
-        .frame(width: 44, height: 44)
-        .contentShape(Rectangle())
+      let button = Button(action: onSend) {
+        Image(systemName: "arrow.up")
+          .font(.system(size: 16, weight: .semibold))
+          .frame(width: 32, height: 32)
+          .contentShape(Circle())
+      }
+      .disabled(!canSend)
+      .contextMenu {
+        if isAgentRunning {
+          Button(action: onSend) {
+            Label("Steer current turn", systemImage: "arrow.turn.up.right")
+          }
+          Button(action: onInterrupt) {
+            Label("Interrupt and send", systemImage: "stop.fill")
+          }
+        }
+      }
+      .controlSize(.small)
+      .buttonBorderShape(.circle)
+      .accessibilityLabel(isAgentRunning ? "Steer current turn" : "Send message")
+      .accessibilityIdentifier("expanded-send-message")
+      if #available(iOS 26.0, *) {
+        button
+          .buttonStyle(.glassProminent)
+          .frame(width: 44, height: 44)
+          .contentShape(Rectangle())
+      } else {
+        button
+          .buttonStyle(.borderedProminent)
+          .frame(width: 44, height: 44)
+          .contentShape(Rectangle())
+      }
     }
   }
 }

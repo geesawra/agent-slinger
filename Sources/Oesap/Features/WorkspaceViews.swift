@@ -31,6 +31,7 @@ struct ConnectionProgressIndicator: View {
 
 struct WorkspaceRootView: View {
   @Bindable var model: OesapModel
+  @Environment(\.scenePhase) private var scenePhase
   @State private var path: [OesapRoute] = []
   @State private var splitProjectID: String?
   @State private var detailRoute: OesapRoute?
@@ -114,6 +115,13 @@ struct WorkspaceRootView: View {
     .task {
       observedInstanceID = model.activeInstanceID
       await model.start()
+    }
+    .onChange(of: scenePhase) { _, phase in
+      if phase == .background {
+        model.appDidEnterBackground()
+      } else if phase == .active {
+        Task { await model.appDidBecomeActive() }
+      }
     }
     .confirmationDialog(
       "Disconnect from this host?", isPresented: $confirmsDisconnect, titleVisibility: .visible

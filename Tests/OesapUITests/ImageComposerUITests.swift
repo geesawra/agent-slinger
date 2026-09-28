@@ -37,7 +37,7 @@ final class ImageComposerUITests: XCTestCase {
 
   func testPastedImageAndTextStayInDraftAfterUncertainSend() {
     let app = launchDemo(arguments: ["--demo-send-failure"])
-    openRunningThread(in: app)
+    openIdleThread(in: app)
 
     let composer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(composer.waitForExistence(timeout: 5))
@@ -60,7 +60,6 @@ final class ImageComposerUITests: XCTestCase {
     attachScreenshot(named: "Compact composer with image and text", app: app)
 
     send.tap()
-    chooseRunningSendAction(app, "Steer when supported")
 
     XCTAssertTrue(
       app.staticTexts.containing(
@@ -300,6 +299,13 @@ final class ImageComposerUITests: XCTestCase {
     XCTAssertTrue(app.buttons["context-usage-button"].waitForExistence(timeout: 5))
   }
 
+  private func openIdleThread(in app: XCUIApplication) {
+    connect(app)
+    app.buttons["project-demo-project"].tap()
+    app.buttons["thread-demo-agent-idle"].tap()
+    XCTAssertTrue(app.buttons["context-usage-button"].waitForExistence(timeout: 5))
+  }
+
   private func pasteSanitizedImage(into composer: XCUIElement, app: XCUIApplication) {
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1
@@ -391,14 +397,6 @@ final class ImageComposerUITests: XCTestCase {
     let bottom = min(timeline.frame.maxY - 8, accessory.frame.minY - 8)
     return element.exists && element.isHittable
       && element.frame.minY >= top && element.frame.maxY <= bottom
-  }
-
-  private func chooseRunningSendAction(_ app: XCUIApplication, _ title: String) {
-    XCTAssertTrue(app.navigationBars["Send to running agent?"].waitForExistence(timeout: 5))
-    let action = app.buttons[
-      title == "Steer when supported" ? "agent-send-steer" : "agent-send-interrupt"]
-    XCTAssertTrue(action.waitForExistence(timeout: 5))
-    action.tap()
   }
 
   private func scrollUntilHittable(

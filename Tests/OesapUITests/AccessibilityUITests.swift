@@ -102,12 +102,11 @@ final class AccessibilityUITests: XCTestCase {
     assertMinimumTapTarget(send, named: "Send message")
     attachScreenshot(named: "AX5 dark chat composer", app: app)
     send.tap()
-    chooseRunningSendAction(app, "Steer when supported")
     XCTAssertTrue(
       app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
   }
 
-  func testAX5DarkAgentStopAndRunningSendChoicesAreReachable() {
+  func testAX5DarkStopActionBecomesSteerSendWhileTyping() {
     let app = launchDemo(accessibilitySize: true, darkMode: true, agentControl: true)
     connect(app)
     let project = app.buttons["project-demo-project"]
@@ -121,7 +120,7 @@ final class AccessibilityUITests: XCTestCase {
     let context = app.buttons["context-usage-button"]
     XCTAssertTrue(stop.waitForExistence(timeout: 5))
     XCTAssertTrue(context.waitForExistence(timeout: 5))
-    XCTAssertTrue(stop.isHittable, "Stop should stay in the composer accessory row at AX5.")
+    XCTAssertTrue(stop.isHittable, "Stop should occupy the composer action button at AX5.")
     XCTAssertTrue(context.isHittable, "Context should stay in the composer accessory row at AX5.")
     assertMinimumTapTarget(stop, named: "Stop agent")
     assertMinimumTapTarget(context, named: "Context usage")
@@ -143,7 +142,7 @@ final class AccessibilityUITests: XCTestCase {
     composer.tap()
     composer.typeText(prompt)
     XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-    XCTAssertTrue(stop.isHittable, "Stop should remain reachable while the keyboard is open.")
+    XCTAssertFalse(stop.exists, "Stop should become Send as soon as the user types.")
     XCTAssertTrue(context.isHittable, "Context should remain reachable while the keyboard is open.")
     let send = app.buttons["send-message"]
     XCTAssertTrue(send.waitForExistence(timeout: 5))
@@ -152,24 +151,11 @@ final class AccessibilityUITests: XCTestCase {
     assertMinimumTapTarget(send, named: "Send message")
     attachScreenshot(named: "AX5 dark accessory and composer with keyboard", app: app)
     send.tap()
-
-    let sendSheet = app.navigationBars["Send to running agent?"]
-    XCTAssertTrue(sendSheet.waitForExistence(timeout: 5))
-    let steer = app.buttons["agent-send-steer"]
-    let interrupt = app.buttons["agent-send-interrupt"]
-    XCTAssertTrue(scrollSheetActionFullyIntoView(steer, in: app))
-    XCTAssertTrue(waitUntilHittable(steer))
-    attachScreenshot(named: "AX5 dark steer choice", app: app)
-    XCTAssertTrue(scrollSheetActionFullyIntoView(interrupt, in: app))
-    XCTAssertTrue(waitUntilHittable(interrupt))
-    attachScreenshot(named: "AX5 dark interrupt choice", app: app)
-    let sendCancel = app.buttons["agent-action-cancel"]
-    XCTAssertTrue(waitUntilHittable(sendCancel))
-    sendCancel.tap()
-    XCTAssertEqual(composer.value as? String, prompt)
+    XCTAssertTrue(
+      app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
   }
 
-  func testAX5DarkFailedRunningSendCanBeReviewedAndClearedWithoutLosingDraft() {
+  func testAX5DarkFailedSendCanBeReviewedAndClearedWithoutLosingDraft() {
     let app = launchDemo(
       accessibilitySize: true, darkMode: true,
       additionalArguments: ["--demo-send-failure"])
@@ -177,7 +163,7 @@ final class AccessibilityUITests: XCTestCase {
     let project = app.buttons["project-demo-project"]
     XCTAssertTrue(scrollUntilHittable(project, in: app))
     project.tap()
-    let thread = app.buttons["thread-demo-agent-running"]
+    let thread = app.buttons["thread-demo-agent-idle"]
     XCTAssertTrue(scrollUntilHittable(thread, in: app))
     thread.tap()
 
@@ -190,13 +176,6 @@ final class AccessibilityUITests: XCTestCase {
     XCTAssertTrue(send.waitForExistence(timeout: 5))
     XCTAssertTrue(send.isEnabled)
     send.tap()
-
-    let sendSheet = app.navigationBars["Send to running agent?"]
-    XCTAssertTrue(sendSheet.waitForExistence(timeout: 5))
-    let steer = app.buttons["agent-send-steer"]
-    XCTAssertTrue(scrollSheetActionFullyIntoView(steer, in: app))
-    XCTAssertTrue(waitUntilHittable(steer))
-    steer.tap()
 
     let timeline = app.scrollViews["chat-timeline-scroll"]
     XCTAssertTrue(timeline.waitForExistence(timeout: 5))
@@ -491,26 +470,6 @@ final class AccessibilityUITests: XCTestCase {
       element.frame.width, 44, "\(name) should be at least 44 pt wide.", file: file, line: line)
     XCTAssertGreaterThanOrEqual(
       element.frame.height, 44, "\(name) should be at least 44 pt high.", file: file, line: line)
-  }
-
-  private func chooseRunningSendAction(_ app: XCUIApplication, _ action: String) {
-    let sendSheet = app.navigationBars["Send to running agent?"]
-    XCTAssertTrue(sendSheet.waitForExistence(timeout: 5), "A running-send choice should be shown.")
-    let choice = app.buttons[runningSendActionIdentifier(action)]
-    XCTAssertTrue(choice.waitForExistence(timeout: 5))
-    XCTAssertTrue(scrollSheetActionFullyIntoView(choice, in: app))
-    XCTAssertTrue(waitUntilHittable(choice))
-    choice.tap()
-  }
-
-  private func runningSendActionIdentifier(_ action: String) -> String {
-    switch action {
-    case "Steer when supported": return "agent-send-steer"
-    case "Interrupt and send": return "agent-send-interrupt"
-    default:
-      XCTFail("Unexpected running-send action: \(action)")
-      return ""
-    }
   }
 
   private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 5) -> Bool {

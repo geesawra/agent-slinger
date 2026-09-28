@@ -110,17 +110,23 @@ final class MarkdownComposerUITests: XCTestCase {
     let stop = app.buttons["agent-stop-demo-agent-running"]
     let send = app.buttons["send-message"]
     let accessory = app.descendants(matching: .any)["chat-composer-accessory"]
+    let composer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(context.waitForExistence(timeout: 5))
     XCTAssertEqual(context.value as? String, "32% used")
     XCTAssertTrue(stop.waitForExistence(timeout: 5))
-    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    XCTAssertFalse(send.exists)
     XCTAssertTrue(accessory.exists)
     assertInsideAppBounds(context, named: "Context", app: app)
     assertInsideAppBounds(stop, named: "Stop", app: app)
-    assertInsideAppBounds(send, named: "Send", app: app)
     XCTAssertLessThanOrEqual(context.frame.maxY, accessory.frame.maxY)
-    XCTAssertLessThanOrEqual(stop.frame.maxY, accessory.frame.maxY)
-    attachScreenshot(named: "AX5 Context Stop and Send controls", app: app)
+    attachScreenshot(named: "AX5 Context and Stop composer action", app: app)
+
+    composer.tap()
+    composer.typeText("Steer this follow-up")
+    XCTAssertFalse(stop.exists)
+    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    assertInsideAppBounds(send, named: "Send", app: app)
+    attachScreenshot(named: "AX5 Context and Send composer action", app: app)
   }
 
   func testCompactExpandAppearsAfterMoreThanTwoVisualLines() {
@@ -183,7 +189,7 @@ final class MarkdownComposerUITests: XCTestCase {
     XCTAssertTrue(waitUntilAbsent(expand, timeout: 5), "Expand should hide again at one line.")
   }
 
-  func testExpandedSendDismissesBeforeShowingRunningAgentChoice() {
+  func testExpandedSendUsesPaseoSteerAndDismisses() {
     let app = launchDemo(agentControl: true)
     openRunningThread(in: app)
     let compactEditor = app.textViews["chat-composer"]
@@ -229,13 +235,7 @@ final class MarkdownComposerUITests: XCTestCase {
     attachScreenshot(named: "Expanded live Markdown before send", app: app)
     send.tap()
 
-    let sendChoice = app.navigationBars["Send to running agent?"]
-    XCTAssertTrue(sendChoice.waitForExistence(timeout: 5))
     XCTAssertFalse(app.navigationBars["Compose message"].exists)
-    let steer = app.buttons["agent-send-steer"]
-    XCTAssertTrue(steer.waitForExistence(timeout: 5))
-    XCTAssertTrue(steer.isHittable)
-    steer.tap()
 
     XCTAssertTrue(
       app.staticTexts.containing(
@@ -243,15 +243,9 @@ final class MarkdownComposerUITests: XCTestCase {
       )
       .firstMatch.waitForExistence(timeout: 5))
     XCTAssertTrue(app.staticTexts["Use the existing plan"].exists)
-    let receipt = app.descendants(matching: .any)["agent-message-status-demo-agent-running"]
     XCTAssertTrue(
-      app.staticTexts.containing(
-        NSPredicate(format: "label CONTAINS %@", "Message accepted by host.")
-      ).firstMatch.waitForExistence(timeout: 5),
-      "The existing running-agent send choice should still reach the host receipt."
-    )
-    XCTAssertTrue(receipt.exists)
-    attachScreenshot(named: "Expanded composer running-send receipt", app: app)
+      app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
+    attachScreenshot(named: "Expanded composer running-turn steer", app: app)
   }
 
   private func launchDemo(accessibilitySize: Bool = false, agentControl: Bool = false)

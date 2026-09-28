@@ -1,31 +1,20 @@
 import SwiftUI
 
 private enum AgentActionSheet: Identifiable {
-  case send(threadID: String, text: String, images: [RemoteDraftImage], revision: Int)
   case uncertainSend(threadID: String)
 
   var id: String {
     switch self {
-    case .send(let threadID, _, _, let revision): "send-\(threadID)-\(revision)"
     case .uncertainSend(let threadID): "uncertain-\(threadID)"
     }
   }
 
-  var title: String {
-    switch self {
-    case .send(_, _, _, _): "Send to running agent?"
-    case .uncertainSend(_): "Check the previous send"
-    }
-  }
+  var title: String { "Check the previous send" }
 
   var message: String {
-    switch self {
-    case .send:
-      "Steer when supported. The host may interrupt and restart the turn if steering is unavailable."
-    case .uncertainSend:
-      "This only clears Oesap’s local resend safeguard. It doesn’t cancel or remove the original message, and the host may still deliver it. Your draft stays here; sending it again could create a duplicate."
-    }
+    "This only clears Oesap’s local resend safeguard. It doesn’t cancel or remove the original message, and the host may still deliver it. Your draft stays here; sending it again could create a duplicate."
   }
+
 }
 
 private enum AgentActionConfirmation: Identifiable {
@@ -364,6 +353,7 @@ struct ChatView: View {
             error: nil,
             focus: $composerFocused,
             send: submitThreadMessage,
+            interrupt: interruptThreadMessage,
             clearError: {},
             contextUsage: model.contextUsage(for: threadID),
             isLoadingContextUsage: model.loadingContextUsage,
@@ -385,7 +375,6 @@ struct ChatView: View {
             refocusAfterSend: thread?.state != .running
               && !model.hasUncertainAgentMessage(for: threadID)
           )
-          .background(Color(uiColor: .systemBackground))
         }
         .navigationTitle(thread?.title ?? "Agent thread")
         .navigationBarTitleDisplayMode(.inline)
@@ -413,26 +402,6 @@ struct ChatView: View {
             action: action,
             canRetry: model.canRetryAgentMessage(for: threadID),
             isConnected: model.connectionState == .connected,
-            onSteer: { confirmedThreadID, text, images, revision in
-              actionSheet = nil
-              composerFocused = false
-              Task {
-                _ = await model.send(
-                  threadID: confirmedThreadID, text: text, behavior: .steer,
-                  expectedStateRevision: revision, selectedDuringActiveTurn: true,
-                  images: images)
-              }
-            },
-            onInterrupt: { confirmedThreadID, text, images, revision in
-              actionSheet = nil
-              composerFocused = false
-              Task {
-                _ = await model.send(
-                  threadID: confirmedThreadID, text: text, behavior: .interrupt,
-                  expectedStateRevision: revision, selectedDuringActiveTurn: true,
-                  images: images)
-              }
-            },
             onRetry: { confirmedThreadID in
               actionSheet = nil
               composerFocused = false
@@ -489,16 +458,35 @@ struct ChatView: View {
       actionSheet = .uncertainSend(threadID: threadID)
       return
     }
+    let isRunning = thread.state == .running
+    sendThreadMessage(
+      text, images: images, behavior: isRunning ? .steer : .interrupt,
+      selectedDuringActiveTurn: isRunning)
+  }
+
+  private func interruptThreadMessage(_ text: String, images: [RemoteDraftImage]) {
+    guard let thread else { return }
+    if model.hasUncertainAgentMessage(for: threadID) {
+      actionSheet = .uncertainSend(threadID: threadID)
+      return
+    }
+    let isRunning = thread.state == .running
+    sendThreadMessage(
+      text, images: images, behavior: .interrupt,
+      selectedDuringActiveTurn: isRunning)
+  }
+
+  private func sendThreadMessage(
+    _ text: String, images: [RemoteDraftImage], behavior: RemoteActiveTurnBehavior,
+    selectedDuringActiveTurn: Bool
+  ) {
     let revision = model.threadStateRevision(for: threadID)
-    if thread.state == .running {
-      actionSheet = .send(threadID: threadID, text: text, images: images, revision: revision)
-    } else {
-      Task {
-        _ = await model.send(
-          threadID: threadID, text: text, behavior: .interrupt,
-          expectedStateRevision: revision, selectedDuringActiveTurn: false,
-          images: images)
-      }
+    Task {
+      _ = await model.send(
+        threadID: threadID, text: text,
+        behavior: behavior,
+        expectedStateRevision: revision, selectedDuringActiveTurn: selectedDuringActiveTurn,
+        images: images)
     }
   }
 }
@@ -507,8 +495,6 @@ private struct AgentActionSheetView: View {
   let action: AgentActionSheet
   let canRetry: Bool
   let isConnected: Bool
-  var onSteer: (String, String, [RemoteDraftImage], Int) -> Void
-  var onInterrupt: (String, String, [RemoteDraftImage], Int) -> Void
   var onRetry: (String) -> Void
   var onClearWarning: (String) -> Void
   @Environment(\.dismiss) private var dismiss
@@ -521,27 +507,7 @@ private struct AgentActionSheetView: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         Section {
-          switch action {
-          case .send(let threadID, let text, let images, let revision):
-            Button {
-              dismiss()
-              onSteer(threadID, text, images, revision)
-            } label: {
-              Text("Steer when supported")
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .accessibilityIdentifier("agent-send-steer")
-            Button(role: .destructive) {
-              dismiss()
-              onInterrupt(threadID, text, images, revision)
-            } label: {
-              Text("Interrupt and send")
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .accessibilityIdentifier("agent-send-interrupt")
-          case .uncertainSend(let threadID):
+          if case .uncertainSend(let threadID) = action {
             if canRetry {
               Button {
                 dismiss()
