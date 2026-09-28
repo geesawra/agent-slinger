@@ -358,6 +358,21 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     }
   }
 
+  func directoryEntries(cwd: String?) async throws -> [RemoteDirectoryEntry] {
+    try await client.directoryEntries(cwd: cwd).map { entry in
+      RemoteDirectoryEntry(
+        path: entry.path,
+        kind: entry.kind == .directory ? .directory : .file)
+    }
+  }
+
+  func addProject(path: String) async throws -> RemoteProject {
+    let project = try await client.addProject(path: path)
+    return RemoteProject(
+      id: project.id, name: project.name, subtitle: project.rootPath,
+      rootPath: project.rootPath)
+  }
+
   func threads(projectID: String) async throws -> [RemoteThread] {
     var cursor: String?
     var seenCursors = Set<String>()

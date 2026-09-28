@@ -1,9 +1,32 @@
 import Foundation
 import Observation
 
+private func withConnectionAttemptTimeout<T: Sendable>(
+  _ timeout: Duration,
+  operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+  try await withThrowingTaskGroup(of: T.self) { group in
+    group.addTask { try await operation() }
+    group.addTask {
+      try await Task.sleep(for: timeout)
+      throw PaseoConnectionError.timedOut
+    }
+    defer { group.cancelAll() }
+    guard let result = try await group.next() else {
+      throw PaseoConnectionError.timedOut
+    }
+    return result
+  }
+}
+
 @MainActor
 @Observable
 final class OesapModel {
+  private static let connectionAttemptTimeout: Duration = .seconds(30)
+  private static let maximumConnectionRetries = 3
+  private static let initialConnectionBackoffSeconds = 1
+  private static let maximumConnectionBackoffSeconds = 5 * 60
+
   enum ConnectionState: Equatable {
     case disconnected
     case connecting
@@ -17,6 +40,7 @@ final class OesapModel {
 
   private(set) var connectionState: ConnectionState = .disconnected
   private(set) var hasSavedConnection = false
+  private(set) var loadingSavedConnections = true
   private(set) var savedInstances: [SavedPaseoInstance] = []
   private(set) var activeInstanceID: String?
   private(set) var instanceError: String?
@@ -98,6 +122,7 @@ final class OesapModel {
     [:]
   @ObservationIgnored private var connectionObservationTask: Task<Void, Never>?
   @ObservationIgnored private var connectionGeneration = 0
+  @ObservationIgnored private var startupConnectionStarted = false
   @ObservationIgnored private var savedInstancesRefreshGeneration = 0
   @ObservationIgnored private var olderTimelineCursor: RemoteTimelineCursor?
   @ObservationIgnored private var latestTimelineCursor: RemoteTimelineCursor?
@@ -462,6 +487,17 @@ final class OesapModel {
     await refreshSavedInstances()
   }
 
+  func start() async {
+    guard !startupConnectionStarted else { return }
+    startupConnectionStarted = true
+    await refreshSavedInstances()
+    loadingSavedConnections = false
+    guard !Task.isCancelled, connectionState == .disconnected,
+      let instanceID = activeInstanceID ?? savedInstances.first?.id
+    else { return }
+    _ = await selectSavedInstance(instanceID)
+  }
+
   func refreshSavedInstances() async {
     savedInstancesRefreshGeneration += 1
     let refreshGeneration = savedInstancesRefreshGeneration
@@ -500,7 +536,10 @@ final class OesapModel {
     await previousService?.disconnect()
     guard connectionGeneration == generation else { return }
     do {
-      let connectedService = try await connectionFactory.connect(connection)
+      let factory = connectionFactory
+      let connectedService = try await connectWithRetry {
+        try await factory.connect(connection)
+      }
       guard connectionGeneration == generation else {
         await connectedService.disconnect()
         return
@@ -581,7 +620,10 @@ final class OesapModel {
     guard connectionGeneration == generation else { return false }
 
     do {
-      let connectedService = try await connectionFactory.selectSavedInstance(id: id)
+      let factory = connectionFactory
+      let connectedService = try await connectWithRetry {
+        try await factory.selectSavedInstance(id: id)
+      }
       guard connectionGeneration == generation else {
         await connectedService.disconnect()
         return false
@@ -693,7 +735,10 @@ final class OesapModel {
     connectionState = .reconnecting
     clearErrors()
     do {
-      let connectedService = try await connectionFactory.reconnect()
+      let factory = connectionFactory
+      let connectedService = try await connectWithRetry {
+        try await factory.reconnect()
+      }
       guard connectionGeneration == generation else {
         await connectedService.disconnect()
         return
@@ -819,6 +864,30 @@ final class OesapModel {
     connectError = cleanupError
     await refreshSavedInstances()
     if connectionGeneration == generation, let cleanupError { instanceError = cleanupError }
+  }
+
+  private func connectWithRetry(
+    operation: @escaping @Sendable () async throws -> any OesapRemoteService
+  ) async throws -> any OesapRemoteService {
+    var retries = 0
+    while true {
+      try Task.checkCancellation()
+      do {
+        return try await withConnectionAttemptTimeout(
+          Self.connectionAttemptTimeout, operation: operation)
+      } catch {
+        if Task.isCancelled || error is CancellationError
+          || (error as? PaseoConnectionError) == .cancelled
+        {
+          throw error
+        }
+        guard retries < Self.maximumConnectionRetries else { throw error }
+        let exponentialDelay = Self.initialConnectionBackoffSeconds << retries
+        let delay = min(exponentialDelay, Self.maximumConnectionBackoffSeconds)
+        try await Task.sleep(for: .seconds(delay))
+        retries += 1
+      }
+    }
   }
 
   func selectProject(_ id: String) async {
@@ -1095,6 +1164,42 @@ final class OesapModel {
 
   func refreshWorkspace() async {
     await reloadWorkspace(preserveSelection: true, generation: connectionGeneration)
+  }
+
+  func directoryEntries(cwd: String?) async throws -> [RemoteDirectoryEntry] {
+    guard connectionState == .connected, let service else {
+      throw RemoteServiceError.connectionLost("Reconnect before browsing folders on this host.")
+    }
+    let generation = connectionGeneration
+    let entries = try await service.directoryEntries(cwd: cwd)
+    guard connectionGeneration == generation, connectionState == .connected else {
+      throw RemoteServiceError.connectionLost("The host changed while browsing folders.")
+    }
+    return entries
+  }
+
+  func addProject(path: String) async throws -> String {
+    guard connectionState == .connected, let remote = service else {
+      throw RemoteServiceError.connectionLost("Reconnect before adding a project.")
+    }
+    let generation = connectionGeneration
+    let project = try await remote.addProject(path: path)
+    guard connectionGeneration == generation, connectionState == .connected else {
+      throw RemoteServiceError.connectionLost("The host disconnected while adding the project.")
+    }
+
+    if !projects.contains(where: { $0.id == project.id }) {
+      projects.append(project)
+    }
+    await reloadWorkspace(preserveSelection: true, generation: generation)
+    guard connectionGeneration == generation, connectionState == .connected else {
+      throw RemoteServiceError.connectionLost("The host disconnected while refreshing projects.")
+    }
+    if !projects.contains(where: { $0.id == project.id }) {
+      projects.append(project)
+    }
+    await selectProject(project.id)
+    return project.id
   }
 
   func refreshThreads(projectID: String) async {

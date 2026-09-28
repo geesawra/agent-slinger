@@ -16,8 +16,8 @@ actor PaseoTransport {
 
   init(
     config: PaseoConnectionConfig,
-    connectTimeout: Duration = .seconds(15),
-    handshakeTimeout: Duration = .seconds(15),
+    connectTimeout: Duration = .seconds(30),
+    handshakeTimeout: Duration = .seconds(30),
     socketFactory: @escaping @Sendable (PaseoConnectionConfig) throws -> any PaseoSocket = {
       try URLSessionPaseoSocket(config: $0)
     }

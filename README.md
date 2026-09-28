@@ -2,9 +2,9 @@
 
 Oesap is an iPhone, iPad, and Mac client for following and messaging coding agents
 running on a Paseo instance. The first MVP supports connecting directly to a host or
-pasting a Paseo relay pairing link, browsing projects and their agent threads,
-starting a project-configured agent thread, and viewing and sending timeline
-messages.
+pasting a Paseo relay pairing link, browsing host folders to add projects,
+browsing projects and their agent threads, starting a project-configured agent
+thread, and viewing and sending timeline messages.
 
 ## Run
 
@@ -42,12 +42,18 @@ OESAP_DEVELOPMENT_TEAM=<team-id> just mac-run
 development provisioning profile. They require that team's development
 certificate and Xcode signing account to be configured.
 
-For an explicitly requested physical-device installation, supply your signing
-team and run:
+For an explicitly requested physical-device installation, run:
 
 ```sh
-OESAP_DEVELOPMENT_TEAM=<team-id> just device-install
+just device-install
 ```
+
+`device-install` selects the unique team in local Apple Development
+certificate metadata. If multiple teams are configured, choose one explicitly
+with `OESAP_DEVELOPMENT_TEAM=<team-id>`. Xcode provisioning updates are enabled
+by default; set `OESAP_ALLOW_PROVISIONING_UPDATES=0` to disable them. The
+selected team's Apple Development certificate and Xcode signing account must
+be configured.
 
 The `device-*` commands use the paired-device selector from Hydraulophone,
 adapted for iPhone and iPad. A single device is selected automatically; multiple
@@ -57,7 +63,8 @@ devices require the terminal picker or an explicit selection. Set
 non-interactive invocations stop without choosing a device. The selector opens
 the chosen device's connection before building; `device-install` builds,
 installs, and launches, while `device-console` relaunches the installed app and
-streams its console. Signing still uses `OESAP_DEVELOPMENT_TEAM`.
+streams its console. Signing uses `OESAP_DEVELOPMENT_TEAM` when set; otherwise
+it resolves the unique local Apple Development team as described above.
 
 Mac builds use `.build/mac-catalyst`; `mac-run` opens that exact build and never
 selects or installs on a mobile device. The standalone device selector retains

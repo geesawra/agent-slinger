@@ -159,6 +159,76 @@ public actor PaseoProtocolClient: PaseoService {
     return projects
   }
 
+  public func directoryEntries(cwd: String?) async throws -> [PaseoDirectoryEntry] {
+    try requireConnected()
+    var fields: [String: PaseoJSONValue] = [
+      "query": .string(""),
+      "includeDirectories": .bool(true),
+      "includeFiles": .bool(true),
+      "limit": .number(100),
+    ]
+    if let cwd, !cwd.isEmpty { fields["cwd"] = .string(cwd) }
+    let payload = try await request(
+      type: "directory_suggestions_request",
+      fields: fields,
+      responseType: "directory_suggestions_response",
+      operation: "host directory browsing",
+      allowError: true,
+      timeoutSeconds: 45
+    )
+    if let error = payload["error"]?.stringValue, !error.isEmpty {
+      throw PaseoProtocolError.requestRejected(error)
+    }
+    guard let directoryPaths = payload["directories"]?.arrayValue else {
+      throw PaseoProtocolError.malformedMessage("directory suggestions omitted their directories")
+    }
+
+    var entries: [PaseoDirectoryEntry] = []
+    var seenPaths = Set<String>()
+    for value in payload["entries"]?.arrayValue ?? [] {
+      guard let path = value["path"]?.stringValue, !path.isEmpty,
+        let kind = value["kind"]?.stringValue.flatMap(PaseoDirectoryEntry.Kind.init(rawValue:))
+      else {
+        throw PaseoProtocolError.malformedMessage("directory suggestion contained an invalid entry")
+      }
+      if seenPaths.insert(path).inserted {
+        entries.append(PaseoDirectoryEntry(path: path, kind: kind))
+      }
+    }
+    for value in directoryPaths {
+      guard let path = value.stringValue, !path.isEmpty else {
+        throw PaseoProtocolError.malformedMessage("directory suggestion contained an invalid path")
+      }
+      if seenPaths.insert(path).inserted {
+        entries.append(PaseoDirectoryEntry(path: path, kind: .directory))
+      }
+    }
+    return entries
+  }
+
+  public func addProject(path: String) async throws -> PaseoProject {
+    try requireConnected()
+    let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedPath.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose a folder before adding a project.")
+    }
+    let payload = try await request(
+      type: "project.add.request",
+      fields: ["cwd": .string(trimmedPath)],
+      responseType: "project.add.response",
+      operation: "project registration",
+      allowError: true,
+      timeoutSeconds: 45
+    )
+    if let error = payload["error"]?.stringValue, !error.isEmpty {
+      throw PaseoProtocolError.requestRejected(error)
+    }
+    guard let project = payload["project"], case .object = project else {
+      throw PaseoProtocolError.requestRejected("The Paseo host did not register that folder.")
+    }
+    return try decodeProject(project)
+  }
+
   public func supportsProviderUsage() async -> Bool {
     serverInfo?.features["providerUsageList"] == true
   }

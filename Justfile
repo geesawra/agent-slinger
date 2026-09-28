@@ -5,7 +5,6 @@ scheme := "Oesap"
 bundle_identifier := "com.oesap.app"
 simulator_destination := env_var_or_default("OESAP_SIMULATOR_DESTINATION", "")
 simulator_udid := env_var_or_default("OESAP_SIMULATOR_UDID", "")
-development_team := env_var_or_default("OESAP_DEVELOPMENT_TEAM", "")
 simulator_derived_data := ".build/ios-simulator"
 device_derived_data := ".build/ios-device"
 mac_derived_data := ".build/mac-catalyst"
@@ -60,17 +59,30 @@ simulator: generate
     xcrun simctl install "{{simulator_udid}}" "{{simulator_derived_data}}/Build/Products/Debug-iphonesimulator/Oesap.app"
     xcrun simctl launch --terminate-running-process "{{simulator_udid}}" "{{bundle_identifier}}"
 
-# Build, install, and launch on a selected, provisioned iPhone or iPad.
+# Build, install, and launch on a connected iPhone or iPad.
 device-install: generate
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -z "{{development_team}}" ]]; then
-      printf 'Set OESAP_DEVELOPMENT_TEAM for device installation.\n' >&2
-      exit 2
-    fi
     selected_device_id="$(python3 Scripts/select_connected_device.py)"
     printf 'Using device: %s\n' "$selected_device_id"
-    xcodebuild build -project "{{project}}" -scheme "{{scheme}}" -destination "platform=iOS,id=${selected_device_id}" -derivedDataPath "{{device_derived_data}}" DEVELOPMENT_TEAM="{{development_team}}"
+    resolved_signing_team="$(python3 Scripts/read_development_team.py)"
+    printf 'Using Apple Development team: %s\n' "$resolved_signing_team"
+    build_args=(
+      build -project "{{project}}" -scheme "{{scheme}}"
+      -destination "platform=iOS,id=${selected_device_id}"
+      -derivedDataPath "{{device_derived_data}}"
+    )
+    if [[ "${OESAP_ALLOW_PROVISIONING_UPDATES:-1}" == "1" ]]; then
+      build_args+=(-allowProvisioningUpdates)
+    fi
+    build_args+=(
+      CODE_SIGNING_REQUIRED=YES
+      CODE_SIGNING_ALLOWED=YES
+      "CODE_SIGN_IDENTITY=Apple Development"
+      CODE_SIGN_STYLE=Automatic
+      "DEVELOPMENT_TEAM=${resolved_signing_team}"
+    )
+    xcodebuild "${build_args[@]}"
     xcrun devicectl device install app --device "$selected_device_id" "{{device_derived_data}}/Build/Products/Debug-iphoneos/Oesap.app"
     xcrun devicectl device process launch --terminate-existing --device "$selected_device_id" "{{bundle_identifier}}"
 

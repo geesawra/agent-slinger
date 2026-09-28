@@ -100,6 +100,23 @@ public struct PaseoProject: Sendable, Equatable, Identifiable {
   }
 }
 
+public struct PaseoDirectoryEntry: Sendable, Equatable, Identifiable {
+  public enum Kind: String, Sendable, Equatable {
+    case file
+    case directory
+  }
+
+  public let path: String
+  public let kind: Kind
+
+  public var id: String { path }
+
+  public init(path: String, kind: Kind) {
+    self.path = path
+    self.kind = kind
+  }
+}
+
 public struct PaseoProviderModel: Sendable, Equatable {
   public let id: String
   public let label: String
@@ -581,6 +598,8 @@ public protocol PaseoService: Sendable {
   func connect() async throws -> PaseoConnectionInfo
   func connectionEvents() async -> AsyncStream<PaseoConnectionState>
   func listProjects() async throws -> [PaseoProject]
+  func directoryEntries(cwd: String?) async throws -> [PaseoDirectoryEntry]
+  func addProject(path: String) async throws -> PaseoProject
   func agentContextUsage(agentID: String) async throws -> PaseoAgentContextUsage
   func supportsProviderUsage() async -> Bool
   func supportsAgentRequestReceipts() async -> Bool
@@ -620,6 +639,12 @@ public protocol PaseoService: Sendable {
 }
 
 extension PaseoService {
+  public func directoryEntries(cwd: String?) async throws -> [PaseoDirectoryEntry] {
+    throw PaseoProtocolError.unsupportedCapability("host directory browsing")
+  }
+  public func addProject(path: String) async throws -> PaseoProject {
+    throw PaseoProtocolError.unsupportedCapability("project registration")
+  }
   public func agentContextUsage(agentID: String) async throws -> PaseoAgentContextUsage {
     throw PaseoProtocolError.unsupportedCapability("agent context usage")
   }

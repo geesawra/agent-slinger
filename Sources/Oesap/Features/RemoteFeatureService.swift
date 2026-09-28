@@ -38,6 +38,21 @@ struct RemoteProject: Identifiable, Sendable, Equatable {
   var rootPath: String? = nil
 }
 
+struct RemoteDirectoryEntry: Identifiable, Sendable, Equatable {
+  enum Kind: Sendable, Equatable {
+    case file
+    case directory
+  }
+
+  var path: String
+  var kind: Kind
+
+  var id: String { path }
+  var name: String {
+    path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? path
+  }
+}
+
 struct RemoteAgentConfiguration: Codable, Sendable, Equatable {
   var provider: String
   var model: String?
@@ -396,6 +411,8 @@ protocol OesapRemoteService: Sendable {
   func createThread(_ intent: RemoteNewThreadIntent) async throws -> RemoteNewThreadResult
   func connectionEvents() async -> AsyncStream<RemoteConnectionEvent>
   func projects() async throws -> [RemoteProject]
+  func directoryEntries(cwd: String?) async throws -> [RemoteDirectoryEntry]
+  func addProject(path: String) async throws -> RemoteProject
   func threads(projectID: String) async throws -> [RemoteThread]
   func history(agentID: String, before cursor: RemoteTimelineCursor?) async throws -> RemoteTimeline
   func events(agentID: String) async throws -> AsyncThrowingStream<RemoteTimelineUpdate, Error>
@@ -416,6 +433,12 @@ protocol OesapRemoteService: Sendable {
 }
 
 extension OesapRemoteService {
+  func directoryEntries(cwd: String?) async throws -> [RemoteDirectoryEntry] {
+    throw RemoteServiceError.unavailable("This host does not support directory browsing.")
+  }
+  func addProject(path: String) async throws -> RemoteProject {
+    throw RemoteServiceError.unavailable("This host does not support adding projects.")
+  }
   func serverID() async -> String? { nil }
   func supportsNewThreads() async -> Bool { false }
   func supportsProviderUsage() async -> Bool { false }

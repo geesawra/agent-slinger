@@ -126,6 +126,14 @@ struct SettingsView: View {
     }
     .navigationTitle("Settings")
     .navigationBarTitleDisplayMode(.inline)
+    .toolbar {
+      ToolbarItem(placement: .principal) {
+        if model.connectionState.isBusy {
+          ConnectionProgressIndicator(
+            title: model.connectionState == .reconnecting ? "Reconnecting…" : "Connecting…")
+        }
+      }
+    }
     .refreshable { await refreshInstances() }
     .task { await refreshInstances() }
     .confirmationDialog(

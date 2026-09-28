@@ -32,6 +32,7 @@ struct ConnectionSetupView: View {
         Text("Connect to a Paseo instance to browse its projects and agent threads.")
           .foregroundStyle(Color.primary.opacity(0.75))
       }
+      .disabled(model.connectionState.isBusy)
 
       if connection.method == .direct {
         Section {
@@ -72,6 +73,7 @@ struct ConnectionSetupView: View {
           }
           .foregroundStyle(Color.primary.opacity(0.75))
         }
+        .disabled(model.connectionState.isBusy)
       } else {
         Section {
           TextField("Name (optional)", text: $connection.name)
@@ -98,6 +100,7 @@ struct ConnectionSetupView: View {
           Text("Traffic is relayed and encrypted end-to-end to the paired host.")
             .foregroundStyle(Color.primary.opacity(0.75))
         }
+        .disabled(model.connectionState.isBusy)
       }
 
       if showsReconnectAction, let activeInstanceID = model.activeInstanceID {
@@ -146,7 +149,7 @@ struct ConnectionSetupView: View {
         .tint(Color.primary)
         .accessibilityIdentifier("connect-button")
 
-        if model.connectionState.isBusy {
+        if model.connectionState.isBusy, connectingTask != nil {
           Button("Cancel connection", role: .cancel) {
             connectingTask?.cancel()
             connectingTask = nil
@@ -164,18 +167,24 @@ struct ConnectionSetupView: View {
       }
     }
     .navigationTitle(title)
-    .navigationBarTitleDisplayMode(.large)
+    .navigationBarTitleDisplayMode(model.connectionState.isBusy ? .inline : .large)
     .toolbar {
+      ToolbarItem(placement: .principal) {
+        if model.connectionState.isBusy {
+          ConnectionProgressIndicator(
+            title: model.connectionState == .reconnecting ? "Reconnecting…" : "Connecting…")
+        }
+      }
       if let onOpenSettings, !model.savedInstances.isEmpty {
         ToolbarItem(placement: .topBarTrailing) {
           Button(action: onOpenSettings) {
             Label("Settings", systemImage: "gearshape")
           }
+          .disabled(model.connectionState.isBusy)
           .accessibilityIdentifier("setup-settings-button")
         }
       }
     }
-    .task { await model.refreshSavedInstances() }
   }
 
   private var connectionMethodPicker: some View {
