@@ -104,6 +104,43 @@ final class OesapUITests: XCTestCase {
     XCTAssertNotEqual(composer.value as? String, "Show the app status")
   }
 
+  func testReadingEarlierMessagesStaysPutWhileMarkdownStreams() {
+    let app = launchDemo(arguments: ["--demo-performance"])
+    connect(app)
+    app.buttons["project-demo-project"].tap()
+    app.buttons["thread-demo-agent-running"].tap()
+
+    let timeline = app.scrollViews["chat-timeline-scroll"]
+    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+    let earlierMessage = app.descendants(matching: .any)["message-demo-performance-996"]
+    for _ in 0..<8 where !earlierMessage.isHittable {
+      timeline.swipeDown()
+    }
+    XCTAssertTrue(earlierMessage.isHittable)
+    XCTAssertTrue(app.buttons["chat-jump-to-latest"].waitForExistence(timeout: 5))
+
+    // Let swipe deceleration finish before measuring the reading position.
+    Thread.sleep(forTimeInterval: 0.8)
+    attachScreenshot(named: "Earlier message above composer")
+    let initialY = earlierMessage.frame.minY
+    let initialProgress = Int(timeline.value as? String ?? "0") ?? 0
+    let advanced = XCTNSPredicateExpectation(
+      predicate: NSPredicate { _, _ in
+        (Int(timeline.value as? String ?? "0") ?? 0) > initialProgress + 100
+      },
+      object: timeline)
+    XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 5), .completed)
+    XCTAssertTrue(earlierMessage.isHittable)
+    XCTAssertLessThan(
+      abs(earlierMessage.frame.minY - initialY), 12,
+      "Streaming Markdown should not move the message being read")
+
+    app.buttons["chat-jump-to-latest"].tap()
+    XCTAssertTrue(
+      app.descendants(matching: .any)["message-demo-performance-stream"]
+        .waitForExistence(timeout: 5))
+  }
+
   func testCancellingStopKeepsAgentRunningAndPreservesDraft() {
     let (app, stop) = openAgentControlChat()
     let composer = app.descendants(matching: .any)["chat-composer"]

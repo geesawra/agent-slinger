@@ -51,6 +51,7 @@ final class OesapModel {
   private(set) var timelineStructureRevision = 0
   @ObservationIgnored private var messageIndices: [String: Int] = [:]
   @ObservationIgnored private var bufferedAgentMessageTexts: [String: String] = [:]
+  private(set) var performanceFixtureStreamBytes = 0
   private(set) var permissions: [RemotePermission] = []
   private(set) var historyMayBeIncomplete = false
   private(set) var loadingProjects = false
@@ -2212,6 +2213,9 @@ final class OesapModel {
 
   private func replaceMessages(_ replacement: [RemoteMessage]) {
     messages = replacement
+    #if DEBUG
+      performanceFixtureStreamBytes = 0
+    #endif
     bufferedAgentMessageIDs.removeAll()
     bufferedAgentMessageTexts.removeAll()
     messageIndices.removeAll(keepingCapacity: true)
@@ -2258,6 +2262,11 @@ final class OesapModel {
   }
 
   private func appendBufferedAgentDelta(_ message: RemoteMessage) {
+    #if DEBUG
+      if message.id == "demo-performance-stream" {
+        performanceFixtureStreamBytes += message.text.utf8.count
+      }
+    #endif
     if let existingIndex = messageIndices[message.id] {
       if bufferedAgentMessageIDs.insert(message.id).inserted {
         bufferedAgentMessageTexts[message.id] = messages[existingIndex].text + message.text

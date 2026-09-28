@@ -5,22 +5,18 @@ import XCTest
 @testable import Oesap
 
 final class MessageMarkdownTests: XCTestCase {
-  func testLegacyTimelineFollowsRenderedGrowthOnlyWhilePinned() {
+  func testLegacyTimelinePreservesFollowIntentAcrossRenderedGrowth() {
     let pinned = CGRect(x: 0, y: -1_000, width: 400, height: 2_000)
     let grown = CGRect(x: 0, y: -1_000, width: 400, height: 2_200)
     let following = TimelineScrollFollowPolicy.evaluate(
       previousFrame: pinned, frame: grown, viewportHeight: 1_000, wasFollowing: true)
     XCTAssertTrue(following.isNearBottom)
-    XCTAssertTrue(
-      following.shouldFollowContent,
-      "A delayed Markdown layout must keep a previously pinned reader at the bottom")
 
     let readingEarlier = TimelineScrollFollowPolicy.evaluate(
       previousFrame: CGRect(x: 0, y: -700, width: 400, height: 2_000),
       frame: CGRect(x: 0, y: -700, width: 400, height: 2_200),
       viewportHeight: 1_000, wasFollowing: false)
     XCTAssertFalse(readingEarlier.isNearBottom)
-    XCTAssertFalse(readingEarlier.shouldFollowContent)
   }
 
   func testLegacyTimelineRespectsScrollAwayEvenWhenContentAlsoGrows() {
@@ -29,12 +25,52 @@ final class MessageMarkdownTests: XCTestCase {
     let decision = TimelineScrollFollowPolicy.evaluate(
       previousFrame: pinned, frame: scrolledAndGrown, viewportHeight: 1_000, wasFollowing: true)
     XCTAssertFalse(decision.isNearBottom)
-    XCTAssertFalse(decision.shouldFollowContent)
 
     let initial = TimelineScrollFollowPolicy.evaluate(
       previousFrame: nil, frame: pinned, viewportHeight: 1_000, wasFollowing: true)
+    XCTAssertTrue(initial.isNearBottom)
+  }
+
+  func testTimelineFollowsUpdatesOnlyWhileIdleAndPinned() {
+    XCTAssertTrue(
+      TimelineScrollFollowPolicy.shouldFollowUpdates(
+        isNearBottom: true, isUserScrolling: false, hasExpandedToolCall: false),
+      "The native bottom anchor should follow async Markdown, new rows, and status growth")
     XCTAssertFalse(
-      initial.shouldFollowContent, "Initial positioning is handled once by history loading")
+      TimelineScrollFollowPolicy.shouldFollowUpdates(
+        isNearBottom: false, isUserScrolling: false, hasExpandedToolCall: false),
+      "New output and status must preserve the reader's earlier position")
+    XCTAssertFalse(
+      TimelineScrollFollowPolicy.shouldFollowUpdates(
+        isNearBottom: true, isUserScrolling: true, hasExpandedToolCall: false),
+      "Incoming text must not compete with an active drag or deceleration")
+    XCTAssertFalse(
+      TimelineScrollFollowPolicy.shouldFollowUpdates(
+        isNearBottom: true, isUserScrolling: false, hasExpandedToolCall: true),
+      "Expanding a tool call must not move the timeline")
+  }
+
+  func testNativeScrollGeometryPreservesGrowthButRecognizesJumpsAndDrags() {
+    XCTAssertTrue(
+      TimelineScrollFollowPolicy.updatedFollowIntent(
+        wasFollowing: true, isUserScrolling: false, contentSizeChanged: true,
+        isNearBottom: false),
+      "Layout may report the old offset before the bottom anchor applies")
+    XCTAssertFalse(
+      TimelineScrollFollowPolicy.updatedFollowIntent(
+        wasFollowing: true, isUserScrolling: true, contentSizeChanged: true,
+        isNearBottom: false),
+      "A drag away must win even when content grows")
+    XCTAssertFalse(
+      TimelineScrollFollowPolicy.updatedFollowIntent(
+        wasFollowing: true, isUserScrolling: false, contentSizeChanged: false,
+        isNearBottom: false),
+      "A scroll away without a size change must end follow mode")
+    XCTAssertTrue(
+      TimelineScrollFollowPolicy.updatedFollowIntent(
+        wasFollowing: false, isUserScrolling: false, contentSizeChanged: false,
+        isNearBottom: true),
+      "A programmatic jump to Latest must restore follow mode")
   }
 
   func testOrdinaryMarkdownSkipsImageRewriteWithoutChangingSource() {

@@ -43,14 +43,18 @@ message-ID lookup and a structural revision that changes only for insertion or
 snapshot replacement. Equatable rows avoid invalidating unrelated message views.
 A latest-source buffer coalesces Markdown rendering with at least 50 milliseconds
 between parses; a bounded cache retains up to 64 Markdown trees and 512 KiB of
-source text. No protocol messages are dropped or coalesced. Initial bottom
-anchoring replaces per-token animated scrolling and an explicit Latest button
-returns to live output after scrolling away. On iOS 18 and later (including
-its Catalyst availability), native scroll-phase and scroll-geometry callbacks
-distinguish active user scrolling from asynchronous Markdown height changes.
-The bottom anchor applies only to the initial offset; content-size changes
-preserve the reader's position unless they are following live output. The iOS 17
-baseline uses a whole-content geometry fallback. Reduce Motion remains respected.
+source text. A newly visible message renders its initial Markdown tree in the
+first frame, so a lazy row does not change height when its background renderer
+starts. Subsequent streaming updates remain coalesced off the main actor. No
+protocol messages are dropped or coalesced. Initial history and the explicit
+Latest button are the only programmatic jumps; live tokens and status changes
+do not repeatedly call `scrollTo`. On iOS 18 and later (including its Catalyst
+availability), native scroll phase tracks user interaction and the size-change
+anchor follows the bottom only while the reader is idle and already near it.
+The iOS 17 baseline uses whole-content geometry and a simultaneous drag gesture
+to preserve reading position through deceleration; it reads the current
+`GeometryReader` viewport size directly on the first layout. Both paths keep
+the top anchored while reading earlier messages or expanding a tool call.
 A deterministic offline `--demo-performance` fixture supplies 1,000 Markdown
 messages and 5,000 streaming chunks over 50 seconds for repeatable validation.
 These changes do not alter Paseo's wire protocol or add a rendering dependency.
@@ -110,7 +114,29 @@ Verified during integration:
   with the full 162-test run, this covers 164 distinct unit tests. Evidence is
   in `.build/final-markdown-tests.log`.
 
-No physical phone installation, real-host credential access, or Instruments
-frame-rate measurement was performed. Simulator and compile checks establish
+## Scroll redraw correction
+
+The initial performance pass still let a lazy row show raw Markdown before its
+asynchronous parse completed, and two independent paths issued `scrollTo` on
+stream growth. This caused visible row reflow and jumps while scrolling. The
+follow-up keeps the first row layout stable and lets the native anchor manage
+content growth according to scroll intent. The iPhone simulator and Mac Catalyst
+builds passed, as did 19 focused unit tests. The live 1,000-message iPhone UI
+regression reported one pass and zero failures: it held an earlier message in
+place while the offline fixture advanced by more than 100 bytes, then returned
+to live output with Latest. After the agent-output buffering change on `main`,
+the debug fixture reports incoming buffered bytes to keep this check meaningful.
+These checks do not measure frame rate on physical devices.
+
+The iOS 26 bottom `safeAreaBar` and soft scroll edge effect also drew a
+full-width boundary through an agent message while that message passed behind
+the composer. The composer now uses a native bottom `safeAreaInset` with a
+system-background backing. This keeps the timeline above the controls and
+removes the apparent divider under “Agent.” A simulator screenshot of the
+1,000-message fixture was reviewed after the change, and its UI regression
+passed with a finalized result bundle.
+
+No on-device frame-rate measurement, real-host credential access, or Instruments
+measurement was performed. Simulator and compile checks establish
 behavior and compatibility within their tested scope, not an on-device frame
 rate guarantee.

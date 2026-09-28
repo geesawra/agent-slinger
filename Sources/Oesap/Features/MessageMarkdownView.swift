@@ -7,9 +7,6 @@ import SwiftUI
 struct MessageMarkdownView: View {
   let source: String
   let cacheKey: String?
-  let deferUntilRendered: Bool
-
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var localCacheKey = UUID().uuidString
   @State private var renderer: MessageMarkdownRenderer
   @State private var viewerItem: ImageAttachmentViewerItem?
@@ -19,37 +16,43 @@ struct MessageMarkdownView: View {
     source: String,
     cacheKey: String? = nil,
     threadID: String? = nil,
-    deferUntilRendered: Bool = false,
     loadRemoteImage: ReceivedImageLoader.HostFileLoader? = nil
   ) {
     self.source = source
     self.cacheKey = cacheKey
-    self.deferUntilRendered = deferUntilRendered
     _renderer = State(initialValue: MessageMarkdownRenderer(source: source))
     _imageLoader = State(
       initialValue: ReceivedImageLoader(threadID: threadID, hostFileLoader: loadRemoteImage))
   }
 
   var body: some View {
-    Group {
-      if let result = renderer.result, renderer.renderedSource == source {
-        Markdown(result.content)
+    // Lazy rows must render Markdown in their first frame. Replacing raw text
+    // after an async parse changes row height while the reader is scrolling.
+    // Later source updates still use the coalesced background worker below.
+    let displayed = renderer.result ?? MessageMarkdownContentResult(source: source)
+    return Group {
+      if renderer.failedSource == source {
+        Text(verbatim: source)
+          .font(.body)
+      } else {
+        Markdown(displayed.content)
           .markdownTheme(.basic)
           .markdownImageProvider(
             ReceivedMarkdownImageProvider(
-              imagesByID: result.imagesByID,
+              imagesByID: displayed.imagesByID,
               loader: imageLoader,
               onOpen: { image in viewerItem = .remote(image, loader: imageLoader) }
             )
           )
           .markdownInlineImageProvider(
-            ReceivedMarkdownInlineImageProvider(imagesByID: result.imagesByID, loader: imageLoader)
+            ReceivedMarkdownInlineImageProvider(
+              imagesByID: displayed.imagesByID, loader: imageLoader)
           )
           .environment(
             \.openURL,
             OpenURLAction { url in
               if let id = MarkdownImageActionPolicy.imageID(url),
-                let image = result.imagesByID[id]
+                let image = displayed.imagesByID[id]
               {
                 viewerItem = .remote(image, loader: imageLoader)
                 return .handled
@@ -60,44 +63,20 @@ struct MessageMarkdownView: View {
               return .systemAction(safeURL)
             }
           )
-          .textSelection(.enabled)
-          .foregroundStyle(.primary)
-          .transition(.move(edge: .bottom).combined(with: .opacity))
-      } else if deferUntilRendered {
-        if renderer.failedSource == source {
-          Text(verbatim: source)
-            .font(.body)
-            .textSelection(.enabled)
-            .foregroundStyle(.primary)
-        } else {
-          HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Preparing response…")
-              .font(.footnote)
-              .foregroundStyle(.secondary)
-          }
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .accessibilityElement(children: .combine)
-          .transition(.move(edge: .bottom).combined(with: .opacity))
-        }
-      } else {
-        Text(verbatim: source)
-          .font(.body)
-          .textSelection(.enabled)
-          .foregroundStyle(.primary)
       }
     }
+    .textSelection(.enabled)
+    .foregroundStyle(.primary)
     .frame(maxWidth: .infinity, alignment: .leading)
-    .animation(
-      reduceMotion ? nil : .easeInOut(duration: 0.22),
-      value: renderer.renderedSource == source
-    )
     .appFullScreenCover(item: $viewerItem) { item in
       ImageAttachmentViewer(item: item)
     }
     .onChange(of: source) { _, latest in renderer.update(source: latest) }
     .task {
-      await renderer.run(cacheKey: cacheKey ?? localCacheKey)
+      await renderer.run(
+        cacheKey: cacheKey ?? localCacheKey,
+        initialResult: displayed,
+        initialSource: source)
     }
   }
 }
@@ -135,9 +114,17 @@ final class MessageMarkdownRenderer {
     continuation?.yield(())
   }
 
-  func run(cacheKey: String) async {
+  func run(
+    cacheKey: String,
+    initialResult: MessageMarkdownContentResult? = nil,
+    initialSource: String? = nil
+  ) async {
     let runID = UUID()
     activeRunID = runID
+    if result == nil, let initialResult, let initialSource, latestSource == initialSource {
+      result = initialResult
+      renderedSource = initialSource
+    }
     let (updates, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     self.continuation?.finish()
     self.continuation = continuation
@@ -205,6 +192,15 @@ struct MessageMarkdownContentResult: @unchecked Sendable {
   // retroactive Sendable conformance to the dependency's public type.
   let content: MarkdownContent
   let imagesByID: [String: MarkdownImageSource]
+
+  init(source: String) {
+    self.init(transformed: MarkdownImageTransformer.transform(source))
+  }
+
+  init(transformed: TransformedMarkdown) {
+    content = MarkdownContent(transformed.markdown)
+    imagesByID = transformed.imagesByID
+  }
 }
 
 /// Serializes cmark work off the main actor and retains only the latest tree
@@ -240,9 +236,8 @@ actor MessageMarkdownContentParser {
     }
     let transformed = MarkdownImageTransformer.transform(source)
     try Task.checkCancellation()
-    let content = MarkdownContent(transformed.markdown)
+    let result = MessageMarkdownContentResult(transformed: transformed)
     try Task.checkCancellation()
-    let result = MessageMarkdownContentResult(content: content, imagesByID: transformed.imagesByID)
     parseCount += 1
     remove(cacheKey)
     let byteCount = source.utf8.count

@@ -61,7 +61,6 @@ struct ChatView: View {
   @State private var showsAgentSettings = false
   @State private var showsSessionInfo = false
   @State private var composerFocused = false
-  @State private var viewportHeight: CGFloat = 0
   @State private var isNearBottom = true
   @State private var isUserScrolling = false
   @State private var expandedToolCallIDs: Set<String> = []
@@ -289,30 +288,23 @@ struct ChatView: View {
           }
         }
         .accessibilityIdentifier("chat-timeline-scroll")
-        .modifier(TimelinePerformanceProgress(message: model.messages.last))
+        .modifier(TimelinePerformanceProgress(streamBytes: model.performanceFixtureStreamBytes))
         .coordinateSpace(name: "timelineScroll")
         .scrollDismissesKeyboard(.interactively)
         .modifier(
           TimelineScrollTracking(
             isNearBottom: $isNearBottom, isUserScrolling: $isUserScrolling,
-            viewportHeight: viewportHeight,
-            onContentGrowth: {
-              guard expandedToolCallIDs.isEmpty else { return }
-              proxy.scrollTo("timeline-bottom", anchor: .bottom)
-            })
+            viewportHeight: viewport.size.height, hasExpandedToolCall: !expandedToolCallIDs.isEmpty)
         )
-        .onChange(of: viewport.size.height) { _, height in viewportHeight = height }
         .onChange(of: model.timelineStructureRevision) { _, _ in
           let liveToolCallIDs = Set(model.messages.filter { $0.toolCall != nil }.map(\.id))
           expandedToolCallIDs.formIntersection(liveToolCallIDs)
         }
-        .onChange(of: model.agentSendFeedback(for: threadID)) { _, feedback in
-          if feedback != nil { proxy.scrollTo("agent-message-status-\(threadID)", anchor: .bottom) }
+        .onChange(of: threadID) { _, _ in
+          expandedToolCallIDs.removeAll()
+          isNearBottom = true
+          isUserScrolling = false
         }
-        .onChange(of: model.agentStopFeedback(for: threadID)) { _, feedback in
-          if feedback != nil { proxy.scrollTo("agent-action-status-\(threadID)", anchor: .bottom) }
-        }
-        .onChange(of: threadID) { _, _ in expandedToolCallIDs.removeAll() }
         .onChange(of: thread?.requiresAttention) { _, requiresAttention in
           guard requiresAttention == true else { return }
           Task { await model.markThreadRead(threadID, reportsFailure: false) }
@@ -330,30 +322,19 @@ struct ChatView: View {
           }
         }
         .onChange(of: model.messages.last) { oldValue, newValue in
-          guard let newValue else { return }
+          guard newValue != nil else { return }
           if oldValue == nil {
             // Initial history has no prior reading position, including on the
             // iOS 17 baseline without separate scroll-anchor roles.
             isNearBottom = true
             proxy.scrollTo("timeline-bottom", anchor: .bottom)
-            return
-          }
-          guard isNearBottom, !isUserScrolling, expandedToolCallIDs.isEmpty else { return }
-          // Streaming changes must not restart an animation for each token.
-          // Animate only a newly inserted row; let native scrolling follow
-          // content size changes while the user remains at the bottom.
-          if reduceMotion || oldValue?.id == newValue.id {
-            proxy.scrollTo("timeline-bottom", anchor: .bottom)
-          } else {
-            withAnimation(.easeOut(duration: 0.18)) {
-              proxy.scrollTo("timeline-bottom", anchor: .bottom)
-            }
           }
         }
         .overlay(alignment: .bottomTrailing) {
           if !isNearBottom, !model.messages.isEmpty {
             Button {
               isNearBottom = true
+              isUserScrolling = false
               proxy.scrollTo("timeline-bottom", anchor: .bottom)
             } label: {
               Label("Latest", systemImage: "arrow.down")
@@ -368,7 +349,7 @@ struct ChatView: View {
             .padding()
           }
         }
-        .composerSafeAreaBar {
+        .safeAreaInset(edge: .bottom, spacing: 0) {
           ChatComposerBar(
             draft: Binding(
               get: { model.draft(for: threadID) },
@@ -404,6 +385,7 @@ struct ChatView: View {
             refocusAfterSend: thread?.state != .running
               && !model.hasUncertainAgentMessage(for: threadID)
           )
+          .background(Color(uiColor: .systemBackground))
         }
         .navigationTitle(thread?.title ?? "Agent thread")
         .navigationBarTitleDisplayMode(.inline)
@@ -465,7 +447,6 @@ struct ChatView: View {
           .presentationDetents([.large])
         }
         .task(id: "\(threadID)-\(model.timelineGeneration)") {
-          viewportHeight = viewport.size.height
           Task { await model.markThreadRead(threadID, reportsFailure: false) }
           await model.watchTimeline(threadID: threadID)
         }
@@ -518,21 +499,6 @@ struct ChatView: View {
           expectedStateRevision: revision, selectedDuringActiveTurn: false,
           images: images)
       }
-    }
-  }
-}
-
-extension View {
-  @ViewBuilder
-  fileprivate func composerSafeAreaBar<Content: View>(@ViewBuilder content: () -> Content)
-    -> some View
-  {
-    if #available(iOS 26.0, macOS 26.0, *) {
-      self
-        .scrollEdgeEffectStyle(.soft, for: .bottom)
-        .safeAreaBar(edge: .bottom, spacing: 0, content: content)
-    } else {
-      safeAreaInset(edge: .bottom, spacing: 0, content: content)
     }
   }
 }
@@ -839,7 +805,6 @@ private struct MessageBubble: View, Equatable {
             source: message.text,
             cacheKey: "\(threadID)-\(timelineGeneration)-\(message.id)",
             threadID: threadID,
-            deferUntilRendered: message.author == .agent,
             loadRemoteImage: loadRemoteImage
           )
           .id("\(threadID)-\(timelineGeneration)-\(message.id)")
@@ -976,14 +941,13 @@ private struct InlineNotice: View {
 /// The offline load fixture exposes progress independently of its virtualized
 /// rows, so UI tests can verify ingestion while reading earlier messages.
 private struct TimelinePerformanceProgress: ViewModifier {
-  let message: RemoteMessage?
+  let streamBytes: Int
 
   @ViewBuilder
   func body(content: Content) -> some View {
     #if DEBUG
       if ProcessInfo.processInfo.arguments.contains("--demo-performance") {
-        content.accessibilityValue(
-          String(message?.id == "demo-performance-stream" ? message?.text.utf8.count ?? 0 : 0))
+        content.accessibilityValue(String(streamBytes))
       } else {
         content
       }
@@ -999,12 +963,19 @@ private struct TimelineScrollTracking: ViewModifier {
   @Binding var isNearBottom: Bool
   @Binding var isUserScrolling: Bool
   let viewportHeight: CGFloat
-  let onContentGrowth: () -> Void
+  let hasExpandedToolCall: Bool
   @State private var previousContentFrame: CGRect?
+  @State private var scrollSettleTask: Task<Void, Never>?
 
   private struct Metrics: Equatable {
     let isNearBottom: Bool
     let contentHeight: CGFloat
+  }
+
+  private var sizeChangeAnchor: UnitPoint {
+    TimelineScrollFollowPolicy.shouldFollowUpdates(
+      isNearBottom: isNearBottom, isUserScrolling: isUserScrolling,
+      hasExpandedToolCall: hasExpandedToolCall) ? .bottom : .top
   }
 
   @ViewBuilder
@@ -1012,7 +983,7 @@ private struct TimelineScrollTracking: ViewModifier {
     if #available(iOS 18.0, macOS 15.0, *) {
       content
         .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(.top, for: .sizeChanges)
+        .defaultScrollAnchor(sizeChangeAnchor, for: .sizeChanges)
         .onScrollPhaseChange { _, phase, context in
           let wasUserScrolling = isUserScrolling
           isUserScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
@@ -1026,15 +997,30 @@ private struct TimelineScrollTracking: ViewModifier {
             isNearBottom: geometry.visibleRect.maxY >= geometry.contentSize.height - 72,
             contentHeight: geometry.contentSize.height)
         } action: { old, new in
-          if isUserScrolling {
-            isNearBottom = new.isNearBottom
-          } else if isNearBottom, old.contentHeight != new.contentHeight {
-            onContentGrowth()
-          }
+          isNearBottom = TimelineScrollFollowPolicy.updatedFollowIntent(
+            wasFollowing: isNearBottom, isUserScrolling: isUserScrolling,
+            contentSizeChanged: old.contentHeight != new.contentHeight,
+            isNearBottom: new.isNearBottom)
         }
     } else {
       content
-        .defaultScrollAnchor(.top)
+        .defaultScrollAnchor(sizeChangeAnchor)
+        .simultaneousGesture(
+          DragGesture(minimumDistance: 2)
+            .onChanged { _ in
+              scrollSettleTask?.cancel()
+              isUserScrolling = true
+            }
+            .onEnded { _ in
+              scrollSettleTask?.cancel()
+              scrollSettleTask = Task { @MainActor in
+                // iOS 17 has no scroll phase callback. Keep the top anchor
+                // through the drag's deceleration before resuming follow.
+                try? await Task.sleep(for: .milliseconds(450))
+                if !Task.isCancelled { isUserScrolling = false }
+              }
+            }
+        )
         .onPreferenceChange(ScrollContentFrameKey.self) { frame in
           guard let frame else { return }
           let decision = TimelineScrollFollowPolicy.evaluate(
@@ -1042,19 +1028,32 @@ private struct TimelineScrollTracking: ViewModifier {
             viewportHeight: viewportHeight, wasFollowing: isNearBottom)
           previousContentFrame = frame
           isNearBottom = decision.isNearBottom
-          if decision.shouldFollowContent { onContentGrowth() }
         }
+        .onDisappear { scrollSettleTask?.cancel() }
     }
   }
 }
 
-/// Legacy scroll geometry has no native phase information. A growing content
-/// frame with the same top offset is a layout change, whereas a changed offset
-/// represents scrolling. Only the former can preserve an existing follow intent.
+/// Preserve the reader's intent while text grows and choose the native anchor
+/// that holds either the latest content or the current reading position.
 enum TimelineScrollFollowPolicy {
   struct Decision: Equatable {
     let isNearBottom: Bool
-    let shouldFollowContent: Bool
+  }
+
+  static func shouldFollowUpdates(
+    isNearBottom: Bool, isUserScrolling: Bool, hasExpandedToolCall: Bool
+  ) -> Bool {
+    isNearBottom && !isUserScrolling && !hasExpandedToolCall
+  }
+
+  static func updatedFollowIntent(
+    wasFollowing: Bool, isUserScrolling: Bool, contentSizeChanged: Bool, isNearBottom: Bool
+  ) -> Bool {
+    // A pinned viewport can briefly measure above the bottom before the native
+    // size-change anchor has applied. Preserve intent for that layout pass.
+    if wasFollowing && !isUserScrolling && contentSizeChanged && !isNearBottom { return true }
+    return isNearBottom
   }
 
   static func evaluate(
@@ -1064,10 +1063,9 @@ enum TimelineScrollFollowPolicy {
       abs(frame.minY - previousFrame.minY) < 0.5,
       abs(frame.height - previousFrame.height) > 0.5
     {
-      return Decision(isNearBottom: true, shouldFollowContent: true)
+      return Decision(isNearBottom: true)
     }
-    return Decision(
-      isNearBottom: frame.maxY <= viewportHeight + 72, shouldFollowContent: false)
+    return Decision(isNearBottom: frame.maxY <= viewportHeight + 72)
   }
 }
 
