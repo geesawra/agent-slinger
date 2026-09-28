@@ -4,6 +4,18 @@ import XCTest
 @testable import Oesap
 
 final class ConnectionStoreTests: XCTestCase {
+  func testMissingKeychainEntitlementReportsActionableSafeStatus() {
+    let description = PaseoConnectionError.keychainFailure(-34018).localizedDescription
+    XCTAssertTrue(description.contains("Keychain access entitlements"))
+    XCTAssertTrue(description.contains("-34018"))
+    XCTAssertTrue(description.contains("provisioning profile"))
+    let locked = PaseoConnectionError.keychainFailure(-25308).localizedDescription
+    XCTAssertTrue(locked.contains("Unlock the device"))
+    XCTAssertFalse(locked.contains("missing Keychain"))
+    let unknown = PaseoConnectionError.keychainFailure(-12345).localizedDescription
+    XCTAssertTrue(unknown.contains("-12345"))
+  }
+
   func testLegacyCurrentHostMigratesToActiveSavedInstanceWithoutExposingCredentials() throws {
     let storage = MemoryConnectionStoreStorage()
     let legacy = try PaseoConnectionConfig.direct(

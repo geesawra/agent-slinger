@@ -9,6 +9,7 @@ enum PaseoConnectionError: Error, LocalizedError, Equatable {
   case authenticationFailed
   case timedOut
   case disconnected
+  case transportFailure(ConnectionFailure)
   case malformedFrame
   case encryptionFailed
   case cancelled
@@ -21,13 +22,181 @@ enum PaseoConnectionError: Error, LocalizedError, Equatable {
     case .invalidDaemonKey: "The pairing link contains an invalid daemon key."
     case .unsupportedPairingVersion: "This pairing link version is not supported."
     case .authenticationFailed: "The host rejected the password."
-    case .timedOut: "The connection timed out."
-    case .disconnected: "The connection closed."
+    case .timedOut:
+      "The connection timed out. Check that the host is reachable and Paseo is running, then retry."
+    case .disconnected:
+      "The connection closed without a reported cause. Reconnect and check the host if this repeats."
+    case .transportFailure(let failure):
+      "\(failure.summary) \(failure.recoverySuggestion)\n\(failure.diagnosticDescription)"
     case .malformedFrame: "The host sent an invalid message."
     case .encryptionFailed: "The encrypted connection failed."
     case .cancelled: "The connection was cancelled."
-    case .keychainFailure: "Secure storage is unavailable."
+    case .keychainFailure(let status):
+      switch status {
+      case errSecMissingEntitlement:
+        "This build is missing Keychain access entitlements (OSStatus \(status)). Rebuild with a development team and a matching provisioning profile."
+      case errSecInteractionNotAllowed:
+        "Secure storage is locked or interaction is unavailable (OSStatus \(status)). Unlock the device and try again."
+      case errSecAuthFailed:
+        "Secure storage access was denied (OSStatus \(status)). Unlock the device; if this continues, check the app’s signing and provisioning."
+      default:
+        "Secure storage is unavailable (OSStatus \(status)). Check the app’s signing and device security settings, then retry."
+      }
     }
+  }
+}
+
+/// A bounded, safe diagnostic value. Never retains NSError userInfo, endpoint,
+/// password, pairing material, server close text, or message content.
+struct ConnectionFailure: Equatable, Sendable {
+  enum Phase: String, Sendable { case connect, relayHandshake, send, receive }
+  enum Reason: String, Sendable {
+    case dns, refused, cannotConnect, offline, tls, appTransportSecurity, timeout, authentication
+    case httpUpgrade, connectionLost, closed, unknown
+  }
+
+  struct ErrorCode: Equatable, Sendable {
+    let domain: String
+    let code: Int
+
+    init(domain: String, code: Int) {
+      let knownDomains = [
+        NSURLErrorDomain, NSPOSIXErrorDomain, NSOSStatusErrorDomain,
+        NSCocoaErrorDomain, "kCFErrorDomainCFNetwork",
+      ]
+      self.domain = knownDomains.contains(domain) ? domain : "OtherErrorDomain"
+      self.code = code
+    }
+
+    static func capture(_ error: Error) -> [Self] {
+      var result: [Self] = []
+      var current: NSError? = error as NSError
+      while let error = current, result.count < 3 {
+        result.append(Self(domain: error.domain, code: error.code))
+        current = error.userInfo[NSUnderlyingErrorKey] as? NSError
+      }
+      return result
+    }
+  }
+
+  let phase: Phase
+  let reason: Reason
+  let causes: [ErrorCode]
+  let httpStatus: Int?
+  let webSocketCloseCode: Int?
+
+  init(error: Error, phase: Phase, metadata: PaseoSocketFailureMetadata = .init()) {
+    self.phase = phase
+    let captured = (error as? PaseoConnectionError) == nil ? ErrorCode.capture(error) : []
+    var codes = captured
+    for code in metadata.causes where !codes.contains(code) && codes.count < 3 {
+      codes.append(code)
+    }
+    causes = Array(codes.prefix(3))
+    httpStatus = metadata.httpStatus.flatMap { (100...599).contains($0) ? $0 : nil }
+    webSocketCloseCode = metadata.closeCode.flatMap { (1000...4999).contains($0) ? $0 : nil }
+    reason = Self.classify(
+      error: error, causes: causes, httpStatus: httpStatus,
+      closeCode: webSocketCloseCode)
+  }
+
+  var summary: String {
+    switch reason {
+    case .dns: "The host name could not be resolved."
+    case .refused: "The host refused the connection."
+    case .cannotConnect: "Couldn’t connect to the host."
+    case .offline: "No network path to the host is available."
+    case .tls: "The secure connection could not be established."
+    case .appTransportSecurity: "App Transport Security blocked this unencrypted connection."
+    case .timeout: "The connection timed out."
+    case .authentication: "The host rejected authentication."
+    case .httpUpgrade: "The server did not accept the WebSocket connection."
+    case .connectionLost: "The network connection was interrupted."
+    case .closed: "The WebSocket connection closed."
+    case .unknown: "The connection failed, but the system did not provide a recognized cause."
+    }
+  }
+
+  var recoverySuggestion: String {
+    switch reason {
+    case .dns: "Check the host name and your Wi-Fi or VPN connection."
+    case .refused, .cannotConnect:
+      "Check the host and port, confirm Paseo is running, and check its firewall or VPN access."
+    case .offline:
+      "Check Wi-Fi or VPN connectivity and Local Network access in system settings."
+    case .tls:
+      "Check the TLS setting, the host’s certificate and secure port, and the device’s date."
+    case .appTransportSecurity:
+      "Use the host’s TLS endpoint, or a build with an explicit exception for this trusted private network."
+    case .timeout:
+      phase == .relayHandshake
+        ? "Check that the paired daemon is online and the pairing link is current, then retry."
+        : "Check that the host is reachable and Paseo is running, then retry."
+    case .authentication: "Check the password or pairing link before reconnecting."
+    case .httpUpgrade:
+      "Check the host and port and any proxy’s WebSocket configuration."
+    case .connectionLost, .closed:
+      "Reconnect. If it happens again, check the network and the Paseo host’s logs."
+    case .unknown:
+      "Retry and use these diagnostic codes to check the connection logs."
+    }
+  }
+
+  /// Only enum labels, allowlisted domains and numeric codes are included.
+  var diagnosticDescription: String {
+    var parts = ["Phase: \(phase.rawValue)", "Cause: \(reason.rawValue)"]
+    parts += causes.map { "\($0.domain) \($0.code)" }
+    if let httpStatus { parts.append("HTTP \(httpStatus)") }
+    if let webSocketCloseCode { parts.append("WebSocket close \(webSocketCloseCode)") }
+    return parts.joined(separator: " · ")
+  }
+
+  private static func classify(error: Error, causes: [ErrorCode], httpStatus: Int?, closeCode: Int?)
+    -> Reason
+  {
+    if closeCode == 4401 || httpStatus == 401 || httpStatus == 403 { return .authentication }
+    if (error as? PaseoConnectionError) == .timedOut { return .timeout }
+    if (error as? PaseoConnectionError) == .authenticationFailed { return .authentication }
+    if let httpStatus, httpStatus != 101 { return .httpUpgrade }
+    if causes.contains(where: { $0.domain == NSPOSIXErrorDomain && $0.code == Int(ECONNREFUSED) }) {
+      return .refused
+    }
+    for cause in causes
+    where cause.domain == NSURLErrorDomain || cause.domain == "kCFErrorDomainCFNetwork" {
+      switch cause.code {
+      case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed: return .dns
+      case NSURLErrorCannotConnectToHost: return .cannotConnect
+      case NSURLErrorNotConnectedToInternet, NSURLErrorDataNotAllowed,
+        NSURLErrorInternationalRoamingOff:
+        return .offline
+      case NSURLErrorTimedOut: return .timeout
+      case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateHasBadDate,
+        NSURLErrorServerCertificateUntrusted, NSURLErrorServerCertificateHasUnknownRoot,
+        NSURLErrorServerCertificateNotYetValid, NSURLErrorClientCertificateRejected,
+        NSURLErrorClientCertificateRequired:
+        return .tls
+      case NSURLErrorAppTransportSecurityRequiresSecureConnection: return .appTransportSecurity
+      case NSURLErrorUserAuthenticationRequired: return .authentication
+      case NSURLErrorNetworkConnectionLost: return .connectionLost
+      default: continue
+      }
+    }
+    if closeCode != nil || (error as? PaseoConnectionError) == .disconnected { return .closed }
+    return .unknown
+  }
+}
+
+struct PaseoSocketFailureMetadata: Equatable, Sendable {
+  var httpStatus: Int?
+  var closeCode: Int?
+  var causes: [ConnectionFailure.ErrorCode] = []
+  var wasCancelled = false
+}
+
+extension PaseoConnectionError {
+  var connectionFailure: ConnectionFailure? {
+    if case .transportFailure(let failure) = self { return failure }
+    return nil
   }
 }
 

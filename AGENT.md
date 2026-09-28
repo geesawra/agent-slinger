@@ -4,7 +4,7 @@
 
 Oesap is a native Apple-platform client for the [Paseo](https://github.com/getpaseo/paseo)
 protocol. It lets people securely monitor and control coding agents running on
-their Paseo hosts from a fast, polished iOS app.
+their Paseo hosts from a fast, polished iPhone, iPad, and Mac app.
 
 The product direction is:
 
@@ -17,9 +17,12 @@ The product direction is:
   reconnecting, and agent-attention states.
 
 This app is a client of a Paseo daemon; it does not run coding agents on the
-phone or replace the daemon. Oesap targets iPhone only: do not add iPad,
-Mac/Catalyst, other Apple-platform, Android, or backend targets without
-explicit product approval. Generate the Xcode project from the checked-in
+device or replace the daemon. Oesap targets iPhone and iPad on iOS/iPadOS 17
+and later, with Mac support through Mac Catalyst on macOS 14 and later. The
+shared iOS target reuses SwiftUI views, UIKit text/image services, domain and
+protocol code, and persistence across all three devices. Do not add standalone
+AppKit, other Apple-platform, Android, or backend targets without explicit
+product approval. Generate the Xcode project from the checked-in
 `project.yml` using XcodeGen 2.46.0 and `Scripts/generate-project`; do not edit
 the generated `.xcodeproj` directly. The initial iOS deployment target is
 17.0, carried over from Hydraulophone. `com.oesap.app` is a provisional
@@ -199,9 +202,10 @@ Test protocol and stateful behavior at the lowest practical layer:
   states.
 - Keep the default test suite offline and credential-free. Live daemon tests
   must be explicit opt-ins against a disposable/test host.
-- Build and test the configured iOS scheme with `xcodebuild` and an installed
-  simulator destination. Do not guess simulator names; discover available
-  destinations. Validate security-sensitive connection flows and key platform
+- Build and test the configured `Oesap` iOS scheme with `xcodebuild` and
+  installed iPhone and iPad simulator destinations, plus the `Oesap` scheme
+  with the Mac Catalyst destination on macOS. Do not guess simulator names;
+  discover available destinations. Validate security-sensitive connection flows and key platform
   behavior on a physical device when available, and state clearly when that
   validation was not possible.
 

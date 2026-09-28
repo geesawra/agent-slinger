@@ -73,7 +73,7 @@ public actor PaseoProtocolClient: PaseoService {
     do {
       try await transport.connect()
     } catch {
-      setConnectionState(.disconnected)
+      setConnectionState(Self.failureState(for: error))
       throw error
     }
     receiver = Task { await self.receiveLoop() }
@@ -116,12 +116,12 @@ public actor PaseoProtocolClient: PaseoService {
         Task { await self.failHandshake(CancellationError()) }
       }
     } catch {
-      await transport.close()
       receiver?.cancel()
+      await transport.close()
       receiver = nil
       failAll(error)
       serverInfo = nil
-      setConnectionState(.disconnected)
+      setConnectionState(Self.failureState(for: error))
       throw error
     }
   }
@@ -865,8 +865,10 @@ public actor PaseoProtocolClient: PaseoService {
   }
 
   public func disconnect() async {
-    await transport.close()
+    // Cancel before closing the socket so its receive failure cannot publish
+    // an unexpected-loss diagnostic for an intentional disconnect.
     receiver?.cancel()
+    await transport.close()
     receiver = nil
     failAll(PaseoProtocolError.disconnected("the client closed the connection"))
     serverInfo = nil
@@ -882,10 +884,14 @@ public actor PaseoProtocolClient: PaseoService {
     } catch {
       guard !Task.isCancelled else { return }
       await transport.close()
-      failAll(PaseoProtocolError.disconnected(error.localizedDescription))
+      guard !Task.isCancelled else { return }
+      // Keep typed transport failures through the hello handshake, pending
+      // requests, and timelines. The connection observer also needs the cause
+      // when an idle socket has no other consumer to receive its error.
+      failAll(error)
       serverInfo = nil
       receiver = nil
-      setConnectionState(.disconnected)
+      setConnectionState(Self.failureState(for: error))
     }
   }
 
@@ -1378,6 +1384,21 @@ public actor PaseoProtocolClient: PaseoService {
     var values: [String: PaseoJSONValue] = ["limit": .number(Double(page.limit))]
     if let cursor = page.cursor { values["cursor"] = .string(cursor) }
     return .object(values)
+  }
+
+  private static func failureState(for error: Error) -> PaseoConnectionState {
+    if error is CancellationError || (error as? PaseoConnectionError) == .cancelled {
+      return .disconnected
+    }
+    if let error = error as? PaseoConnectionError {
+      return .failed(reason: error.localizedDescription)
+    }
+    if let error = error as? PaseoProtocolError {
+      return .failed(reason: error.localizedDescription)
+    }
+    // Foundation errors may embed URLs, credentials, or host paths in their
+    // userInfo. Unexpected errors are not a safe user-facing diagnostic.
+    return .failed(reason: "The Paseo connection ended unexpectedly.")
   }
 
   private func setConnectionState(_ state: PaseoConnectionState) {

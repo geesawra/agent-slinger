@@ -63,6 +63,7 @@ struct ChatView: View {
   @State private var composerFocused = false
   @State private var viewportHeight: CGFloat = 0
   @State private var isNearBottom = true
+  @State private var isUserScrolling = false
   @State private var expandedToolCallIDs: Set<String> = []
   @State private var actionSheet: AgentActionSheet?
   @State private var actionConfirmation: AgentActionConfirmation?
@@ -185,6 +186,7 @@ struct ChatView: View {
                     try await model.loadRemoteImage(source: source, threadID: imageThreadID)
                   }
                 )
+                .equatable()
                 .id(message.id)
               }
             }
@@ -233,27 +235,36 @@ struct ChatView: View {
             Color.clear
               .frame(height: 1)
               .id("timeline-bottom")
-              .background {
-                GeometryReader { geometry in
-                  Color.clear.preference(
-                    key: ScrollContentBottomKey.self,
-                    value: geometry.frame(in: .named("timelineScroll")).maxY
-                  )
-                }
-              }
           }
           .padding(.horizontal)
           .padding(.top, 12)
           .padding(.bottom, 20)
+          .frame(maxWidth: 900)
+          .frame(maxWidth: .infinity)
+          .background {
+            // The full stack exists even when the lazy bottom row is offscreen.
+            GeometryReader { geometry in
+              Color.clear.preference(
+                key: ScrollContentFrameKey.self,
+                value: geometry.frame(in: .named("timelineScroll")))
+            }
+          }
         }
         .accessibilityIdentifier("chat-timeline-scroll")
+        .modifier(TimelinePerformanceProgress(message: model.messages.last))
         .coordinateSpace(name: "timelineScroll")
         .scrollDismissesKeyboard(.interactively)
-        .onPreferenceChange(ScrollContentBottomKey.self) { bottom in
-          isNearBottom = bottom <= viewportHeight + 72
-        }
+        .modifier(
+          TimelineScrollTracking(
+            isNearBottom: $isNearBottom, isUserScrolling: $isUserScrolling,
+            viewportHeight: viewportHeight,
+            onContentGrowth: {
+              guard expandedToolCallIDs.isEmpty else { return }
+              proxy.scrollTo("timeline-bottom", anchor: .bottom)
+            })
+        )
         .onChange(of: viewport.size.height) { _, height in viewportHeight = height }
-        .onChange(of: model.messages.map(\.id)) { _, _ in
+        .onChange(of: model.timelineStructureRevision) { _, _ in
           let liveToolCallIDs = Set(model.messages.filter { $0.toolCall != nil }.map(\.id))
           expandedToolCallIDs.formIntersection(liveToolCallIDs)
         }
@@ -276,12 +287,43 @@ struct ChatView: View {
             actionSheet = nil
           }
         }
-        .onChange(of: model.messages.last) { _, newValue in
-          guard isNearBottom, expandedToolCallIDs.isEmpty, let newValue else { return }
-          if reduceMotion {
-            proxy.scrollTo(newValue.id, anchor: .bottom)
+        .onChange(of: model.messages.last) { oldValue, newValue in
+          guard let newValue else { return }
+          if oldValue == nil {
+            // Initial history has no prior reading position, including on the
+            // iOS 17 baseline without separate scroll-anchor roles.
+            isNearBottom = true
+            proxy.scrollTo("timeline-bottom", anchor: .bottom)
+            return
+          }
+          guard isNearBottom, !isUserScrolling, expandedToolCallIDs.isEmpty else { return }
+          // Streaming changes must not restart an animation for each token.
+          // Animate only a newly inserted row; let native scrolling follow
+          // content size changes while the user remains at the bottom.
+          if reduceMotion || oldValue?.id == newValue.id {
+            proxy.scrollTo("timeline-bottom", anchor: .bottom)
           } else {
-            withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(newValue.id, anchor: .bottom) }
+            withAnimation(.easeOut(duration: 0.18)) {
+              proxy.scrollTo("timeline-bottom", anchor: .bottom)
+            }
+          }
+        }
+        .overlay(alignment: .bottomTrailing) {
+          if !isNearBottom, !model.messages.isEmpty {
+            Button {
+              isNearBottom = true
+              proxy.scrollTo("timeline-bottom", anchor: .bottom)
+            } label: {
+              Label("Latest", systemImage: "arrow.down")
+                .font(.callout.weight(.medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .accessibilityLabel("Jump to latest message")
+            .accessibilityIdentifier("chat-jump-to-latest")
+            .padding()
           }
         }
         .composerSafeAreaBar {
@@ -442,7 +484,7 @@ extension View {
   fileprivate func composerSafeAreaBar<Content: View>(@ViewBuilder content: () -> Content)
     -> some View
   {
-    if #available(iOS 26.0, *) {
+    if #available(iOS 26.0, macOS 26.0, *) {
       self
         .scrollEdgeEffectStyle(.soft, for: .bottom)
         .safeAreaBar(edge: .bottom, spacing: 0, content: content)
@@ -612,6 +654,15 @@ private struct ConnectionBanner: View {
         Text("Your draft stays here while the app is open. Reconnect to restore the timeline.")
           .font(.footnote)
           .foregroundStyle(Color.primary.opacity(0.75))
+        if let reason = model.connectError {
+          DisclosureGroup("Connection details") {
+            ConnectionErrorNotice(message: reason, identifier: "chat-connection-error")
+              .font(.footnote)
+              .padding(.top, 6)
+          }
+          .font(.footnote)
+          .accessibilityIdentifier("chat-connection-details")
+        }
         Button {
           Task { await model.reconnect() }
         } label: {
@@ -708,7 +759,12 @@ private struct PermissionCard: View {
   }
 }
 
-private struct MessageBubble: View {
+private struct MessageBubble: View, Equatable {
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.message == rhs.message && lhs.threadID == rhs.threadID
+      && lhs.timelineGeneration == rhs.timelineGeneration
+  }
+
   let message: RemoteMessage
   let threadID: String
   let timelineGeneration: Int
@@ -723,6 +779,7 @@ private struct MessageBubble: View {
           .foregroundStyle(Color.primary.opacity(0.75))
         MessageMarkdownView(
           source: message.text,
+          cacheKey: "\(threadID)-\(timelineGeneration)-\(message.id)",
           threadID: threadID,
           loadRemoteImage: loadRemoteImage
         )
@@ -790,10 +847,108 @@ private struct InlineNotice: View {
   }
 }
 
-private struct ScrollContentBottomKey: PreferenceKey {
-  static var defaultValue: CGFloat = 0
+/// The offline load fixture exposes progress independently of its virtualized
+/// rows, so UI tests can verify ingestion while reading earlier messages.
+private struct TimelinePerformanceProgress: ViewModifier {
+  let message: RemoteMessage?
 
-  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-    value = max(value, nextValue())
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    #if DEBUG
+      if ProcessInfo.processInfo.arguments.contains("--demo-performance") {
+        content.accessibilityValue(
+          String(message?.id == "demo-performance-stream" ? message?.text.utf8.count ?? 0 : 0))
+      } else {
+        content
+      }
+    #else
+      content
+    #endif
+  }
+}
+
+/// Tracks the user's scroll intent separately from Markdown layout changes.
+/// Content growing below a pinned viewport must not switch off auto-follow.
+private struct TimelineScrollTracking: ViewModifier {
+  @Binding var isNearBottom: Bool
+  @Binding var isUserScrolling: Bool
+  let viewportHeight: CGFloat
+  let onContentGrowth: () -> Void
+  @State private var previousContentFrame: CGRect?
+
+  private struct Metrics: Equatable {
+    let isNearBottom: Bool
+    let contentHeight: CGFloat
+  }
+
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if #available(iOS 18.0, macOS 15.0, *) {
+      content
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(.top, for: .sizeChanges)
+        .onScrollPhaseChange { _, phase, context in
+          let wasUserScrolling = isUserScrolling
+          isUserScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
+          if isUserScrolling || wasUserScrolling {
+            let geometry = context.geometry
+            isNearBottom = geometry.visibleRect.maxY >= geometry.contentSize.height - 72
+          }
+        }
+        .onScrollGeometryChange(for: Metrics.self) { geometry in
+          Metrics(
+            isNearBottom: geometry.visibleRect.maxY >= geometry.contentSize.height - 72,
+            contentHeight: geometry.contentSize.height)
+        } action: { old, new in
+          if isUserScrolling {
+            isNearBottom = new.isNearBottom
+          } else if isNearBottom, old.contentHeight != new.contentHeight {
+            onContentGrowth()
+          }
+        }
+    } else {
+      content
+        .defaultScrollAnchor(.top)
+        .onPreferenceChange(ScrollContentFrameKey.self) { frame in
+          guard let frame else { return }
+          let decision = TimelineScrollFollowPolicy.evaluate(
+            previousFrame: previousContentFrame, frame: frame,
+            viewportHeight: viewportHeight, wasFollowing: isNearBottom)
+          previousContentFrame = frame
+          isNearBottom = decision.isNearBottom
+          if decision.shouldFollowContent { onContentGrowth() }
+        }
+    }
+  }
+}
+
+/// Legacy scroll geometry has no native phase information. A growing content
+/// frame with the same top offset is a layout change, whereas a changed offset
+/// represents scrolling. Only the former can preserve an existing follow intent.
+enum TimelineScrollFollowPolicy {
+  struct Decision: Equatable {
+    let isNearBottom: Bool
+    let shouldFollowContent: Bool
+  }
+
+  static func evaluate(
+    previousFrame: CGRect?, frame: CGRect, viewportHeight: CGFloat, wasFollowing: Bool
+  ) -> Decision {
+    if let previousFrame, wasFollowing,
+      abs(frame.minY - previousFrame.minY) < 0.5,
+      abs(frame.height - previousFrame.height) > 0.5
+    {
+      return Decision(isNearBottom: true, shouldFollowContent: true)
+    }
+    return Decision(
+      isNearBottom: frame.maxY <= viewportHeight + 72, shouldFollowContent: false)
+  }
+}
+
+private struct ScrollContentFrameKey: PreferenceKey {
+  static var defaultValue: CGRect? = nil
+
+  static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+    if let next = nextValue() { value = next }
   }
 }

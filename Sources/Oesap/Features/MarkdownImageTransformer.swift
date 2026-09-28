@@ -23,6 +23,11 @@ enum MarkdownImageTransformer {
   private static let maximumImagesPerMessage = 12
 
   static func transform(_ source: String) -> TransformedMarkdown {
+    // Every CommonMark image starts with ![. Most streamed answers contain
+    // none, so avoid an entire parse/render pass before MarkdownUI parses it.
+    guard source.contains("![") else {
+      return .init(markdown: source, imagesByID: [:])
+    }
     cmark_gfm_core_extensions_ensure_registered()
     guard let parser = cmark_parser_new(CMARK_OPT_DEFAULT) else {
       return .init(markdown: source, imagesByID: [:])
@@ -44,6 +49,9 @@ enum MarkdownImageTransformer {
     var images: [String: MarkdownImageSource] = [:]
     var allImageNodes: [UnsafeMutablePointer<cmark_node>] = []
     collectImages(in: document, into: &allImageNodes)
+    guard !allImageNodes.isEmpty else {
+      return .init(markdown: source, imagesByID: [:])
+    }
     for (index, node) in allImageNodes.enumerated() {
       let id = "image-\(index)"
       let record = MarkdownImageSource(id: id, source: nodeURL(node) ?? "", alt: imageAlt(node))

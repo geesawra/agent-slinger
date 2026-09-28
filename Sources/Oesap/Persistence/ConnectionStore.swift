@@ -219,6 +219,9 @@ private struct KeychainConnectionStoreStorage: ConnectionStoreStorage {
   private func baseQuery(account: String) -> [String: Any] {
     [
       kSecClass as String: kSecClassGenericPassword,
+      // macOS uses the same protected keychain and device-only accessibility
+      // semantics as iOS instead of the legacy file-based login keychain.
+      kSecUseDataProtectionKeychain as String: true,
       kSecAttrService as String: service,
       kSecAttrAccount as String: account,
     ]

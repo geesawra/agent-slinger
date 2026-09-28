@@ -77,6 +77,8 @@ public struct PaseoConnectionInfo: Sendable, Equatable {
 
 public enum PaseoConnectionState: Sendable, Equatable {
   case disconnected
+  /// A sanitized local diagnostic, retained even when no request is in flight.
+  case failed(reason: String)
   case connecting
   case connected(PaseoConnectionInfo)
 }

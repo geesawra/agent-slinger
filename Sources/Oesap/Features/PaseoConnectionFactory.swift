@@ -339,6 +339,8 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
             break
           case .disconnected:
             continuation.yield(.disconnected("The Paseo host closed the connection."))
+          case .failed(let reason):
+            continuation.yield(.disconnected(reason))
           }
         }
         continuation.finish()

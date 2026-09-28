@@ -184,7 +184,7 @@ struct NewChatView: View {
             ?? "\(configuredProviderLabel) · Provider default"
         )
         .font(.subheadline)
-        Text("Saved on this iPhone")
+        Text("Saved on this device")
           .font(.caption)
           .foregroundStyle(Color.primary.opacity(0.75))
       }
@@ -314,7 +314,7 @@ struct AgentConfigurationView: View {
       Section {
         Text(project?.name ?? "This project")
           .font(.headline)
-        LabeledContent("Storage", value: "Saved on this iPhone")
+        LabeledContent("Storage", value: "Saved on this device")
         Text("This provider and optional model apply to new threads for this project on this host.")
           .font(.footnote)
           .foregroundStyle(.secondary)
@@ -474,7 +474,7 @@ struct AgentConfigurationView: View {
     let configuration = RemoteAgentConfiguration(
       provider: selectedProviderID, model: selectedModelID)
     guard model.saveAgentConfiguration(configuration, for: projectID) else {
-      saveError = "Couldn’t save this project’s Agent settings on this iPhone."
+      saveError = "Couldn’t save this project’s Agent settings on this device."
       return
     }
     dismiss()

@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Opt-in signed-Mac Keychain smoke test using only a unique synthetic item.
+
+Usage: Scripts/check-mac-keychain path/to/Oesap.app
+Copies the app's public signing certificate, entitlements and provisioning
+profile into a temporary, separately signed probe. Never launches Oesap or
+queries its connection service/accounts. Does not change the supplied app.
+"""
+
+import hashlib
+import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+SOURCE = r'''
+import Foundation
+import Security
+
+let token = UUID().uuidString.lowercased()
+let query: [String: Any] = [
+  kSecClass as String: kSecClassGenericPassword,
+  kSecUseDataProtectionKeychain as String: true,
+  kSecAttrService as String: "com.oesap.keychain-smoke." + token,
+  kSecAttrAccount as String: "synthetic-" + token,
+]
+func require(_ status: OSStatus, _ step: String, expected: OSStatus = errSecSuccess) {
+  guard status == expected else {
+    // Cleanup is scoped to this run's random service and account only.
+    SecItemDelete(query as CFDictionary)
+    fputs("Keychain smoke failed at \(step): OSStatus \(status)\n", stderr)
+    exit(1)
+  }
+}
+let original = Data("synthetic keychain validation".utf8)
+var add = query
+add[kSecValueData as String] = original
+add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+require(SecItemAdd(add as CFDictionary, nil), "add")
+var read = query
+read[kSecReturnData as String] = true
+read[kSecMatchLimit as String] = kSecMatchLimitOne
+var result: CFTypeRef?
+require(SecItemCopyMatching(read as CFDictionary, &result), "read")
+guard result as? Data == original else {
+  SecItemDelete(query as CFDictionary)
+  fputs("Keychain smoke failed: synthetic value mismatch\n", stderr)
+  exit(1)
+}
+let updated = Data("updated synthetic validation".utf8)
+require(SecItemUpdate(query as CFDictionary, [kSecValueData as String: updated] as CFDictionary), "update")
+require(SecItemCopyMatching(read as CFDictionary, &result), "read updated")
+guard result as? Data == updated else {
+  SecItemDelete(query as CFDictionary)
+  fputs("Keychain smoke failed: updated synthetic value mismatch\n", stderr)
+  exit(1)
+}
+require(SecItemDelete(query as CFDictionary), "delete")
+require(SecItemCopyMatching(read as CFDictionary, &result), "verify deletion", expected: errSecItemNotFound)
+print("PASS: signed Mac Data Protection Keychain add/read/update/delete; unique synthetic item removed.")
+'''
+
+
+def run(arguments, step, **kwargs):
+    result = subprocess.run(arguments, capture_output=True, **kwargs)
+    if result.returncode:
+        raise RuntimeError(f"{step} failed (exit {result.returncode}).")
+    return result.stdout
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise RuntimeError("Usage: Scripts/check-mac-keychain path/to/Oesap.app")
+    app = Path(sys.argv[1]).resolve()
+    info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    run(["/usr/bin/codesign", "--verify", "--strict", str(app)], "App signature verification")
+    entitlements = plistlib.loads(run(
+        ["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", str(app)],
+        "Reading public signing entitlements"))
+    app_id = entitlements.get("com.apple.application-identifier")
+    groups = entitlements.get("keychain-access-groups", [])
+    if not app_id or app_id not in groups:
+        raise RuntimeError("App is missing its provisioned application identifier/Keychain group.")
+    profile = app / "Contents/embedded.provisionprofile"
+    if not profile.is_file():
+        raise RuntimeError("App has no embedded Mac provisioning profile. Build with a development team first.")
+    with tempfile.TemporaryDirectory(prefix="oesap-keychain-smoke-") as directory:
+        scratch = Path(directory)
+        certificate_prefix = scratch / "signer-"
+        run(["/usr/bin/codesign", "-d", "--extract-certificates=" + str(certificate_prefix), str(app)],
+            "Extracting public signing certificate")
+        certificate = Path(str(certificate_prefix) + "0")
+        if not certificate.is_file():
+            raise RuntimeError("A certificate-signed app is required; ad-hoc builds cannot run this check.")
+        identity = hashlib.sha1(certificate.read_bytes()).hexdigest().upper()
+        probe = scratch / "KeychainSmoke.app"
+        contents = probe / "Contents"
+        executable = contents / "MacOS/KeychainSmoke"
+        executable.parent.mkdir(parents=True)
+        (contents / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": info["CFBundleIdentifier"],
+            "CFBundleExecutable": "KeychainSmoke",
+            "CFBundlePackageType": "APPL",
+            "CFBundleName": "Oesap Isolated Keychain Check",
+        }))
+        shutil.copy2(profile, contents / "embedded.provisionprofile")
+        source = scratch / "KeychainSmoke.swift"
+        source.write_text(SOURCE)
+        entitlement_path = scratch / "probe.entitlements"
+        entitlement_path.write_bytes(plistlib.dumps(entitlements))
+        run(["/usr/bin/xcrun", "swiftc", str(source), "-o", str(executable)], "Compiling isolated probe")
+        run(["/usr/bin/codesign", "--force", "--sign", identity, "--entitlements", str(entitlement_path),
+             "--generate-entitlement-der", str(probe)], "Signing isolated probe")
+        # The probe queries a random service/account; never the app's credential keys.
+        result = subprocess.run([str(executable)], capture_output=True, text=True)
+        if result.stdout:
+            print(result.stdout.strip())
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or f"Probe failed (exit {result.returncode}).")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError) as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)

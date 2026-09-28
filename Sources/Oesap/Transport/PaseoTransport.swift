@@ -1,7 +1,9 @@
 import Foundation
+import OSLog
 
 /// One physical Paseo socket. The protocol client owns reconnection and subscriptions.
 actor PaseoTransport {
+  private static let logger = Logger(subsystem: "com.oesap.app", category: "connection")
   private let config: PaseoConnectionConfig
   private let socketFactory: @Sendable (PaseoConnectionConfig) throws -> any PaseoSocket
   private let connectTimeout: Duration
@@ -47,7 +49,8 @@ actor PaseoTransport {
       }
       if generation == attemptID { connecting = nil }
     } catch {
-      let mapped = Self.map(error, socket: socket)
+      let mapped =
+        (error as? PaseoConnectionError) ?? Self.map(error, socket: socket, phase: .connect)
       if generation == attemptID {
         connecting = nil
         close()
@@ -67,7 +70,7 @@ actor PaseoTransport {
         try await socket.send(.string(text))
       }
     } catch {
-      let mapped = Self.map(error, socket: socket)
+      let mapped = Self.map(error, socket: socket, phase: .send)
       if self.socket === socket { close() }
       throw mapped
     }
@@ -118,13 +121,14 @@ actor PaseoTransport {
         return text
       }
     } catch {
-      let mapped = Self.map(error, socket: socket)
+      let mapped = Self.map(error, socket: socket, phase: .receive)
       if self.socket === socket { close() }
       throw mapped
     }
   }
 
   func close() {
+    Self.logger.info("Connection closed: local cleanup")
     generation = UUID()
     connecting?.cancel()
     connecting = nil
@@ -138,22 +142,33 @@ actor PaseoTransport {
     try Task.checkCancellation()
     let socket = try socketFactory(config)
     self.socket = socket
+    Self.logger.info(
+      "Connection phase started: connect mode=\(self.config.mode.rawValue, privacy: .public)")
     socket.start()
-    try await waitForOpen(socket)
+    do { try await waitForOpen(socket) } catch {
+      throw Self.map(error, socket: socket, phase: .connect)
+    }
     try Task.checkCancellation()
+    Self.logger.info("Connection phase completed: connect")
 
     if config.mode == .relay {
       guard let daemonKey = config.daemonPublicKeyBase64 else {
         throw PaseoConnectionError.invalidDaemonKey
       }
       let crypto = try PaseoRelayCrypto(daemonPublicKeyBase64: daemonKey)
-      try await withTaskCancellationHandler {
-        try await handshake(socket, crypto: crypto)
-      } onCancel: {
-        socket.cancel()
+      Self.logger.info("Connection phase started: relayHandshake")
+      do {
+        try await withTaskCancellationHandler {
+          try await handshake(socket, crypto: crypto)
+        } onCancel: {
+          socket.cancel()
+        }
+      } catch {
+        throw Self.map(error, socket: socket, phase: .relayHandshake)
       }
       try Task.checkCancellation()
       self.crypto = crypto
+      Self.logger.info("Connection phase completed: relayHandshake")
     }
   }
 
@@ -238,14 +253,27 @@ actor PaseoTransport {
     return Data(base64Encoded: standard)
   }
 
-  private static func map(_ error: Error, socket: (any PaseoSocket)? = nil) -> PaseoConnectionError
-  {
-    if let typed = error as? PaseoConnectionError, typed == .cancelled { return typed }
-    if error is CancellationError { return .cancelled }
-    if socket?.closeCode == 4401 { return .authenticationFailed }
-    if let typed = error as? PaseoConnectionError { return typed }
-    if (error as NSError).code == NSURLErrorTimedOut { return .timedOut }
-    return .disconnected
+  private static func map(
+    _ error: Error, socket: (any PaseoSocket)? = nil, phase: ConnectionFailure.Phase
+  ) -> PaseoConnectionError {
+    if error is CancellationError || Task.isCancelled { return .cancelled }
+    if let typed = error as? PaseoConnectionError {
+      if typed == .cancelled { return typed }
+      if case .transportFailure = typed { return typed }
+    }
+    let metadata = socket?.failureMetadata ?? .init()
+    let failure = ConnectionFailure(error: error, phase: phase, metadata: metadata)
+    if (error as? PaseoConnectionError) == nil, metadata.wasCancelled,
+      failure.causes.contains(where: {
+        $0.domain == NSURLErrorDomain && $0.code == NSURLErrorCancelled
+      })
+    {
+      return .cancelled
+    }
+    logger.error("Connection failure: \(failure.diagnosticDescription, privacy: .public)")
+    if metadata.closeCode == 4401 { return .authenticationFailed }
+    if let typed = error as? PaseoConnectionError, typed != .disconnected { return typed }
+    return .transportFailure(failure)
   }
 }
 

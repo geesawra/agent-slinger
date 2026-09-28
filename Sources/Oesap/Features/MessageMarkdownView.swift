@@ -1,47 +1,51 @@
 import MarkdownUI
+import Observation
 import SwiftUI
 
 /// Renders host-provided message text as native, selectable SwiftUI Markdown.
 @MainActor
 struct MessageMarkdownView: View {
   let source: String
+  let cacheKey: String?
 
-  @State private var parsedSource: String?
-  @State private var parsedContent: MarkdownContent?
-  @State private var imageSources: [String: MarkdownImageSource] = [:]
+  @State private var localCacheKey = UUID().uuidString
+  @State private var renderer: MessageMarkdownRenderer
   @State private var viewerItem: ImageAttachmentViewerItem?
   @State private var imageLoader: ReceivedImageLoader
 
   init(
     source: String,
+    cacheKey: String? = nil,
     threadID: String? = nil,
     loadRemoteImage: ReceivedImageLoader.HostFileLoader? = nil
   ) {
     self.source = source
+    self.cacheKey = cacheKey
+    _renderer = State(initialValue: MessageMarkdownRenderer(source: source))
     _imageLoader = State(
       initialValue: ReceivedImageLoader(threadID: threadID, hostFileLoader: loadRemoteImage))
   }
 
   var body: some View {
     Group {
-      if parsedSource == source, let parsedContent {
-        Markdown(parsedContent)
+      if let result = renderer.result {
+        Markdown(result.content)
           .markdownTheme(.basic)
           .markdownImageProvider(
             ReceivedMarkdownImageProvider(
-              imagesByID: imageSources,
+              imagesByID: result.imagesByID,
               loader: imageLoader,
               onOpen: { image in viewerItem = .remote(image, loader: imageLoader) }
             )
           )
           .markdownInlineImageProvider(
-            ReceivedMarkdownInlineImageProvider(imagesByID: imageSources, loader: imageLoader)
+            ReceivedMarkdownInlineImageProvider(imagesByID: result.imagesByID, loader: imageLoader)
           )
           .environment(
             \.openURL,
             OpenURLAction { url in
               if let id = MarkdownImageActionPolicy.imageID(url),
-                let image = imageSources[id]
+                let image = result.imagesByID[id]
               {
                 viewerItem = .remote(image, loader: imageLoader)
                 return .handled
@@ -62,24 +66,82 @@ struct MessageMarkdownView: View {
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
-    .fullScreenCover(item: $viewerItem) { item in
+    .appFullScreenCover(item: $viewerItem) { item in
       ImageAttachmentViewer(item: item)
     }
-    .task(id: source) {
-      parsedSource = nil
-      parsedContent = nil
-      imageSources = [:]
+    .onChange(of: source) { _, latest in renderer.update(source: latest) }
+    .task {
+      await renderer.run(cacheKey: cacheKey ?? localCacheKey)
+    }
+  }
+}
 
+/// Owns one rendering worker for the lifetime of a message view. Source
+/// updates replace a single pending snapshot, never cancel an in-flight parse.
+/// This guarantees visible progress even when parsing takes longer than the
+/// host's token interval, while navigation still cancels work immediately.
+@MainActor
+@Observable
+final class MessageMarkdownRenderer {
+  typealias Parser = @Sendable (String, String) async throws -> MessageMarkdownContentResult
+
+  private(set) var result: MessageMarkdownContentResult?
+  @ObservationIgnored private(set) var renderedSource: String?
+  @ObservationIgnored private var latestSource: String
+  @ObservationIgnored private var continuation: AsyncStream<Void>.Continuation?
+  @ObservationIgnored private var activeRunID: UUID?
+  @ObservationIgnored private let parse: Parser
+
+  init(
+    source: String,
+    parse: @escaping Parser = { source, key in
+      try await MessageMarkdownContentParser.shared.parse(source, cacheKey: key)
+    }
+  ) {
+    latestSource = source
+    self.parse = parse
+  }
+
+  func update(source: String) {
+    latestSource = source
+    continuation?.yield(())
+  }
+
+  func run(cacheKey: String) async {
+    let runID = UUID()
+    activeRunID = runID
+    let (updates, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    self.continuation?.finish()
+    self.continuation = continuation
+    continuation.yield(())
+    defer {
+      continuation.finish()
+      if activeRunID == runID {
+        self.continuation = nil
+        activeRunID = nil
+      }
+    }
+    var lastParseTime: ContinuousClock.Instant?
+    for await _ in updates {
       do {
-        let result = try await MessageMarkdownContentParser.shared.parse(source)
+        if let lastParseTime {
+          try await ContinuousClock().sleep(until: lastParseTime.advanced(by: .milliseconds(50)))
+        }
         try Task.checkCancellation()
-        parsedContent = result.content
-        imageSources = result.imagesByID
-        parsedSource = source
+        guard activeRunID == runID else { return }
+        // Read after the cadence delay, discarding obsolete buffered snapshots.
+        let snapshot = latestSource
+        guard snapshot != renderedSource else { continue }
+        let parsed = try await parse(snapshot, cacheKey)
+        try Task.checkCancellation()
+        guard activeRunID == runID else { return }
+        result = parsed
+        renderedSource = snapshot
+        lastParseTime = .now
       } catch is CancellationError {
-        // A newer streamed message source owns the view now.
+        return
       } catch {
-        // Preserve the original text if the parser ever reports a failure.
+        // Keep selectable source / the last successful tree on parser failure.
       }
     }
   }
@@ -104,7 +166,7 @@ enum MarkdownLinkPolicy {
   }
 }
 
-private struct MessageMarkdownContentResult: @unchecked Sendable {
+struct MessageMarkdownContentResult: @unchecked Sendable {
   // MarkdownUI 2.4.1's content tree is an immutable value tree of arrays,
   // enums, strings, and integers. Parsing releases its temporary cmark nodes
   // before returning, so the value can safely move from the parser actor to
@@ -114,15 +176,64 @@ private struct MessageMarkdownContentResult: @unchecked Sendable {
   let imagesByID: [String: MarkdownImageSource]
 }
 
-private actor MessageMarkdownContentParser {
+/// Serializes cmark work off the main actor and retains only the latest tree
+/// for each visible/recent message. Both entry and source-byte limits bound the
+/// cache; very large answers render normally without being retained here.
+actor MessageMarkdownContentParser {
   static let shared = MessageMarkdownContentParser()
 
-  func parse(_ source: String) throws -> MessageMarkdownContentResult {
+  private struct Entry {
+    let source: String
+    let result: MessageMarkdownContentResult
+    let byteCount: Int
+  }
+
+  private let maximumEntries: Int
+  private let maximumSourceBytes: Int
+  private var cache: [String: Entry] = [:]
+  private var recency: [String] = []
+  private(set) var cachedSourceBytes = 0
+  private(set) var parseCount = 0
+  var cachedEntryCount: Int { cache.count }
+
+  init(maximumEntries: Int = 64, maximumSourceBytes: Int = 512 * 1_024) {
+    self.maximumEntries = maximumEntries
+    self.maximumSourceBytes = maximumSourceBytes
+  }
+
+  func parse(_ source: String, cacheKey: String) throws -> MessageMarkdownContentResult {
     try Task.checkCancellation()
+    if let entry = cache[cacheKey], entry.source == source {
+      touch(cacheKey)
+      return entry.result
+    }
     let transformed = MarkdownImageTransformer.transform(source)
     try Task.checkCancellation()
     let content = MarkdownContent(transformed.markdown)
     try Task.checkCancellation()
-    return MessageMarkdownContentResult(content: content, imagesByID: transformed.imagesByID)
+    let result = MessageMarkdownContentResult(content: content, imagesByID: transformed.imagesByID)
+    parseCount += 1
+    remove(cacheKey)
+    let byteCount = source.utf8.count
+    if maximumEntries > 0, byteCount <= maximumSourceBytes {
+      while cache.count >= maximumEntries || cachedSourceBytes > maximumSourceBytes - byteCount {
+        guard let oldest = recency.first else { break }
+        remove(oldest)
+      }
+      cache[cacheKey] = Entry(source: source, result: result, byteCount: byteCount)
+      cachedSourceBytes += byteCount
+      touch(cacheKey)
+    }
+    return result
+  }
+
+  private func touch(_ key: String) {
+    recency.removeAll { $0 == key }
+    recency.append(key)
+  }
+
+  private func remove(_ key: String) {
+    if let old = cache.removeValue(forKey: key) { cachedSourceBytes -= old.byteCount }
+    recency.removeAll { $0 == key }
   }
 }

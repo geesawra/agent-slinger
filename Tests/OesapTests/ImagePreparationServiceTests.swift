@@ -6,6 +6,23 @@ import XCTest
 @testable import Oesap
 
 final class ImagePreparationServiceTests: XCTestCase {
+  func testDisplayDecodeDownsamplesPixelsBeforeRendering() async throws {
+    let input = try makePNG(width: 1_200, height: 600, withAlpha: true)
+    let image = try await ImageDisplayDecoder.shared.decode(input, maximumPixelEdge: 384)
+    XCTAssertEqual(image.width, 384)
+    XCTAssertEqual(image.height, 192)
+  }
+
+  func testDisplayDecodeRejectsInvalidBytes() async {
+    do {
+      _ = try await ImageDisplayDecoder.shared.decode(
+        Data("not an image".utf8), maximumPixelEdge: 384)
+      XCTFail("Expected invalid image to be rejected")
+    } catch {
+      XCTAssertEqual(error as? ImagePreparationError, .invalidImage)
+    }
+  }
+
   func testTransparentImageKeepsAlphaAndProducesBoundedPNG() async throws {
     let input = try makePNG(width: 16, height: 16, withAlpha: true)
     let prepared = try await ImagePreparationService.prepare(

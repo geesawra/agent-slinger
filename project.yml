@@ -22,6 +22,10 @@ packages:
 
 targets:
   Oesap:
+    attributes:
+      SystemCapabilities:
+        com.apple.Keychain:
+          enabled: 1
     type: application
     platform: iOS
     sources:
@@ -43,12 +47,14 @@ targets:
         PRODUCT_NAME: Oesap
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
-        TARGETED_DEVICE_FAMILY: "1"
-        SUPPORTS_MACCATALYST: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: YES
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        "TARGETED_DEVICE_FAMILY[sdk=macosx*]": "6"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_STYLE: Automatic
+        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": Oesap-Catalyst.entitlements
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Oesap/Transport/Crypto/Oesap-Bridging-Header.h
     info:
@@ -57,9 +63,16 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         NSLocalNetworkUsageDescription: Oesap connects to a Paseo daemon on your local network when you choose a direct host connection.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            "100.64.0.0/10":
+              NSExceptionAllowsInsecureHTTPLoads: true
 
   OesapTests:
     type: bundle.unit-test
@@ -74,8 +87,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oesap.app.tests
         GENERATE_INFOPLIST_FILE: YES
-        TARGETED_DEVICE_FAMILY: "1"
-        SUPPORTS_MACCATALYST: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: YES
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         TEST_TARGET_NAME: Oesap
 
@@ -84,14 +97,15 @@ targets:
     platform: iOS
     sources:
       - path: Tests/OesapUITests
+      - path: Tests/OesapPlatformUITests
     dependencies:
       - target: Oesap
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oesap.app.uitests
         GENERATE_INFOPLIST_FILE: YES
-        TARGETED_DEVICE_FAMILY: "1"
-        SUPPORTS_MACCATALYST: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: YES
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         TEST_TARGET_NAME: Oesap
 

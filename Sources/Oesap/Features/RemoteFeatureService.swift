@@ -524,6 +524,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       case usageFailure
       case agentControl
       case images
+      case performance
     }
 
     private let mode: Mode
@@ -618,7 +619,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
         usageUnavailable: mode == .usageUnavailable,
         usageFailure: mode == .usageFailure,
         agentControlSupported: mode == .agentControl,
-        imageFixtures: mode == .images)
+        imageFixtures: mode == .images, performanceFixtures: mode == .performance)
     }
   }
 
@@ -633,6 +634,11 @@ enum RemoteServiceError: LocalizedError, Sendable {
     private let usageFailure: Bool
     private let agentControlSupported: Bool
     private let imageFixtures: Bool
+    private let performanceFixtures: Bool
+    private var performanceTasks: [String: Task<Void, Never>] = [:]
+    private var performanceSteps: [String: Int] = [:]
+    private var performanceText: [String: String] = [:]
+    private var subscriptionIDs: [String: UUID] = [:]
     private var continuations:
       [String: AsyncThrowingStream<RemoteTimelineUpdate, Error>.Continuation] = [:]
     private var sentMessages: [String: [RemoteMessage]] = [:]
@@ -649,7 +655,8 @@ enum RemoteServiceError: LocalizedError, Sendable {
       creationSupported: Bool = true, overviewEmpty: Bool = false,
       overviewFailure: Bool = false, usageSupported: Bool = true,
       usageUnavailable: Bool = false, usageFailure: Bool = false,
-      agentControlSupported: Bool = false, imageFixtures: Bool = false
+      agentControlSupported: Bool = false, imageFixtures: Bool = false,
+      performanceFixtures: Bool = false
     ) {
       self.isEmpty = isEmpty
       self.failsSending = failsSending
@@ -661,6 +668,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       self.usageFailure = usageFailure
       self.agentControlSupported = agentControlSupported
       self.imageFixtures = imageFixtures
+      self.performanceFixtures = performanceFixtures
     }
 
     func serverID() async -> String? {
@@ -992,7 +1000,27 @@ enum RemoteServiceError: LocalizedError, Sendable {
       }
       var initial: [RemoteMessage]
       let baseTime = Date(timeIntervalSince1970: 1_780_000_000)
-      if agentID.hasPrefix("demo-created-") {
+      if performanceFixtures && agentID == "demo-agent-running" {
+        initial = (0..<1_000).map { index in
+          RemoteMessage(
+            id: "demo-performance-\(index)", author: index.isMultiple(of: 4) ? .user : .agent,
+            text: """
+              ## Timeline item \(index + 1)
+
+              A deterministic **Markdown** fixture with `native rendering`.
+
+              - Keep the draft responsive
+              - Preserve the reader’s position
+              """,
+            timestamp: baseTime.addingTimeInterval(Double(index)))
+        }
+        if let text = performanceText[agentID] {
+          initial.append(
+            .init(
+              id: "demo-performance-stream", author: .agent, text: text,
+              timestamp: baseTime.addingTimeInterval(1_000)))
+        }
+      } else if agentID.hasPrefix("demo-created-") {
         initial = []
       } else if agentID == "demo-agent-attention" {
         initial = [
@@ -1042,12 +1070,54 @@ enum RemoteServiceError: LocalizedError, Sendable {
 
     func events(agentID: String) async throws -> AsyncThrowingStream<RemoteTimelineUpdate, Error> {
       try ensureConnected()
-      return AsyncThrowingStream { continuation in
+      performanceTasks[agentID]?.cancel()
+      continuations[agentID]?.finish()
+      let subscriptionID = UUID()
+      subscriptionIDs[agentID] = subscriptionID
+      let stream = AsyncThrowingStream<RemoteTimelineUpdate, Error> { continuation in
         continuations[agentID] = continuation
         continuation.onTermination = { [weak self] _ in
-          Task { await self?.removeContinuation(for: agentID) }
+          Task { await self?.removeContinuation(for: agentID, id: subscriptionID) }
         }
       }
+      if performanceFixtures && agentID == "demo-agent-running" {
+        // A bounded, cancellable offline load scenario. Its task is owned by
+        // this subscription and stopped on navigation or disconnect.
+        performanceTasks[agentID] = Task { [weak self] in
+          do {
+            try await Task.sleep(for: .milliseconds(500))
+            for _ in 0..<5_000 {
+              try Task.checkCancellation()
+              guard let self, await self.emitPerformanceChunk(agentID: agentID) else { return }
+              try await Task.sleep(for: .milliseconds(10))
+            }
+          } catch {}
+        }
+      }
+      return stream
+    }
+
+    private func emitPerformanceChunk(agentID: String) -> Bool {
+      let step = performanceSteps[agentID, default: 0]
+      guard step < 5_000, !closed, let continuation = continuations[agentID] else { return false }
+      let chunks = [
+        "Live ", "**Markdown** ", "keeps ", "up ", "with ", "the ", "stream.\n\n",
+        "`swift test`\n\n",
+      ]
+      let chunk = step == 4_999 ? "\n\n**Streaming complete.**" : chunks[step % chunks.count]
+      performanceText[agentID, default: ""] += chunk
+      performanceSteps[agentID] = step + 1
+      continuation.yield(
+        .message(
+          .init(
+            id: "demo-performance-stream", author: .agent, text: chunk,
+            timestamp: Date(timeIntervalSince1970: 1_780_001_000)),
+          cursor: nil, isDelta: true))
+      if step == 4_999 {
+        stoppedAgents.insert(agentID)
+        continuation.yield(.threadState(.idle, requiresAttention: false, reason: nil))
+      }
+      return true
     }
 
     func supportsAgentRequestReceipts() async -> Bool { agentControlSupported }
@@ -1155,6 +1225,9 @@ enum RemoteServiceError: LocalizedError, Sendable {
 
     func disconnect() async {
       closed = true
+      for task in performanceTasks.values { task.cancel() }
+      performanceTasks.removeAll()
+      subscriptionIDs.removeAll()
       for continuation in continuations.values {
         continuation.finish()
       }
@@ -1165,8 +1238,11 @@ enum RemoteServiceError: LocalizedError, Sendable {
       if closed { throw RemoteServiceError.connectionLost("The demo connection has been closed.") }
     }
 
-    private func removeContinuation(for agentID: String) {
+    private func removeContinuation(for agentID: String, id: UUID) {
+      guard subscriptionIDs[agentID] == id else { return }
+      subscriptionIDs[agentID] = nil
       continuations[agentID] = nil
+      performanceTasks.removeValue(forKey: agentID)?.cancel()
     }
   }
 #endif

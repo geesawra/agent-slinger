@@ -226,14 +226,27 @@ struct ChatComposerBar: View {
     images.removeAll { $0.id == id }
   }
 
+  private var accessoryTint: Color? {
+    #if targetEnvironment(macCatalyst)
+      // Let native Mac controls resolve contrasting foreground and bezel colors.
+      nil
+    #else
+      Color(uiColor: .label)
+    #endif
+  }
+
   @ViewBuilder
   private var contextUsageControl: some View {
     if let onShowContextUsage {
-      if #available(iOS 26.0, *) {
-        makeContextUsageButton(action: onShowContextUsage, style: .glass)
-      } else {
+      #if targetEnvironment(macCatalyst)
         makeContextUsageButton(action: onShowContextUsage, style: .bordered)
-      }
+      #else
+        if #available(iOS 26.0, *) {
+          makeContextUsageButton(action: onShowContextUsage, style: .glass)
+        } else {
+          makeContextUsageButton(action: onShowContextUsage, style: .bordered)
+        }
+      #endif
     }
   }
 
@@ -247,7 +260,7 @@ struct ChatComposerBar: View {
         .contentShape(Rectangle())
     }
     .buttonStyle(style)
-    .tint(Color(uiColor: .label))
+    .tint(accessoryTint)
     .accessibilityHint("Opens model, effort, and permission settings.")
     .accessibilityIdentifier("context-usage-button")
   }
@@ -255,11 +268,15 @@ struct ChatComposerBar: View {
   @ViewBuilder
   private var stopControl: some View {
     if let onStop, isAgentRunning || isStopPending {
-      if #available(iOS 26.0, *) {
-        makeStopButton(action: onStop, style: .glass)
-      } else {
+      #if targetEnvironment(macCatalyst)
         makeStopButton(action: onStop, style: .bordered)
-      }
+      #else
+        if #available(iOS 26.0, *) {
+          makeStopButton(action: onStop, style: .glass)
+        } else {
+          makeStopButton(action: onStop, style: .bordered)
+        }
+      #endif
     }
   }
 
@@ -284,7 +301,7 @@ struct ChatComposerBar: View {
       .foregroundStyle(Color.primary)
     }
     .buttonStyle(style)
-    .tint(Color(uiColor: .label))
+    .tint(accessoryTint)
     .disabled(!isStopEnabled || isStopPending)
     .accessibilityLabel(isStopPending ? "Stopping agent" : "Stop agent")
     .accessibilityIdentifier(stopButtonIdentifier)
@@ -510,6 +527,7 @@ private struct ExpandedComposerView: View {
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
           Button("Done", action: onDismiss)
+            .keyboardShortcut(.cancelAction)
             .accessibilityIdentifier("expanded-composer-done")
         }
       }
@@ -520,6 +538,7 @@ private struct ExpandedComposerView: View {
         }
       }
     }
+    .appSheetSize(width: 600, height: 420)
     .presentationDetents([.large])
     .presentationDragIndicator(.visible)
   }

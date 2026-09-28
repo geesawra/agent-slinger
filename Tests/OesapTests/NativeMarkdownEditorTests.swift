@@ -57,4 +57,60 @@ final class NativeMarkdownEditorTests: XCTestCase {
     XCTAssertEqual(
       textView.text, "", "Undo should remove the typed source, not just its formatting.")
   }
+
+  func testHardwareReturnCommandsSendOnceAndKeepShiftReturnAsText() throws {
+    var sends = 0
+    var editor = NativeImagePasteTextView(
+      text: .constant(""), isFocused: .constant(false),
+      accessibilityLabel: "Test", accessibilityIdentifier: "test", isExpanded: false,
+      canSubmit: true, onSubmit: { sends += 1 }, onPasteImage: { _, _ in },
+      onPasteStarted: { 0 }, onPasteFailed: { _, _ in })
+    let coordinator = editor.makeCoordinator()
+    defer { coordinator.cancelMarkdownParse() }
+    let textView = ImagePasteTextView()
+    textView.delegate = coordinator
+    textView.submitMessage = { coordinator.submitFromKeyboard() }
+    let send = try XCTUnwrap(
+      textView.keyCommands?.first { $0.modifierFlags == .command && $0.input == "\r" })
+    let newline = try XCTUnwrap(
+      textView.keyCommands?.first { $0.modifierFlags == .shift && $0.input == "\r" })
+
+    _ = textView.perform(send.action, with: send)
+    XCTAssertEqual(sends, 1)
+    _ = textView.perform(newline.action, with: newline)
+    XCTAssertEqual(textView.text, "\n")
+    XCTAssertEqual(sends, 1)
+
+    editor = NativeImagePasteTextView(
+      text: .constant(""), isFocused: .constant(false),
+      accessibilityLabel: "Test", accessibilityIdentifier: "test", isExpanded: false,
+      canSubmit: false, onSubmit: { sends += 1 }, onPasteImage: { _, _ in },
+      onPasteStarted: { 0 }, onPasteFailed: { _, _ in })
+    coordinator.parent = editor
+    _ = textView.perform(send.action, with: send)
+    XCTAssertEqual(sends, 1, "Disabled submission must remain disabled for hardware shortcuts")
+
+    coordinator.parent = NativeImagePasteTextView(
+      text: .constant(""), isFocused: .constant(false),
+      accessibilityLabel: "Test", accessibilityIdentifier: "test", isExpanded: true,
+      canSubmit: true, onSubmit: { sends += 1 }, onPasteImage: { _, _ in },
+      onPasteStarted: { 0 }, onPasteFailed: { _, _ in })
+    _ = textView.perform(send.action, with: send)
+    XCTAssertEqual(sends, 2, "Command-Return also sends from the expanded composer")
+  }
+
+  func testCommandReturnDoesNotSubmitMarkedText() throws {
+    var sends = 0
+    let textView = ImagePasteTextView()
+    textView.submitMessage = { sends += 1 }
+    let send = try XCTUnwrap(
+      textView.keyCommands?.first { $0.modifierFlags == .command && $0.input == "\r" })
+    textView.setMarkedText("入力", selectedRange: NSRange(location: 2, length: 0))
+    XCTAssertNotNil(textView.markedTextRange)
+    XCTAssertFalse(textView.keyCommands?.contains { $0.action == send.action } ?? false)
+    _ = textView.perform(send.action, with: send)
+    XCTAssertEqual(sends, 0)
+    XCTAssertNotNil(textView.markedTextRange)
+  }
+
 }

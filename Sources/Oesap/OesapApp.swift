@@ -8,7 +8,9 @@ struct OesapApp: App {
     #if DEBUG
       let arguments = ProcessInfo.processInfo.arguments
       let factory: any OesapConnectionFactory
-      if arguments.contains("--demo-images") {
+      if arguments.contains("--demo-performance") {
+        factory = DemoConnectionFactory(mode: .performance)
+      } else if arguments.contains("--demo-images") {
         factory = DemoConnectionFactory(mode: .images)
       } else if arguments.contains("--demo-tools") {
         factory = DemoToolCallConnectionFactory()
@@ -44,16 +46,20 @@ struct OesapApp: App {
   }
 
   var body: some Scene {
+    // Multiple scenes stay disabled: the shared model owns one selected thread
+    // and its timeline subscription on iPhone, iPad, and Mac Catalyst.
     WindowGroup {
-      #if DEBUG
-        WorkspaceRootView(model: model)
-          .tint(Color.accentColor)
-          .preferredColorScheme(uiTestDarkMode ? .dark : nil)
-      #else
-        WorkspaceRootView(model: model)
-          .tint(Color.accentColor)
-      #endif
+      workspace
     }
+    .commands { WorkspaceCommands() }
+  }
+
+  private var workspace: some View {
+    WorkspaceRootView(model: model)
+      .tint(Color.accentColor)
+      #if DEBUG
+        .preferredColorScheme(uiTestDarkMode ? .dark : nil)
+      #endif
   }
 
   #if DEBUG

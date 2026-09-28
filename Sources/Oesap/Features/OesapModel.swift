@@ -23,6 +23,8 @@ final class OesapModel {
   private(set) var projects: [RemoteProject] = []
   private(set) var threads: [RemoteThread] = []
   private(set) var messages: [RemoteMessage] = []
+  private(set) var timelineStructureRevision = 0
+  @ObservationIgnored private var messageIndices: [String: Int] = [:]
   private(set) var permissions: [RemotePermission] = []
   private(set) var historyMayBeIncomplete = false
   private(set) var loadingProjects = false
@@ -754,7 +756,7 @@ final class OesapModel {
       connectionState = .disconnected
       connectError = error.localizedDescription
       workspaceError =
-        "Reconnect failed. Your open thread and draft stay in this app while it is open. Try again when the host is reachable."
+        "Reconnect failed. Your open thread and draft stay in this app while it is open.\n\n\(error.localizedDescription)"
       await refreshSavedInstances()
       if connectionGeneration == generation { instanceError = error.localizedDescription }
     }
@@ -776,7 +778,7 @@ final class OesapModel {
     connectionState = .disconnected
     projects = []
     threads = []
-    messages = []
+    replaceMessages([])
     permissions = []
     loadingProjects = false
     loadingThreads = false
@@ -831,7 +833,7 @@ final class OesapModel {
     selectedThreadID = nil
     UserDefaults.standard.removeObject(forKey: Self.selectedThreadKey)
     threads = []
-    messages = []
+    replaceMessages([])
     permissions = []
     timelineHasOlder = false
     olderTimelineCursor = nil
@@ -852,7 +854,7 @@ final class OesapModel {
     threadSelectionGeneration += 1
     selectedThreadID = id
     UserDefaults.standard.set(id, forKey: Self.selectedThreadKey)
-    messages = []
+    replaceMessages([])
     timelineError = nil
     timelineHasOlder = false
     olderTimelineCursor = nil
@@ -1291,7 +1293,7 @@ final class OesapModel {
       intent = pending
     } else {
       guard let configuration = agentConfiguration(for: projectID) else {
-        messageError = "Set this project’s agent on this iPhone before starting a thread."
+        messageError = "Set this project’s agent on this device before starting a thread."
         return nil
       }
       intent = RemoteNewThreadIntent(
@@ -1550,7 +1552,7 @@ final class OesapModel {
           threadID: threadID, generation: generation,
           selectionGeneration: selectionGeneration)
       else { return }
-      messages = history.messages.map { imageOverlay($0, threadID: threadID) }
+      replaceMessages(history.messages.map { imageOverlay($0, threadID: threadID) })
       historyMayBeIncomplete = history.historyMayBeIncomplete
       timelineHasOlder = history.hasOlder
       olderTimelineCursor = history.olderCursor
@@ -1586,7 +1588,7 @@ final class OesapModel {
               threadID: threadID, generation: generation,
               selectionGeneration: selectionGeneration)
           else { return }
-          messages = refreshedHistory.messages.map { imageOverlay($0, threadID: threadID) }
+          replaceMessages(refreshedHistory.messages.map { imageOverlay($0, threadID: threadID) })
           historyMayBeIncomplete = refreshedHistory.historyMayBeIncomplete
           timelineHasOlder = refreshedHistory.hasOlder
           olderTimelineCursor = refreshedHistory.olderCursor
@@ -1634,7 +1636,7 @@ final class OesapModel {
         "The timeline connection ended. Reconnect to restore this history and its live updates. \(error.localizedDescription)"
       await markConnectionLost(
         generation: generation,
-        reason: "The Paseo host disconnected. Reconnect to continue.")
+        reason: "The timeline connection ended.\n\n\(error.localizedDescription)")
     }
     if isCurrentTimeline(
       threadID: threadID, generation: generation,
@@ -1669,9 +1671,9 @@ final class OesapModel {
           selectionGeneration: selectionGeneration)
       else { return }
       let knownIDs = Set(messages.map(\.id))
-      messages =
+      replaceMessages(
         older.messages.filter { !knownIDs.contains($0.id) }
-        .map { imageOverlay($0, threadID: threadID) } + messages
+          .map { imageOverlay($0, threadID: threadID) } + messages)
       timelineHasOlder = older.hasOlder
       olderTimelineCursor = older.olderCursor
       historyMayBeIncomplete = historyMayBeIncomplete || older.historyMayBeIncomplete
@@ -1723,7 +1725,7 @@ final class OesapModel {
         selectedProjectID = nil
         selectedThreadID = nil
         threads = []
-        messages = []
+        replaceMessages([])
         permissions = []
         return
       }
@@ -1737,7 +1739,7 @@ final class OesapModel {
         projectSelectionGeneration += 1
         threadSelectionGeneration += 1
         selectedThreadID = nil
-        messages = []
+        replaceMessages([])
       }
       selectedProjectID = nextProjectID
       UserDefaults.standard.set(nextProjectID, forKey: Self.selectedProjectKey)
@@ -1826,6 +1828,7 @@ final class OesapModel {
     if let transportError = error as? PaseoConnectionError {
       switch transportError {
       case .disconnected, .authenticationFailed, .encryptionFailed, .malformedFrame: return true
+      case .transportFailure: return true
       case .invalidEndpoint, .invalidPairingLink, .invalidDaemonKey, .unsupportedPairingVersion,
         .timedOut, .cancelled, .keychainFailure:
         return false
@@ -1964,7 +1967,7 @@ final class OesapModel {
       imageDrafts[threadID]?.removeAll { submittedImageIDs.contains($0.id) }
       if !intent.images.isEmpty {
         acceptedMessageImages[threadID, default: [:]][intent.messageID] = intent.images
-        messages = messages.map { imageOverlay($0, threadID: threadID) }
+        replaceMessages(messages.map { imageOverlay($0, threadID: threadID) })
       }
       agentSendFeedback[key] = RemoteAgentActionFeedback(
         phase: .accepted, message: "Message accepted by host.")
@@ -2019,18 +2022,29 @@ final class OesapModel {
     }
   }
 
+  private func replaceMessages(_ replacement: [RemoteMessage]) {
+    messages = replacement
+    messageIndices.removeAll(keepingCapacity: true)
+    for (index, message) in replacement.enumerated() {
+      // Preserve the existing first-match behavior for defensive handling of
+      // duplicate IDs in a host snapshot.
+      if messageIndices[message.id] == nil { messageIndices[message.id] = index }
+    }
+    timelineStructureRevision += 1
+  }
+
   private func appendMessage(_ message: RemoteMessage, cursor: RemoteTimelineCursor?, isDelta: Bool)
   {
     let message = selectedThreadID.map { imageOverlay(message, threadID: $0) } ?? message
     if let cursor, let latest = latestTimelineCursor, cursor.epoch == latest.epoch {
       if cursor.sequence < latest.sequence { return }
       if cursor.sequence == latest.sequence,
-        isDelta || !messages.contains(where: { $0.id == message.id })
+        isDelta || messageIndices[message.id] == nil
       {
         return
       }
     }
-    if let existingIndex = messages.firstIndex(where: { $0.id == message.id }) {
+    if let existingIndex = messageIndices[message.id] {
       if isDelta, message.toolCall == nil, messages[existingIndex].toolCall == nil {
         messages[existingIndex].text += message.text
       } else {
@@ -2041,7 +2055,9 @@ final class OesapModel {
         messages[existingIndex] = replacement
       }
     } else {
+      messageIndices[message.id] = messages.count
       messages.append(message)
+      timelineStructureRevision += 1
     }
     if let cursor { latestTimelineCursor = cursor }
   }
@@ -2177,6 +2193,7 @@ final class OesapModel {
     agentOverviewIsStale = !agentOverviewGroups.isEmpty
     agentOverviewRefreshGeneration += 1
     answeringPermissionID = nil
+    connectError = reason
     if replaceWorkspaceError { workspaceError = reason }
     await oldService?.disconnect()
     await refreshSavedInstances()
@@ -2200,7 +2217,7 @@ final class OesapModel {
 
     projects = []
     threads = []
-    messages = []
+    replaceMessages([])
     permissions = []
     loadingProjects = false
     loadingThreads = false

@@ -92,12 +92,7 @@ struct SettingsView: View {
 
       if let error = model.instanceError {
         Section {
-          Label {
-            Text(error).foregroundStyle(.primary)
-          } icon: {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-          }
-          .accessibilityIdentifier("instance-error")
+          ConnectionErrorNotice(message: error, identifier: "instance-error")
 
           if let activeID = model.activeInstanceID,
             let activeInstance = model.savedInstances.first(where: { $0.id == activeID })

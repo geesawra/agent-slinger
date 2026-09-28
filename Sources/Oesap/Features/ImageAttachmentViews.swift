@@ -1,6 +1,6 @@
+import CoreGraphics
 import MarkdownUI
 import SwiftUI
-import UIKit
 
 struct ImageAttachmentViewerItem: Identifiable {
   let id: String
@@ -29,6 +29,7 @@ struct ImageAttachmentThumbnail: View {
   var onRemove: (() -> Void)? = nil
 
   @State private var viewerItem: ImageAttachmentViewerItem?
+  @State private var preview: CGImage?
 
   var body: some View {
     ZStack(alignment: .topTrailing) {
@@ -37,8 +38,8 @@ struct ImageAttachmentThumbnail: View {
       } label: {
         GeometryReader { geometry in
           Group {
-            if let uiImage = UIImage(data: image.data) {
-              Image(uiImage: uiImage)
+            if let preview {
+              Image(decorative: preview, scale: 1)
                 .resizable()
                 .scaledToFill()
             } else {
@@ -74,7 +75,10 @@ struct ImageAttachmentThumbnail: View {
     }
     .frame(width: size.width, height: size.height)
     .contentShape(Rectangle())
-    .fullScreenCover(item: $viewerItem) { item in
+    .task(id: image.id) {
+      preview = try? await ImageDisplayDecoder.shared.decode(image.data, maximumPixelEdge: 384)
+    }
+    .appFullScreenCover(item: $viewerItem) { item in
       ImageAttachmentViewer(item: item)
     }
   }
@@ -108,11 +112,11 @@ struct ReceivedMarkdownInlineImageProvider: InlineImageProvider {
     guard let id = MarkdownImageActionPolicy.imageID(url),
       let source = imagesByID[id],
       let data = try? await loader.load(source: source.source),
-      let uiImage = await MainActor.run(body: { UIImage(data: data) })
+      let decoded = try? await ImageDisplayDecoder.shared.decode(data, maximumPixelEdge: 780)
     else {
       return Image(systemName: "photo")
     }
-    return await MainActor.run { Image(uiImage: uiImage) }
+    return Image(decorative: decoded, scale: 1)
   }
 }
 
@@ -138,7 +142,7 @@ private struct ReceivedMarkdownImageThumbnail: View {
   let loader: ReceivedImageLoader
   let onOpen: () -> Void
 
-  @State private var preview: UIImage?
+  @State private var preview: CGImage?
   @State private var failed = false
   @State private var reloadToken = 0
 
@@ -147,7 +151,7 @@ private struct ReceivedMarkdownImageThumbnail: View {
       Button(action: onOpen) {
         Group {
           if let preview {
-            Image(uiImage: preview)
+            Image(decorative: preview, scale: 1)
               .resizable()
               .scaledToFit()
           } else if failed {
@@ -179,7 +183,7 @@ private struct ReceivedMarkdownImageThumbnail: View {
       do {
         let data = try await loader.load(source: image.source)
         try Task.checkCancellation()
-        preview = await MainActor.run { UIImage(data: data) }
+        preview = try await ImageDisplayDecoder.shared.decode(data, maximumPixelEdge: 780)
         failed = preview == nil
       } catch is CancellationError {
         // The tile left the visible timeline.
@@ -195,7 +199,7 @@ struct ImageAttachmentViewer: View {
 
   @Environment(\.dismiss) private var dismiss
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @State private var image: UIImage?
+  @State private var image: CGImage?
   @State private var loadFailed = false
   @State private var retryToken = 0
   @State private var magnification = 1.0
@@ -208,7 +212,7 @@ struct ImageAttachmentViewer: View {
       Color.black.ignoresSafeArea()
 
       if let image {
-        Image(uiImage: image)
+        Image(decorative: image, scale: 1)
           .resizable()
           .scaledToFit()
           .scaleEffect(magnification)
@@ -303,7 +307,8 @@ struct ImageAttachmentViewer: View {
           throw ImageLoadError.invalidSource
         }
         try Task.checkCancellation()
-        image = await MainActor.run { UIImage(data: data) }
+        image = try await ImageDisplayDecoder.shared.decode(
+          data, maximumPixelEdge: RemoteImageLimits.maximumPixelEdge)
         loadFailed = image == nil
       } catch is CancellationError {
         // A dismissed viewer should not keep decoding or retaining image bytes.
@@ -324,6 +329,7 @@ struct ImageAttachmentViewer: View {
         .contentShape(Circle())
     }
     .accessibilityLabel("Close image")
+    .keyboardShortcut(.cancelAction)
 
     if #available(iOS 26.0, *) {
       button

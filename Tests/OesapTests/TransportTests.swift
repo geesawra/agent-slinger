@@ -12,6 +12,163 @@ final class TransportTests: XCTestCase {
   private let nonce = "c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0"
   private let ciphertext = "7e89308e4f560a28812d0318cab768a9eeb9f2a8fcd365c9cddc3ae9e6ffe1"
 
+  func testNetworkFailuresKeepSafeCodesAndActionableExplanations() {
+    let cases: [(Int, ConnectionFailure.Reason)] = [
+      (NSURLErrorCannotFindHost, .dns), (NSURLErrorCannotConnectToHost, .cannotConnect),
+      (NSURLErrorNotConnectedToInternet, .offline), (NSURLErrorSecureConnectionFailed, .tls),
+      (NSURLErrorAppTransportSecurityRequiresSecureConnection, .appTransportSecurity),
+      (NSURLErrorTimedOut, .timeout), (NSURLErrorNetworkConnectionLost, .connectionLost),
+      (NSURLErrorUserAuthenticationRequired, .authentication),
+    ]
+    for (code, reason) in cases {
+      let error = NSError(
+        domain: NSURLErrorDomain, code: code,
+        userInfo: [
+          NSLocalizedDescriptionKey: "secret-password at private.example:6767",
+          NSURLErrorFailingURLStringErrorKey: "wss://private.example/ws?serverId=secret-token",
+        ])
+      let failure = ConnectionFailure(error: error, phase: .connect)
+      XCTAssertEqual(failure.reason, reason)
+      XCTAssertEqual(failure.causes, [.init(domain: NSURLErrorDomain, code: code)])
+      XCTAssertFalse(failure.recoverySuggestion.isEmpty)
+      let presented = PaseoConnectionError.transportFailure(failure).localizedDescription
+      XCTAssertTrue(presented.contains(String(code)))
+      for secret in ["secret-password", "private.example", "secret-token", "wss://"] {
+        XCTAssertFalse(presented.contains(secret))
+      }
+    }
+  }
+
+  func testATSDenialDoesNotClaimTLSHandshakeFailure() {
+    let failure = ConnectionFailure(
+      error: URLError(.appTransportSecurityRequiresSecureConnection), phase: .connect)
+    XCTAssertEqual(failure.reason, .appTransportSecurity)
+    XCTAssertTrue(failure.summary.contains("blocked this unencrypted connection"))
+    XCTAssertFalse(failure.summary.contains("secure connection could not"))
+    XCTAssertTrue(failure.diagnosticDescription.contains("-1022"))
+  }
+
+  func testUnderlyingRefusalAndUnknownDomainsAreBoundedAndRedacted() {
+    let underlying = NSError(
+      domain: NSPOSIXErrorDomain, code: Int(ECONNREFUSED),
+      userInfo: [
+        NSLocalizedDescriptionKey: "Never expose this server response"
+      ])
+    let error = NSError(
+      domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost,
+      userInfo: [NSUnderlyingErrorKey: underlying])
+    let failure = ConnectionFailure(error: error, phase: .send)
+    XCTAssertEqual(failure.reason, .refused)
+    XCTAssertEqual(failure.causes.count, 2)
+    XCTAssertTrue(failure.diagnosticDescription.contains("NSPOSIXErrorDomain"))
+
+    var nested = NSError(domain: "password-domain", code: 99)
+    for _ in 0..<8 {
+      nested = NSError(
+        domain: "private-host-domain", code: 42, userInfo: [NSUnderlyingErrorKey: nested])
+    }
+    let unknown = ConnectionFailure(error: nested, phase: .receive)
+    XCTAssertEqual(unknown.reason, .unknown)
+    XCTAssertEqual(unknown.causes.count, 3)
+    XCTAssertFalse(unknown.diagnosticDescription.contains("private-host"))
+    XCTAssertFalse(unknown.diagnosticDescription.contains("password"))
+    XCTAssertTrue(unknown.summary.contains("did not provide a recognized cause"))
+  }
+
+  func testFailedUpgradeRetainsHTTPStatusAndDoesNotGuessASocketClose() async throws {
+    let config = try PaseoConnectionConfig.direct(endpoint: "fixture.invalid:6767", useTLS: true)
+    let socket = FakeSocket(pingError: URLError(.badServerResponse), httpStatus: 403)
+    let transport = PaseoTransport(config: config, socketFactory: { _ in socket })
+    do {
+      try await transport.connect()
+      XCTFail("Expected authentication failure")
+    } catch {
+      let failure = try XCTUnwrap((error as? PaseoConnectionError)?.connectionFailure)
+      XCTAssertEqual(failure.phase, .connect)
+      XCTAssertEqual(failure.reason, .authentication)
+      XCTAssertEqual(failure.httpStatus, 403)
+      XCTAssertNil(failure.webSocketCloseCode)
+      XCTAssertTrue(socket.cancelled)
+    }
+  }
+
+  func testSendAndReceiveFailuresKeepTheirPhaseAndCloseCode() async throws {
+    let config = try PaseoConnectionConfig.direct(endpoint: "fixture.invalid:6767", useTLS: true)
+    let sendSocket = FakeSocket(sendError: URLError(.networkConnectionLost))
+    let sender = PaseoTransport(config: config, socketFactory: { _ in sendSocket })
+    try await sender.connect()
+    do {
+      try await sender.send("private message must never appear in a diagnostic")
+      XCTFail("Expected send failure")
+    } catch {
+      let failure = try XCTUnwrap((error as? PaseoConnectionError)?.connectionFailure)
+      XCTAssertEqual(failure.phase, .send)
+      XCTAssertEqual(failure.reason, .connectionLost)
+      XCTAssertFalse(failure.diagnosticDescription.contains("private message"))
+    }
+    let receiveSocket = FakeSocket()
+    receiveSocket.fail(URLError(.networkConnectionLost), closeCode: 1006)
+    let receiver = PaseoTransport(config: config, socketFactory: { _ in receiveSocket })
+    try await receiver.connect()
+    do {
+      _ = try await receiver.receive()
+      XCTFail("Expected receive failure")
+    } catch {
+      let failure = try XCTUnwrap((error as? PaseoConnectionError)?.connectionFailure)
+      XCTAssertEqual(failure.phase, .receive)
+      XCTAssertEqual(failure.webSocketCloseCode, 1006)
+    }
+  }
+
+  func testRelayHandshakeFailureRetainsItsStage() async throws {
+    let config = PaseoConnectionConfig(
+      mode: .relay, endpoint: "fixture.invalid:443", useTLS: true, password: nil,
+      serverID: "synthetic", daemonPublicKeyBase64: Data(hex: daemonPublic).base64EncodedString())
+    let socket = FakeSocket(sendError: URLError(.networkConnectionLost))
+    let transport = PaseoTransport(config: config, socketFactory: { _ in socket })
+    do {
+      try await transport.connect()
+      XCTFail("Expected relay handshake failure")
+    } catch {
+      let failure = try XCTUnwrap((error as? PaseoConnectionError)?.connectionFailure)
+      XCTAssertEqual(failure.phase, .relayHandshake)
+      XCTAssertEqual(failure.reason, .connectionLost)
+      XCTAssertTrue(socket.cancelled)
+    }
+  }
+
+  func testUnexpectedHTTPUpgradeStatusRemainsDistinctFromAuthentication() {
+    for status in [200, 404, 502] {
+      let failure = ConnectionFailure(
+        error: URLError(.badServerResponse), phase: .connect,
+        metadata: .init(httpStatus: status))
+      XCTAssertEqual(failure.reason, .httpUpgrade)
+      XCTAssertTrue(failure.diagnosticDescription.contains("HTTP \(status)"))
+      XCTAssertFalse(failure.recoverySuggestion.contains("password"))
+    }
+  }
+
+  func testSocketCompletionCapturesSafeMetadataWithoutCloseReasonOrURL() {
+    let observer = PaseoSocketObserver()
+    observer.record(
+      httpStatus: 502, closeCode: 0,
+      error: NSError(
+        domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse,
+        userInfo: [
+          NSLocalizedDescriptionKey: "secret upstream response",
+          NSURLErrorFailingURLStringErrorKey: "https://private.example/",
+        ]))
+    let metadata = observer.snapshot
+    XCTAssertEqual(metadata.httpStatus, 502)
+    XCTAssertNil(metadata.closeCode)
+    XCTAssertEqual(
+      metadata.causes, [.init(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse)])
+    observer.record(httpStatus: nil, closeCode: 1008, error: nil)
+    XCTAssertEqual(observer.snapshot.closeCode, 1008)
+    observer.markCancelled()
+    XCTAssertTrue(observer.snapshot.wasCancelled)
+  }
+
   func testRelayCryptoMatchesUpstreamVectorAndRejectsTampering() throws {
     let daemonKey = Data(hex: daemonPublic).base64EncodedString()
     let crypto = try PaseoRelayCrypto(
@@ -151,7 +308,7 @@ final class TransportTests: XCTestCase {
 
   func testConnectTimeoutAndCallerCancellation() async throws {
     let config = try PaseoConnectionConfig.direct(endpoint: "localhost:6767", useTLS: false)
-    let stuck = FakeSocket(holdPing: true)
+    let stuck = FakeSocket(holdPing: true, recordCancelledCause: true)
     let timed = PaseoTransport(
       config: config, connectTimeout: .milliseconds(30),
       socketFactory: { _ in stuck })
@@ -231,9 +388,30 @@ private final class FakeSocket: PaseoSocket, @unchecked Sendable {
   private var wasCancelled = false
   private var code = 0
   private let holdPing: Bool
+  private let pingError: Error?
+  private let sendError: Error?
+  private let httpStatus: Int?
+  private let recordCancelledCause: Bool
   var onSend: ((URLSessionWebSocketTask.Message) -> Void)?
 
-  init(holdPing: Bool = false) { self.holdPing = holdPing }
+  init(
+    holdPing: Bool = false, pingError: Error? = nil, sendError: Error? = nil,
+    httpStatus: Int? = nil,
+    recordCancelledCause: Bool = false
+  ) {
+    self.holdPing = holdPing
+    self.pingError = pingError
+    self.sendError = sendError
+    self.httpStatus = httpStatus
+    self.recordCancelledCause = recordCancelledCause
+  }
+  var failureMetadata: PaseoSocketFailureMetadata {
+    .init(
+      httpStatus: httpStatus, closeCode: closeCode,
+      causes: recordCancelledCause
+        ? [.init(domain: NSURLErrorDomain, code: NSURLErrorCancelled)] : [],
+      wasCancelled: recordCancelledCause)
+  }
   var closeCode: Int {
     lock.lock()
     defer { lock.unlock() }
@@ -256,10 +434,11 @@ private final class FakeSocket: PaseoSocket, @unchecked Sendable {
       pingCompletion = completion
       lock.unlock()
     } else {
-      completion(nil)
+      completion(pingError)
     }
   }
   func send(_ message: URLSessionWebSocketTask.Message) async throws {
+    if let sendError { throw sendError }
     let onSend = recordSend(message)
     onSend?(message)
   }

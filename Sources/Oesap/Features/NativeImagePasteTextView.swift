@@ -28,6 +28,9 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     textView.pasteImage = { [weak coordinator = context.coordinator] in
       coordinator?.pasteImageFromClipboard() ?? false
     }
+    textView.submitMessage = { [weak coordinator = context.coordinator] in
+      coordinator?.submitFromKeyboard()
+    }
     textView.onLayout = { [weak coordinator = context.coordinator] view in
       coordinator?.updateCompactVerticalInset(on: view)
       coordinator?.requestExpansionMeasurement(on: view)
@@ -376,10 +379,17 @@ struct NativeImagePasteTextView: UIViewRepresentable {
       requestExpansionMeasurement(on: textView)
     }
 
+    func submitFromKeyboard() {
+      guard parent.canSubmit else { return }
+      parent.onSubmit()
+    }
+
     func textView(
       _ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String
     ) -> Bool {
-      guard !parent.isExpanded, text == "\n" else { return true }
+      guard !parent.isExpanded, text == "\n", textView.markedTextRange == nil,
+        (textView as? ImagePasteTextView)?.isInsertingLineBreak != true
+      else { return true }
       if parent.canSubmit {
         parent.onSubmit()
       }
@@ -421,8 +431,34 @@ struct NativeImagePasteTextView: UIViewRepresentable {
 /// Handle image data only after the user invokes the system Paste action.
 /// Ordinary text pastes keep UITextView's native editing path.
 @MainActor
-private final class ImagePasteTextView: UITextView {
+final class ImagePasteTextView: UITextView {
   var pasteImage: (() -> Bool)?
+  var submitMessage: (() -> Void)?
+  private(set) var isInsertingLineBreak = false
+
+  override var keyCommands: [UIKeyCommand]? {
+    guard markedTextRange == nil else { return super.keyCommands }
+    let send = UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(sendMessage))
+    send.discoverabilityTitle = "Send Message"
+    send.wantsPriorityOverSystemBehavior = true
+    let newline = UIKeyCommand(
+      input: "\r", modifierFlags: .shift, action: #selector(insertMessageLineBreak))
+    newline.discoverabilityTitle = "New Line"
+    newline.wantsPriorityOverSystemBehavior = true
+    return [send, newline] + (super.keyCommands ?? [])
+  }
+
+  @objc private func sendMessage() {
+    guard markedTextRange == nil else { return }
+    submitMessage?()
+  }
+
+  @objc private func insertMessageLineBreak() {
+    guard markedTextRange == nil else { return }
+    isInsertingLineBreak = true
+    defer { isInsertingLineBreak = false }
+    insertText("\n")
+  }
   var onLayout: ((UITextView) -> Void)?
 
   override func layoutSubviews() {

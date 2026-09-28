@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ConnectionSetupView: View {
   @Bindable var model: OesapModel
@@ -117,12 +118,7 @@ struct ConnectionSetupView: View {
 
       if let error = model.connectError {
         Section {
-          Label {
-            Text(error).foregroundStyle(.primary)
-          } icon: {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-          }
-          .accessibilityIdentifier("connection-error")
+          ConnectionErrorNotice(message: error, identifier: "connection-error")
         }
       }
 
@@ -205,4 +201,31 @@ struct ConnectionSetupView: View {
     return "Reconnect \(name)"
   }
 
+}
+
+/// Connection diagnostics are sanitized at the transport boundary before display.
+/// Copying is an explicit action; no clipboard contents are read.
+struct ConnectionErrorNotice: View {
+  let message: String
+  let identifier: String
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Label {
+        Text(message)
+          .foregroundStyle(.primary)
+          .fixedSize(horizontal: false, vertical: true)
+          .textSelection(.enabled)
+      } icon: {
+        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+      }
+      .accessibilityIdentifier(identifier)
+
+      Button("Copy details", systemImage: "doc.on.doc") {
+        UIPasteboard.general.string = message
+      }
+      .buttonStyle(.borderless)
+      .accessibilityIdentifier("\(identifier)-copy")
+    }
+  }
 }

@@ -12,6 +12,20 @@ final class FeatureStateTests: XCTestCase {
     UserDefaults.standard.removeObject(forKey: "selectedThreadID")
   }
 
+  func testBundledATSLimitsPlaintextIPExceptionToTailscaleRange() throws {
+    let ats = try XCTUnwrap(
+      Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Any])
+    XCTAssertNotEqual(ats["NSAllowsArbitraryLoads"] as? Bool, true)
+    let exceptions = try XCTUnwrap(ats["NSExceptionDomains"] as? [String: [String: Any]])
+    XCTAssertEqual(Set(exceptions.keys), ["100.64.0.0/10"])
+    let tailscale = try XCTUnwrap(exceptions["100.64.0.0/10"])
+    XCTAssertEqual(tailscale["NSExceptionAllowsInsecureHTTPLoads"] as? Bool, true)
+    XCTAssertNil(tailscale["NSExceptionMinimumTLSVersion"])
+    XCTAssertNil(tailscale["NSExceptionRequiresForwardSecrecy"])
+    XCTAssertTrue(
+      RemoteConnection.empty.usesTLS, "ATS permission must not change the user's TLS choice.")
+  }
+
   func testDraftChangeInvalidatesViewObservation() async {
     let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: []))
     let changed = expectation(description: "A view reading the draft is invalidated")
@@ -1374,6 +1388,59 @@ final class FeatureStateTests: XCTestCase {
     return AgentConfigurationStore(defaults: defaults)
   }
 
+  func testConnectionFailurePreservesActionableDiagnostics() async {
+    let detail =
+      "The host could not be reached. Check the host address and VPN. [connect; NSURLErrorDomain:-1004]"
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [], connectError: .connectionLost(detail)))
+
+    await model.connect(.empty)
+
+    XCTAssertEqual(model.connectionState, .disconnected)
+    XCTAssertEqual(model.connectError, detail)
+    XCTAssertEqual(model.instanceError, detail)
+  }
+
+  func testReconnectFailureKeepsDiagnosticsInWorkspaceAndPreservesDraft() async {
+    let detail =
+      "TLS verification failed. Check the host certificate. [connect; NSURLErrorDomain:-1202]"
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [FakeRemoteService()], reconnectError: .connectionLost(detail)))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    model.setDraft("Keep my draft", for: "thread-A")
+
+    await model.reconnect()
+
+    XCTAssertEqual(model.connectionState, .disconnected)
+    XCTAssertEqual(model.connectError, detail)
+    XCTAssertTrue(model.workspaceError?.contains(detail) == true)
+    XCTAssertEqual(model.draft(for: "thread-A"), "Keep my draft")
+    await model.disconnect()
+  }
+
+  func testTimelineFailureRetainsSourceDiagnosticWithoutConnectionEvent() async {
+    let detail =
+      "Network interrupted. Reconnect. Phase: receive · Cause: connectionLost · NSURLErrorDomain -1005"
+    let service = FakeRemoteService()
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let watch = Task { await model.watchTimeline(threadID: "thread-A") }
+    let subscribed = await eventually { await service.subscriptionCount() == 1 }
+    XCTAssertTrue(subscribed)
+
+    await service.failTimeline(.connectionLost(detail))
+    let disconnected = await eventually { model.connectionState == .disconnected }
+    XCTAssertTrue(disconnected)
+    XCTAssertTrue(model.connectError?.contains(detail) == true)
+    XCTAssertTrue(model.workspaceError?.contains(detail) == true)
+    await watch.value
+    await model.disconnect()
+  }
+
   func testEmptyAndFailedProjectLoadsHaveDistinctStates() async throws {
     let empty = FakeRemoteService(projects: [])
     let emptyModel = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [empty]))
@@ -1448,6 +1515,8 @@ final class FeatureStateTests: XCTestCase {
     let firstReleased = await eventually { await first.subscriptionCount() == 0 }
     XCTAssertTrue(disconnected)
     XCTAssertTrue(firstReleased)
+    XCTAssertTrue(model.connectError?.contains("fixture loss") == true)
+    XCTAssertTrue(model.workspaceError?.contains("fixture loss") == true)
     await firstWatch.value
 
     await model.reconnect()
@@ -1459,6 +1528,50 @@ final class FeatureStateTests: XCTestCase {
     let secondReleased = await eventually { await second.subscriptionCount() == 0 }
     XCTAssertTrue(secondReleased)
     await secondWatch.value
+  }
+
+  func testLargeTimelineDeltasPreserveRowsAndDoNotInvalidateStructure() async throws {
+    let history = (0..<1_000).map { index in
+      RemoteMessage(id: "row-\(index)", author: .agent, text: "Message \(index)", timestamp: nil)
+    }
+    let service = FakeRemoteService(
+      historyMessages: history,
+      olderMessages: [.init(id: "older", author: .agent, text: "Earlier", timestamp: nil)])
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    let watching = Task { await model.watchTimeline(threadID: "thread-A") }
+    let loaded = await eventually { model.messages.count == 1_000 && !model.loadingHistory }
+    XCTAssertTrue(loaded)
+    let structureRevision = model.timelineStructureRevision
+
+    for sequence in 6..<1_006 {
+      await service.emit(
+        .message(
+          .init(id: "row-999", author: .agent, text: ".", timestamp: nil),
+          cursor: .init(epoch: "e1", sequence: sequence), isDelta: true))
+    }
+    let streamed = await eventually {
+      model.messages.last?.text.count == "Message 999".count + 1_000
+    }
+    XCTAssertTrue(streamed)
+    XCTAssertEqual(model.timelineStructureRevision, structureRevision)
+    XCTAssertEqual(Array(model.messages.dropLast()), Array(history.dropLast()))
+
+    await model.loadOlderMessages(threadID: "thread-A")
+    XCTAssertEqual(model.messages.count, 1_001)
+    XCTAssertGreaterThan(model.timelineStructureRevision, structureRevision)
+    await service.emit(
+      .message(
+        .init(id: "row-0", author: .agent, text: " updated", timestamp: nil),
+        cursor: .init(epoch: "e1", sequence: 1_006), isDelta: true))
+    let updatedAfterPrepend = await eventually { model.messages[1].text == "Message 0 updated" }
+    XCTAssertTrue(updatedAfterPrepend, "History insertion must rebuild the message lookup")
+    XCTAssertEqual(model.messages.first?.text, "Earlier")
+
+    await model.disconnect()
+    await watching.value
+    XCTAssertTrue(model.messages.isEmpty)
   }
 
   func testSnapshotWatermarkAndLiveDeltaMerge() async throws {
@@ -1638,6 +1751,8 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
   private var connectServices: [FakeRemoteService]
   private var reconnectServices: [FakeRemoteService]
   private let connectGate: TestGate?
+  private let connectError: RemoteServiceError?
+  private let reconnectError: RemoteServiceError?
   private var active: FakeRemoteService?
   private var savedInstances: [SavedPaseoInstance]
   private var currentInstanceID: String?
@@ -1649,7 +1764,8 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
     connectServices: [FakeRemoteService], reconnectServices: [FakeRemoteService] = [],
     connectGate: TestGate? = nil, initiallySaved: Bool = false,
     initiallySavedInstances: [SavedPaseoInstance] = [], activeInstanceID: String? = nil,
-    instanceServices: [String: FakeRemoteService] = [:]
+    instanceServices: [String: FakeRemoteService] = [:],
+    connectError: RemoteServiceError? = nil, reconnectError: RemoteServiceError? = nil
   ) {
     let instances =
       initiallySaved && initiallySavedInstances.isEmpty
@@ -1661,6 +1777,8 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
     self.connectServices = connectServices
     self.reconnectServices = reconnectServices
     self.connectGate = connectGate
+    self.connectError = connectError
+    self.reconnectError = reconnectError
     self.savedInstances = instances
     self.currentInstanceID = currentID
     self.instanceServices = instanceServices
@@ -1703,6 +1821,7 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
   func connect(_ connection: RemoteConnection) async throws -> any OesapRemoteService {
     generation += 1
     let attempt = generation
+    if let connectError { throw connectError }
     let service = connectServices.removeFirst()
     await connectGate?.wait()
     if Task.isCancelled || attempt != generation {
@@ -1724,6 +1843,7 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
 
   func reconnect() async throws -> any OesapRemoteService {
     generation += 1
+    if let reconnectError { throw reconnectError }
     let service = reconnectServices.removeFirst()
     await active?.disconnect()
     active = service
@@ -2130,6 +2250,9 @@ private actor FakeRemoteService: OesapRemoteService {
   func isClosed() -> Bool { closed }
   func emit(_ update: RemoteTimelineUpdate) {
     for continuation in timelineContinuations.values { continuation.yield(update) }
+  }
+  func failTimeline(_ error: RemoteServiceError) {
+    for continuation in timelineContinuations.values { continuation.finish(throwing: error) }
   }
   func emitDisconnect(_ reason: String) {
     if let connectionContinuation {

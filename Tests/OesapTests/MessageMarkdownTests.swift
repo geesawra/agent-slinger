@@ -5,6 +5,141 @@ import XCTest
 @testable import Oesap
 
 final class MessageMarkdownTests: XCTestCase {
+  func testLegacyTimelineFollowsRenderedGrowthOnlyWhilePinned() {
+    let pinned = CGRect(x: 0, y: -1_000, width: 400, height: 2_000)
+    let grown = CGRect(x: 0, y: -1_000, width: 400, height: 2_200)
+    let following = TimelineScrollFollowPolicy.evaluate(
+      previousFrame: pinned, frame: grown, viewportHeight: 1_000, wasFollowing: true)
+    XCTAssertTrue(following.isNearBottom)
+    XCTAssertTrue(
+      following.shouldFollowContent,
+      "A delayed Markdown layout must keep a previously pinned reader at the bottom")
+
+    let readingEarlier = TimelineScrollFollowPolicy.evaluate(
+      previousFrame: CGRect(x: 0, y: -700, width: 400, height: 2_000),
+      frame: CGRect(x: 0, y: -700, width: 400, height: 2_200),
+      viewportHeight: 1_000, wasFollowing: false)
+    XCTAssertFalse(readingEarlier.isNearBottom)
+    XCTAssertFalse(readingEarlier.shouldFollowContent)
+  }
+
+  func testLegacyTimelineRespectsScrollAwayEvenWhenContentAlsoGrows() {
+    let pinned = CGRect(x: 0, y: -1_000, width: 400, height: 2_000)
+    let scrolledAndGrown = CGRect(x: 0, y: -700, width: 400, height: 2_200)
+    let decision = TimelineScrollFollowPolicy.evaluate(
+      previousFrame: pinned, frame: scrolledAndGrown, viewportHeight: 1_000, wasFollowing: true)
+    XCTAssertFalse(decision.isNearBottom)
+    XCTAssertFalse(decision.shouldFollowContent)
+
+    let initial = TimelineScrollFollowPolicy.evaluate(
+      previousFrame: nil, frame: pinned, viewportHeight: 1_000, wasFollowing: true)
+    XCTAssertFalse(
+      initial.shouldFollowContent, "Initial positioning is handled once by history loading")
+  }
+
+  func testOrdinaryMarkdownSkipsImageRewriteWithoutChangingSource() {
+    let source = "# Heading\n\n- **bold**\n- `code`\n\n[link](https://example.com)"
+    let transformed = MarkdownImageTransformer.transform(source)
+    XCTAssertEqual(transformed.markdown, source)
+    XCTAssertTrue(transformed.imagesByID.isEmpty)
+
+    let codeOnly = "`![literal](https://example.com/image.png)`"
+    XCTAssertEqual(MarkdownImageTransformer.transform(codeOnly).markdown, codeOnly)
+  }
+
+  func testParsedMessagesAreReusedAndStreamingReplacesOneCacheEntry() async throws {
+    let parser = MessageMarkdownContentParser(maximumEntries: 4, maximumSourceBytes: 4_096)
+    let first = try await parser.parse("**first**", cacheKey: "row")
+    let reused = try await parser.parse("**first**", cacheKey: "row")
+    XCTAssertEqual(first.content.renderHTML(), reused.content.renderHTML())
+    var parseCount = await parser.parseCount
+    XCTAssertEqual(parseCount, 1, "Reappearing rows should reuse their parsed tree")
+
+    for index in 0..<100 {
+      _ = try await parser.parse("**stream snapshot \(index)**", cacheKey: "row")
+    }
+    let entryCount = await parser.cachedEntryCount
+    let byteCount = await parser.cachedSourceBytes
+    parseCount = await parser.parseCount
+    XCTAssertEqual(entryCount, 1, "Old token snapshots must not accumulate in the cache")
+    XCTAssertEqual(byteCount, "**stream snapshot 99**".utf8.count)
+    XCTAssertEqual(parseCount, 101)
+  }
+
+  func testMarkdownCacheEvictsLeastRecentAndHonorsByteBudget() async throws {
+    let parser = MessageMarkdownContentParser(maximumEntries: 2, maximumSourceBytes: 10)
+    _ = try await parser.parse("first", cacheKey: "A")
+    _ = try await parser.parse("next", cacheKey: "B")
+    _ = try await parser.parse("first", cacheKey: "A")
+    _ = try await parser.parse("third", cacheKey: "C")
+    _ = try await parser.parse("first", cacheKey: "A")
+    var count = await parser.parseCount
+    XCTAssertEqual(count, 3, "Reading A should keep it ahead of B for eviction")
+    _ = try await parser.parse("next", cacheKey: "B")
+    count = await parser.parseCount
+    XCTAssertEqual(count, 4, "The least recently read row should have been evicted")
+    let bytes = await parser.cachedSourceBytes
+    let entries = await parser.cachedEntryCount
+    XCTAssertLessThanOrEqual(bytes, 10)
+    XCTAssertLessThanOrEqual(entries, 2)
+
+    _ = try await parser.parse(String(repeating: "large ", count: 100), cacheKey: "large")
+    let afterLargeBytes = await parser.cachedSourceBytes
+    XCTAssertEqual(afterLargeBytes, bytes, "Oversized content renders without entering the cache")
+  }
+
+  @MainActor
+  func testContinuousSourceUpdatesPublishBeforeStreamFinishes() async throws {
+    let parser = MessageMarkdownContentParser()
+    let renderer = MessageMarkdownRenderer(source: "# Initial") { source, key in
+      // Deliberately slower than the 1ms incoming update interval.
+      try await Task.sleep(for: .milliseconds(40))
+      return try await parser.parse(source, cacheKey: key)
+    }
+    let worker = Task { await renderer.run(cacheKey: "stream") }
+    defer { worker.cancel() }
+    var producerFinished = false
+    let producer = Task {
+      for index in 0..<300 {
+        renderer.update(source: "# Snapshot \(index)\n\n**Streaming** content")
+        try await Task.sleep(for: .milliseconds(1))
+      }
+      producerFinished = true
+    }
+    for _ in 0..<100 where renderer.result == nil && !producerFinished {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTAssertNotNil(renderer.result)
+    XCTAssertFalse(producerFinished, "A sustained stream must render before its final token")
+    try await producer.value
+    for _ in 0..<100 where renderer.renderedSource != "# Snapshot 299\n\n**Streaming** content" {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTAssertEqual(renderer.renderedSource, "# Snapshot 299\n\n**Streaming** content")
+    let count = await parser.parseCount
+    XCTAssertLessThan(count, 20, "Superseded source snapshots must be coalesced")
+    worker.cancel()
+    await worker.value
+  }
+
+  @MainActor
+  func testDisappearingMessageCancelsPendingParseWithoutPublishing() async throws {
+    let parser = MessageMarkdownContentParser()
+    let started = expectation(description: "Parser started")
+    let renderer = MessageMarkdownRenderer(source: "cancelled") { source, key in
+      started.fulfill()
+      try await Task.sleep(for: .seconds(10))
+      return try await parser.parse(source, cacheKey: key)
+    }
+    let worker = Task { await renderer.run(cacheKey: "row") }
+    await fulfillment(of: [started], timeout: 1)
+    worker.cancel()
+    await worker.value
+    XCTAssertNil(renderer.result)
+    let count = await parser.parseCount
+    XCTAssertEqual(count, 0)
+  }
+
   func testMarkdownUIParsesHeadingsListsCodeEmphasisAndLinks() {
     let source = """
       # Build the chat

@@ -190,6 +190,28 @@ final class OesapUITests: XCTestCase {
       .firstMatch.waitForExistence(timeout: 5))
   }
 
+  func testLocalConnectionFailureShowsSafeTechnicalDetails() {
+    // No demo factory: exercise URLSession, transport, protocol, adapter and UI.
+    // The reserved local port cannot reach a remote host or save credentials.
+    let app = launchDemo(arguments: [])
+    enterEndpoint(app, endpoint: "127.0.0.1:1")
+    let tls = app.switches["Use TLS"]
+    XCTAssertTrue(scrollUntilHittable(tls, in: app))
+    if tls.value as? String == "1" { tls.tap() }
+    let connect = app.buttons["connect-button"]
+    XCTAssertTrue(scrollUntilHittable(connect, in: app))
+    connect.tap()
+
+    XCTAssertTrue(app.descendants(matching: .any)["connection-error"].waitForExistence(timeout: 15))
+    let diagnostics = app.staticTexts.matching(
+      NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Phase:", "Cause:")
+    ).firstMatch
+    XCTAssertTrue(diagnostics.waitForExistence(timeout: 5))
+    XCTAssertFalse(diagnostics.label.contains("127.0.0.1"))
+    XCTAssertTrue(app.buttons["connection-error-copy"].exists)
+    attachScreenshot(named: "Local connection failure diagnostics")
+  }
+
   func testEmptyProjectsHaveAnExplicitEmptyState() {
     let app = launchDemo(arguments: ["--demo-empty"])
     enterEndpoint(app)

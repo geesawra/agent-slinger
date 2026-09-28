@@ -9,8 +9,16 @@ private actor FixturePaseoTransport: PaseoFrameTransport {
   private var outbound: [String] = []
   private var outboundWaiters: [CheckedContinuation<String, Error>] = []
   private var closed = false
+  private var receiveFailure: Error?
+  private let connectError: Error?
 
-  func connect() async throws { closed = false }
+  init(connectError: Error? = nil) { self.connectError = connectError }
+
+  func connect() async throws {
+    if let connectError { throw connectError }
+    closed = false
+    receiveFailure = nil
+  }
 
   func send(_ text: String) async throws {
     if closed { throw FixtureTransportError.closed }
@@ -22,6 +30,7 @@ private actor FixturePaseoTransport: PaseoFrameTransport {
   }
 
   func receive() async throws -> String {
+    if let receiveFailure { throw receiveFailure }
     if !inbound.isEmpty { return inbound.removeFirst() }
     if closed { throw FixtureTransportError.closed }
     return try await withCheckedThrowingContinuation { inboundWaiters.append($0) }
@@ -50,6 +59,13 @@ private actor FixturePaseoTransport: PaseoFrameTransport {
     }
   }
 
+  func failReceiving(_ error: Error) {
+    receiveFailure = error
+    let waiters = inboundWaiters
+    inboundWaiters.removeAll()
+    for waiter in waiters { waiter.resume(throwing: error) }
+  }
+
   func nextSent() async throws -> String {
     if !outbound.isEmpty { return outbound.removeFirst() }
     if closed { throw FixtureTransportError.closed }
@@ -62,6 +78,96 @@ private enum FixtureTransportError: Error {
 }
 
 final class ProtocolClientTests: XCTestCase {
+  func testIdleConnectionLossPublishesTypedSafeDiagnostic() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(client, transport: transport)
+    var events = await client.connectionEvents().makeAsyncIterator()
+    _ = await events.next()
+    await transport.failReceiving(PaseoConnectionError.authenticationFailed)
+    let failure = await events.next()
+    XCTAssertEqual(
+      failure, .failed(reason: PaseoConnectionError.authenticationFailed.localizedDescription))
+    // Late observers need the same explanation after an idle receive fails.
+    var lateEvents = await client.connectionEvents().makeAsyncIterator()
+    let retained = await lateEvents.next()
+    XCTAssertEqual(retained, failure)
+    await client.disconnect()
+  }
+
+  func testHelloReceiveFailureRetainsOriginalTransportError() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    let connecting = Task { try await client.connect() }
+    _ = try await transport.nextSent()
+    await transport.failReceiving(PaseoConnectionError.timedOut)
+    do {
+      _ = try await connecting.value
+      XCTFail("The interrupted hello must fail")
+    } catch let error as PaseoConnectionError {
+      XCTAssertEqual(error, .timedOut)
+    }
+    var events = await client.connectionEvents().makeAsyncIterator()
+    let state = await events.next()
+    XCTAssertEqual(state, .failed(reason: PaseoConnectionError.timedOut.localizedDescription))
+    await client.disconnect()
+  }
+
+  func testMalformedHelloRetainsProtocolErrorInsteadOfTransportWrapper() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    let connecting = Task { try await client.connect() }
+    _ = try await transport.nextSent()
+    await transport.push("not a JSON frame")
+    do {
+      _ = try await connecting.value
+      XCTFail("Malformed hello must fail")
+    } catch let error as PaseoProtocolError {
+      XCTAssertEqual(error, .malformedMessage("invalid WebSocket envelope"))
+    }
+    await client.disconnect()
+  }
+
+  func testConnectFailurePublishesDiagnosticButExplicitCloseDoesNot() async throws {
+    let failedTransport = FixturePaseoTransport(
+      connectError: PaseoConnectionError.authenticationFailed)
+    let failedClient = PaseoProtocolClient(transport: failedTransport)
+    do {
+      _ = try await failedClient.connect()
+      XCTFail("Expected the connection error")
+    } catch let error as PaseoConnectionError {
+      XCTAssertEqual(error, .authenticationFailed)
+    }
+    var failureEvents = await failedClient.connectionEvents().makeAsyncIterator()
+    let failure = await failureEvents.next()
+    XCTAssertEqual(
+      failure, .failed(reason: PaseoConnectionError.authenticationFailed.localizedDescription))
+
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(client, transport: transport)
+    var events = await client.connectionEvents().makeAsyncIterator()
+    _ = await events.next()
+    await client.disconnect()
+    let closed = await events.next()
+    XCTAssertEqual(closed, .disconnected)
+  }
+
+  func testUnknownIdleFailureDoesNotExposeFoundationErrorDetails() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(client, transport: transport)
+    var events = await client.connectionEvents().makeAsyncIterator()
+    _ = await events.next()
+    await transport.failReceiving(
+      NSError(
+        domain: "fixture", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "wss://user:secret@private.example/path"]))
+    let failure = await events.next()
+    XCTAssertEqual(failure, .failed(reason: "The Paseo connection ended unexpectedly."))
+    await client.disconnect()
+  }
+
   func testProviderSnapshotAndIdempotentCreateWithInitialPrompt() async throws {
     let transport = FixturePaseoTransport()
     let client = PaseoProtocolClient(transport: transport, clientID: "oesap-create-fixture")

@@ -14,121 +14,80 @@ enum OesapRoute: Hashable {
 struct WorkspaceRootView: View {
   @Bindable var model: OesapModel
   @State private var path: [OesapRoute] = []
+  @State private var splitProjectID: String?
+  @State private var detailRoute: OesapRoute?
+  @State private var presentedRoute: OesapRoute?
+  @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
+  @State private var columnVisibility: NavigationSplitViewVisibility = .all
   @State private var confirmsDisconnect = false
   @State private var observedInstanceID: String?
 
+  private var usesSplitNavigation: Bool {
+    #if targetEnvironment(macCatalyst)
+      true
+    #else
+      UIDevice.current.userInterfaceIdiom == .pad
+    #endif
+  }
+
+  private var hasWorkspace: Bool {
+    model.connectionState == .connected || !model.projects.isEmpty || model.workspaceError != nil
+  }
+
   var body: some View {
-    NavigationStack(path: $path) {
-      Group {
-        if model.connectionState == .connected || !model.projects.isEmpty
-          || model.workspaceError != nil
-        {
-          ProjectListView(
-            model: model,
-            onOpenAgentOverview: { path.append(.agentOverview) }
-          ) { project in
-            Task {
-              await model.selectProject(project.id)
-              path.append(.project(project.id))
+    Group {
+      if usesSplitNavigation && hasWorkspace {
+        splitNavigation
+      } else {
+        compactNavigation
+      }
+    }
+    .focusedSceneValue(
+      \.workspaceActions,
+      WorkspaceActions(
+        canCreateThread: hasWorkspace && model.selectedProjectID != nil
+          && (!usesSplitNavigation || splitProjectID == model.selectedProjectID)
+          && model.connectionState == .connected,
+        newThread: {
+          guard let id = model.selectedProjectID else { return }
+          open(.newChat(id))
+        },
+        refresh: { Task { await model.refreshWorkspace() } },
+        settings: { open(.settings) }
+      )
+    )
+    .sheet(item: $presentedRoute) { route in
+      NavigationStack {
+        destination(route)
+          .navigationDestination(for: OesapRoute.self) { destination($0) }
+          .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+              Button("Done") { presentedRoute = nil }
             }
           }
-        } else {
-          ConnectionSetupView(model: model, onOpenSettings: { path.append(.settings) })
-        }
       }
-      .toolbar {
-        if model.connectionState == .connected || !model.projects.isEmpty
-          || model.workspaceError != nil
-        {
-          ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-              Button("Usage", systemImage: "chart.bar") {
-                path.append(.usage)
-              }
-              .accessibilityIdentifier("host-usage-button")
-
-              Button("Settings", systemImage: "gearshape") {
-                path.append(.settings)
-              }
-              .accessibilityIdentifier("settings-button")
-
-              Divider()
-
-              Button("Reconnect", systemImage: "arrow.clockwise") {
-                Task { await model.reconnect() }
-              }
-              .disabled(model.connectionState.isBusy)
-
-              Button("Disconnect", systemImage: "xmark.circle", role: .destructive) {
-                confirmsDisconnect = true
-              }
-            } label: {
-              Image(systemName: "ellipsis.circle")
-                .accessibilityLabel("Connection options")
-            }
-            .accessibilityIdentifier("connection-options")
-          }
-        }
-      }
-      .navigationDestination(for: OesapRoute.self) { route in
-        switch route {
-        case .agentOverview:
-          AgentOverviewView(model: model) { threadID in
-            path.append(.chat(threadID))
-          }
-        case .usage:
-          ProviderUsageView(model: model)
-        case .settings:
-          SettingsView(
-            model: model,
-            onAddInstance: { path.append(.addInstance) },
-            onSelected: { path.removeAll() }
-          )
-        case .addInstance:
-          ConnectionSetupView(
-            model: model,
-            title: "Add Paseo instance",
-            showsReconnectAction: false,
-            onConnected: { path.removeAll() }
-          )
-        case .project(let id):
-          ThreadListView(
-            model: model,
-            projectID: id,
-            onNewThread: { path.append(.newChat(id)) },
-            onOpenAgent: { path.append(.agentConfiguration(id)) }
-          ) { thread in
-            model.selectThread(thread.id)
-            path.append(.chat(thread.id))
-          }
-        case .chat(let id):
-          ChatView(model: model, threadID: id)
-        case .newChat(let projectID):
-          NewChatView(
-            model: model,
-            projectID: projectID,
-            onOpenAgent: { path.append(.agentConfiguration(projectID)) },
-            onCreated: { threadID in
-              guard path.last == .newChat(projectID) else { return }
-              path.removeLast()
-              path.append(.chat(threadID))
-            }
-          )
-        case .agentConfiguration(let projectID):
-          AgentConfigurationView(model: model, projectID: projectID)
-        }
-      }
+      #if targetEnvironment(macCatalyst)
+        .frame(minWidth: 480, idealWidth: 580, minHeight: 480, idealHeight: 650)
+      #endif
     }
     .onChange(of: model.activeInstanceID) { _, newValue in
       guard newValue != observedInstanceID else { return }
       observedInstanceID = newValue
-      // Keep the selector visible when its active instance changes, so a
-      // failed switch remains actionable. All workspace routes are stale.
-      if path.contains(.settings) {
-        path = [.settings]
-      } else {
-        path.removeAll()
-      }
+      resetWorkspaceNavigation()
+      // Keep Settings visible when switching fails, so the connection stays actionable.
+      if path.contains(.settings) { path = [.settings] } else { path.removeAll() }
+    }
+    .onChange(of: model.projects.map(\.id)) { _, projectIDs in
+      guard let splitProjectID, !projectIDs.contains(splitProjectID) else { return }
+      resetWorkspaceNavigation()
+    }
+    .onChange(of: model.selectedThreadID) { _, threadID in
+      guard case .chat(let displayedThreadID) = detailRoute,
+        displayedThreadID != threadID
+      else { return }
+      // A workspace refresh may remove the displayed remote thread.
+      detailRoute = nil
+      preferredCompactColumn = .content
     }
     .task {
       observedInstanceID = model.activeInstanceID
@@ -140,6 +99,7 @@ struct WorkspaceRootView: View {
       Button("Disconnect", role: .destructive) {
         Task {
           await model.disconnect()
+          resetWorkspaceNavigation()
           path.removeAll()
         }
       }
@@ -151,26 +111,270 @@ struct WorkspaceRootView: View {
     }
     .tint(.accentColor)
   }
+
+  private var compactNavigation: some View {
+    NavigationStack(path: $path) {
+      Group {
+        if hasWorkspace {
+          ProjectListView(model: model, onOpenAgentOverview: { open(.agentOverview) }) { project in
+            Task {
+              await model.selectProject(project.id)
+              path.append(.project(project.id))
+            }
+          }
+        } else {
+          ConnectionSetupView(model: model, onOpenSettings: { open(.settings) })
+        }
+      }
+      .toolbar { if hasWorkspace { connectionToolbar } }
+      .navigationDestination(for: OesapRoute.self) { destination($0) }
+    }
+  }
+
+  private var splitNavigation: some View {
+    NavigationSplitView(
+      columnVisibility: $columnVisibility, preferredCompactColumn: $preferredCompactColumn
+    ) {
+      ProjectListView(
+        model: model,
+        selection: Binding(get: { splitProjectID }, set: { selectSplitProject($0) }),
+        onOpenAgentOverview: { open(.agentOverview) },
+        onOpenProject: { selectSplitProject($0.id) }
+      )
+      .listStyle(.sidebar)
+      .navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 320)
+      .toolbar { connectionToolbar }
+      .accessibilityIdentifier("workspace-project-sidebar")
+    } content: {
+      if let projectID = splitProjectID {
+        ThreadListView(
+          model: model,
+          projectID: projectID,
+          selection: Binding(
+            get: { if case .chat(let id) = detailRoute { id } else { nil } },
+            set: { id in
+              guard let id else {
+                detailRoute = nil
+                return
+              }
+              showThread(id)
+            }
+          ),
+          onNewThread: { open(.newChat(projectID)) },
+          onOpenAgent: { open(.agentConfiguration(projectID)) },
+          onOpenThread: { showThread($0.id) }
+        )
+        .id(projectID)
+        .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
+        .accessibilityIdentifier("workspace-thread-list")
+      } else {
+        ContentUnavailableView("Choose a project", systemImage: "folder")
+          .navigationTitle("Threads")
+      }
+    } detail: {
+      NavigationStack {
+        if let detailRoute {
+          destination(detailRoute)
+            .id(detailRoute)
+        } else {
+          ContentUnavailableView(
+            "Choose a thread",
+            systemImage: "bubble.left.and.bubble.right",
+            description: Text("Select an agent thread to view its conversation.")
+          )
+        }
+      }
+      .accessibilityIdentifier("workspace-detail")
+    }
+    .navigationSplitViewStyle(.balanced)
+  }
+
+  @ToolbarContentBuilder
+  private var connectionToolbar: some ToolbarContent {
+    ToolbarItem(placement: .topBarTrailing) {
+      Menu {
+        Button("Usage", systemImage: "chart.bar") { open(.usage) }
+          .accessibilityIdentifier("host-usage-button")
+        Button("Settings", systemImage: "gearshape") { open(.settings) }
+          .accessibilityIdentifier("settings-button")
+        Divider()
+        Button("Reconnect", systemImage: "arrow.clockwise") { Task { await model.reconnect() } }
+          .disabled(model.connectionState.isBusy)
+        Button("Disconnect", systemImage: "xmark.circle", role: .destructive) {
+          confirmsDisconnect = true
+        }
+      } label: {
+        Image(systemName: "ellipsis.circle").accessibilityLabel("Connection options")
+      }
+      .accessibilityIdentifier("connection-options")
+    }
+  }
+
+  @ViewBuilder
+  private func destination(_ route: OesapRoute) -> some View {
+    switch route {
+    case .agentOverview:
+      AgentOverviewView(model: model) { threadID in
+        if usesSplitNavigation {
+          splitProjectID = model.selectedProjectID
+          presentedRoute = nil
+          detailRoute = .chat(threadID)
+          preferredCompactColumn = .detail
+        } else {
+          path.append(.chat(threadID))
+        }
+      }
+    case .usage:
+      ProviderUsageView(model: model)
+    case .settings:
+      SettingsView(
+        model: model,
+        onAddInstance: { open(.addInstance) },
+        onSelected: {
+          path.removeAll()
+          presentedRoute = nil
+          resetWorkspaceNavigation()
+        }
+      )
+    case .addInstance:
+      ConnectionSetupView(
+        model: model,
+        title: "Add Paseo instance",
+        showsReconnectAction: false,
+        onConnected: {
+          path.removeAll()
+          presentedRoute = nil
+          resetWorkspaceNavigation()
+        }
+      )
+    case .project(let id):
+      ThreadListView(
+        model: model, projectID: id,
+        onNewThread: { open(.newChat(id)) },
+        onOpenAgent: { open(.agentConfiguration(id)) },
+        onOpenThread: { thread in showThread(thread.id) }
+      )
+    case .chat(let id):
+      ChatView(model: model, threadID: id)
+    case .newChat(let projectID):
+      NewChatView(
+        model: model, projectID: projectID,
+        onOpenAgent: { open(.agentConfiguration(projectID)) },
+        onCreated: { threadID in
+          if usesSplitNavigation {
+            guard detailRoute == .newChat(projectID) else { return }
+            detailRoute = .chat(threadID)
+          } else {
+            guard path.last == .newChat(projectID) else { return }
+            path.removeLast()
+            path.append(.chat(threadID))
+          }
+        }
+      )
+    case .agentConfiguration(let projectID):
+      AgentConfigurationView(model: model, projectID: projectID)
+    }
+  }
+
+  private func open(_ route: OesapRoute) {
+    guard usesSplitNavigation else {
+      path.append(route)
+      return
+    }
+    switch route {
+    case .chat, .newChat:
+      detailRoute = route
+      preferredCompactColumn = .detail
+    case .project(let id):
+      selectSplitProject(id)
+    default:
+      presentedRoute = route
+    }
+  }
+
+  private func selectSplitProject(_ id: String?) {
+    guard id != splitProjectID else { return }
+    detailRoute = nil
+    splitProjectID = id
+    preferredCompactColumn = id == nil ? .sidebar : .content
+  }
+
+  private func showThread(_ id: String) {
+    if usesSplitNavigation && detailRoute == .chat(id) {
+      preferredCompactColumn = .detail
+      return
+    }
+    model.selectThread(id)
+    open(.chat(id))
+  }
+
+  private func resetWorkspaceNavigation() {
+    splitProjectID = nil
+    detailRoute = nil
+    preferredCompactColumn = .sidebar
+  }
+}
+
+extension OesapRoute: Identifiable {
+  var id: Self { self }
+}
+
+struct WorkspaceActions {
+  var canCreateThread: Bool
+  var newThread: () -> Void
+  var refresh: () -> Void
+  var settings: () -> Void
+}
+
+private struct WorkspaceActionsKey: FocusedValueKey {
+  typealias Value = WorkspaceActions
+}
+
+extension FocusedValues {
+  var workspaceActions: WorkspaceActions? {
+    get { self[WorkspaceActionsKey.self] }
+    set { self[WorkspaceActionsKey.self] = newValue }
+  }
+}
+
+struct WorkspaceCommands: Commands {
+  @FocusedValue(\.workspaceActions) private var actions
+
+  var body: some Commands {
+    CommandGroup(replacing: .newItem) {
+      Button("New Thread") { actions?.newThread() }
+        .keyboardShortcut("n")
+        .disabled(actions?.canCreateThread != true)
+    }
+    CommandGroup(replacing: .appSettings) {
+      Button("Settings…") { actions?.settings() }
+        .keyboardShortcut(",")
+        .disabled(actions == nil)
+    }
+    CommandGroup(after: .toolbar) {
+      Button("Refresh Workspace") { actions?.refresh() }
+        .keyboardShortcut("r")
+        .disabled(actions == nil)
+    }
+    SidebarCommands()
+  }
 }
 
 private struct ProjectListView: View {
   @Bindable var model: OesapModel
+  var selection: Binding<String?>? = nil
   var onOpenAgentOverview: () -> Void
   var onOpenProject: (RemoteProject) -> Void
 
   var body: some View {
-    List {
+    List(selection: selection) {
       if model.connectionState != .connected {
         ConnectionStatusRow(model: model)
       }
 
       if let error = model.workspaceError {
         Section {
-          Label {
-            Text(error).foregroundStyle(.primary)
-          } icon: {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-          }
+          ConnectionErrorNotice(message: error, identifier: "workspace-error")
           Button("Reconnect") { Task { await model.reconnect() } }
             .disabled(model.connectionState.isBusy)
         }
@@ -193,34 +397,20 @@ private struct ProjectListView: View {
       } else {
         Section {
           ForEach(model.projects) { project in
-            Button {
-              onOpenProject(project)
-            } label: {
-              HStack(spacing: 14) {
-                Image(systemName: "folder.fill")
-                  .font(.title2)
-                  .foregroundStyle(.tint)
-                  .frame(width: 38, height: 38)
-                  .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-
-                VStack(alignment: .leading, spacing: 4) {
-                  Text(project.name).font(.headline).foregroundStyle(.primary)
-                  if let subtitle = project.subtitle {
-                    Text(subtitle)
-                      .font(.subheadline)
-                      .foregroundStyle(Color.primary.opacity(0.75))
-                      .lineLimit(1)
-                  }
-                }
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right")
-                  .font(.footnote.weight(.semibold))
-                  .foregroundStyle(.tertiary)
+            if selection != nil {
+              NavigationLink(value: project.id) {
+                ProjectRow(project: project, showsDisclosure: false)
               }
-              .contentShape(Rectangle())
+              .accessibilityIdentifier("project-\(project.id)")
+            } else {
+              Button {
+                onOpenProject(project)
+              } label: {
+                ProjectRow(project: project, showsDisclosure: true)
+              }
+              .buttonStyle(.plain)
+              .accessibilityIdentifier("project-\(project.id)")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("project-\(project.id)")
           }
         } header: {
           Text("Projects").foregroundStyle(Color.primary.opacity(0.75))
@@ -249,32 +439,61 @@ private struct ProjectListView: View {
   }
 }
 
+private struct ProjectRow: View {
+  let project: RemoteProject
+  var showsDisclosure: Bool
+
+  var body: some View {
+    HStack(spacing: 14) {
+      Image(systemName: "folder.fill")
+        .font(.title2)
+        .foregroundStyle(.tint)
+        .frame(width: 38, height: 38)
+        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+
+      VStack(alignment: .leading, spacing: 4) {
+        Text(project.name).font(.headline).foregroundStyle(.primary)
+        if let subtitle = project.subtitle {
+          Text(subtitle)
+            .font(.subheadline)
+            .foregroundStyle(Color.primary.opacity(0.75))
+            .lineLimit(1)
+        }
+      }
+      Spacer(minLength: 8)
+      if showsDisclosure {
+        Image(systemName: "chevron.right")
+          .font(.footnote.weight(.semibold))
+          .foregroundStyle(.tertiary)
+      }
+    }
+    .contentShape(Rectangle())
+  }
+}
+
 private struct ThreadListView: View {
   @Bindable var model: OesapModel
   let projectID: String
+  var selection: Binding<String?>? = nil
   var onNewThread: () -> Void
   var onOpenAgent: () -> Void
   var onOpenThread: (RemoteThread) -> Void
 
   var body: some View {
-    List {
+    List(selection: selection) {
       if model.connectionState != .connected {
         ConnectionStatusRow(model: model)
       }
 
       if let error = model.workspaceError {
         Section {
-          Label {
-            Text(error).foregroundStyle(.primary)
-          } icon: {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-          }
+          ConnectionErrorNotice(message: error, identifier: "workspace-error")
           Button("Reconnect") { Task { await model.reconnect() } }
             .disabled(model.connectionState.isBusy)
         }
       }
 
-      if model.loadingThreads {
+      if model.selectedProjectID != projectID || model.loadingThreads {
         Section {
           HStack(spacing: 12) {
             ProgressView()
@@ -319,20 +538,27 @@ private struct ThreadListView: View {
       } else {
         Section {
           ForEach(model.threads) { thread in
-            Button {
-              onOpenThread(thread)
-            } label: {
-              ThreadRow(thread: thread)
+            if selection != nil {
+              NavigationLink(value: thread.id) {
+                ThreadRow(thread: thread, showsDisclosure: false)
+              }
+              .accessibilityIdentifier("thread-\(thread.id)")
+            } else {
+              Button {
+                onOpenThread(thread)
+              } label: {
+                ThreadRow(thread: thread)
+              }
+              .buttonStyle(.plain)
+              .accessibilityIdentifier("thread-\(thread.id)")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("thread-\(thread.id)")
           }
         } header: {
           Text("Agent threads").foregroundStyle(Color.primary.opacity(0.75))
         }
       }
     }
-    .navigationTitle(model.selectedProject?.name ?? "Threads")
+    .navigationTitle(model.projects.first { $0.id == projectID }?.name ?? "Threads")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       ToolbarItemGroup(placement: .topBarTrailing) {
@@ -363,6 +589,7 @@ private struct ThreadListView: View {
 
 private struct ThreadRow: View {
   let thread: RemoteThread
+  var showsDisclosure = true
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -395,11 +622,13 @@ private struct ThreadRow: View {
             attentionReason
           }
 
-          Image(systemName: "chevron.right")
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(.tertiary)
-            .padding(.top, 4)
-            .accessibilityHidden(true)
+          if showsDisclosure {
+            Image(systemName: "chevron.right")
+              .font(.footnote.weight(.semibold))
+              .foregroundStyle(.tertiary)
+              .padding(.top, 4)
+              .accessibilityHidden(true)
+          }
         }
       }
     }
