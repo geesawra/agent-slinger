@@ -950,7 +950,6 @@ private struct MessageBubble: View, Equatable {
           : Color(uiColor: .tertiarySystemBackground),
         in: RoundedRectangle(cornerRadius: 16, style: .continuous)
       )
-      if message.author != .user { Spacer(minLength: 30) }
     }
     .accessibilityElement(children: .contain)
     .accessibilityIdentifier("message-\(message.id)")
