@@ -231,9 +231,7 @@ struct UsageListContent: View {
   }
 
   private func sessionIdentitySection(thread: RemoteThread) -> some View {
-    Section("Workspace and session") {
-      UsageValueRow(label: "Workspace", value: thread.cwd ?? "Not reported", font: .body)
-        .textSelection(.enabled)
+    Section("Session identity") {
       UsageValueRow(label: "Session ID", value: thread.id, font: .body)
         .textSelection(.enabled)
     }

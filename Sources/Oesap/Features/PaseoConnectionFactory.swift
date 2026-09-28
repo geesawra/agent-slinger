@@ -397,6 +397,14 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     return results
   }
 
+  func archiveThread(agentID: String) async throws {
+    try await client.archiveAgent(agentID: agentID)
+  }
+
+  func markThreadRead(agentID: String) async throws {
+    try await client.clearAgentAttention(agentID: agentID)
+  }
+
   func history(agentID: String, before cursor: RemoteTimelineCursor?) async throws -> RemoteTimeline
   {
     if cursor == nil {
@@ -650,6 +658,13 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
             priorSequence.map { previous in sequence.map { $0 > previous } ?? false } ?? true
           return [.message(message, cursor: cursor.map(Self.mapCursor), isDelta: isDelta)]
         }
+        if item["type"]?.stringValue == "reasoning",
+          let message = Self.mapTimelineItem(
+            item, fallbackID: fallbackID, timestamp: timestamp, turnID: value["turnId"]?.stringValue
+          )
+        {
+          return [.message(message, cursor: cursor.map(Self.mapCursor), isDelta: false)]
+        }
         let turnID = value["turnId"]?.stringValue
         var displayItem = item
         if item["type"]?.stringValue == "tool_call", let object = item.objectValue,
@@ -814,7 +829,7 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
           item, fallbackID: entry.id, timestamp: entry.timestamp, turnID: entry.turnID)
       else { continue }
       if let index = messages.firstIndex(where: { $0.id == message.id }) {
-        if message.toolCall != nil {
+        if message.toolCall != nil || message.isThinkingTrace {
           var replacement = message
           replacement.timestamp = messages[index].timestamp ?? message.timestamp
           messages[index] = replacement
@@ -838,7 +853,10 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     guard let object = value.objectValue,
       let type = object["type"]?.stringValue
     else { return nil }
-    let id = object["messageId"]?.stringValue ?? fallbackID
+    let id =
+      object["messageId"]?.stringValue
+      ?? (type == "reasoning" ? turnID.map { "thinking-turn:\($0)" } : nil)
+      ?? fallbackID
     let date = timestamp.flatMap(parseTimestamp)
     switch type {
     case "user_message":
@@ -846,9 +864,15 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       return RemoteMessage(
         id: id, author: .user, text: text, timestamp: date,
         clientMessageID: object["clientMessageId"]?.stringValue)
-    case "assistant_message", "reasoning":
+    case "assistant_message":
       guard let text = object["text"]?.stringValue else { return nil }
       return RemoteMessage(id: id, author: .agent, text: text, timestamp: date)
+    case "reasoning":
+      let rawText = object["text"]?.stringValue ?? ""
+      let isEncrypted = isEncryptedReasoning(object, text: rawText)
+      return RemoteMessage(
+        id: id, author: .agent, text: isEncrypted ? "" : rawText, timestamp: date,
+        isThinkingTrace: true, thinkingIsEncrypted: isEncrypted)
     case "error", "notification":
       let text = object["message"]?.stringValue ?? "Agent activity"
       return RemoteMessage(id: id, author: .system, text: text, timestamp: date)
@@ -871,6 +895,31 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     default:
       return nil
     }
+  }
+
+  private static func isEncryptedReasoning(
+    _ item: [String: PaseoJSONValue], text: String
+  ) -> Bool {
+    if item["encrypted"] == .bool(true) || item["isEncrypted"] == .bool(true) { return true }
+    guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+    for key in ["encryptedContent", "encrypted_content", "ciphertext", "signature"] {
+      guard let value = item[key] else { continue }
+      switch value {
+      case .null:
+        continue
+      case .bool(let flag):
+        if flag { return true }
+      case .number:
+        return true
+      case .string(let payload):
+        if !payload.isEmpty { return true }
+      case .array(let payload):
+        if !payload.isEmpty { return true }
+      case .object(let payload):
+        if !payload.isEmpty { return true }
+      }
+    }
+    return false
   }
 
   private static func mapPermission(_ permission: PaseoPermissionRequest) -> RemotePermission {

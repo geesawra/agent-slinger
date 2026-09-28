@@ -42,7 +42,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     textView.adjustsFontForContentSizeCategory = true
     textView.textContainerInset = UIEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
     textView.textContainer.lineFragmentPadding = 0
-    textView.returnKeyType = isExpanded ? .default : .send
+    textView.returnKeyType = .default
     textView.accessibilityLabel = accessibilityLabel
     textView.accessibilityIdentifier = accessibilityIdentifier
     textView.text = text
@@ -63,7 +63,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
         length: 0)
     }
     context.coordinator.updateMarkdownStyle(on: textView)
-    textView.returnKeyType = isExpanded ? .default : .send
+    textView.returnKeyType = .default
     textView.accessibilityLabel = accessibilityLabel
     textView.accessibilityIdentifier = accessibilityIdentifier
     context.coordinator.updateCompactVerticalInset(on: textView)
@@ -138,6 +138,7 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     private var expansionMeasurementGeneration = 0
     private var lastReportedNeedsExpansion: Bool?
     private var isDismantled = false
+    private var isApplyingLineBreak = false
 
     init(parent: NativeImagePasteTextView) {
       self.parent = parent
@@ -387,13 +388,85 @@ struct NativeImagePasteTextView: UIViewRepresentable {
     func textView(
       _ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String
     ) -> Bool {
-      guard !parent.isExpanded, text == "\n", textView.markedTextRange == nil,
-        (textView as? ImagePasteTextView)?.isInsertingLineBreak != true
-      else { return true }
-      if parent.canSubmit {
-        parent.onSubmit()
+      guard !isApplyingLineBreak, text == "\n", textView.markedTextRange == nil else {
+        return true
       }
+      guard let continuation = markdownListContinuation(in: textView, replacing: range) else {
+        return true
+      }
+
+      isApplyingLineBreak = true
+      defer { isApplyingLineBreak = false }
+      textView.selectedRange = continuation.replacementRange
+      textView.insertText(continuation.insertion)
       return false
+    }
+
+    private func markdownListContinuation(
+      in textView: UITextView, replacing range: NSRange
+    ) -> (replacementRange: NSRange, insertion: String)? {
+      let source = (textView.text ?? "") as NSString
+      guard range.location <= source.length,
+        NSMaxRange(range) <= source.length
+      else { return nil }
+      for location in range.location..<NSMaxRange(range) {
+        let character = source.character(at: location)
+        if character == 10 || character == 13 { return nil }
+      }
+
+      var lineStart = range.location
+      while lineStart > 0 {
+        let character = source.character(at: lineStart - 1)
+        guard character != 10 && character != 13 else { break }
+        lineStart -= 1
+      }
+      var lineEnd = NSMaxRange(range)
+      while lineEnd < source.length {
+        let character = source.character(at: lineEnd)
+        guard character != 10 && character != 13 else { break }
+        lineEnd += 1
+      }
+      guard range.location >= lineStart, NSMaxRange(range) <= lineEnd else { return nil }
+
+      let lineText = source.substring(
+        with: NSRange(location: lineStart, length: lineEnd - lineStart))
+      let expression = try? NSRegularExpression(
+        pattern: #"^([ \t]*)([-+*]|[0-9]+[.)])([ \t]+)(?:\[([ xX])\]([ \t]+))?"#)
+      let fullLineRange = NSRange(location: 0, length: (lineText as NSString).length)
+      guard let match = expression?.firstMatch(in: lineText, range: fullLineRange),
+        match.range.location == 0,
+        range.location >= lineStart + match.range.length
+      else { return nil }
+
+      let markerEnd = lineStart + match.range.length
+      let beforeCaret = source.substring(
+        with: NSRange(location: markerEnd, length: range.location - markerEnd))
+      let afterSelection = source.substring(
+        with: NSRange(location: NSMaxRange(range), length: lineEnd - NSMaxRange(range)))
+      let itemIsEmpty =
+        beforeCaret.trimmingCharacters(in: .whitespaces).isEmpty
+        && afterSelection.trimmingCharacters(in: .whitespaces).isEmpty
+
+      if itemIsEmpty {
+        // Replace only this line's empty marker. Keeping the edit bounded to
+        // this physical line preserves the earlier items in a multi-line list.
+        return (
+          NSRange(location: lineStart, length: lineEnd - lineStart),
+          "\n"
+        )
+      }
+
+      let indentation = source.substring(with: match.range(at: 1))
+      var marker = source.substring(with: match.range(at: 2))
+      if let ordered = Int(marker.dropLast()), let delimiter = marker.last,
+        delimiter == "." || delimiter == ")"
+      {
+        let (next, overflow) = ordered.addingReportingOverflow(1)
+        if !overflow { marker = "\(next)\(delimiter)" }
+      }
+      let hasTaskMarker = match.range(at: 4).location != NSNotFound
+      let nextItem = indentation + marker + " " + (hasTaskMarker ? "[ ] " : "")
+      return (range, "\n" + nextItem)
     }
 
     func pasteImageFromClipboard() -> Bool {
@@ -434,7 +507,6 @@ struct NativeImagePasteTextView: UIViewRepresentable {
 final class ImagePasteTextView: UITextView {
   var pasteImage: (() -> Bool)?
   var submitMessage: (() -> Void)?
-  private(set) var isInsertingLineBreak = false
 
   override var keyCommands: [UIKeyCommand]? {
     guard markedTextRange == nil else { return super.keyCommands }
@@ -455,8 +527,6 @@ final class ImagePasteTextView: UITextView {
 
   @objc private func insertMessageLineBreak() {
     guard markedTextRange == nil else { return }
-    isInsertingLineBreak = true
-    defer { isInsertingLineBreak = false }
     insertText("\n")
   }
   var onLayout: ((UITextView) -> Void)?

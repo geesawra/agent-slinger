@@ -14,6 +14,9 @@ the operation phase, an allowlisted system error domain and numeric code, HTTP
 status, and WebSocket close code. Missing metadata remains unknown. The prior
 message “The connection closed” alone does not establish which of these caused
 a particular failure; reproduce it with the updated app to obtain evidence.
+HTTP 101 is the successful WebSocket protocol upgrade. A later socket failure
+after that response is reported as a WebSocket closure (or by a more specific
+transport cause), not as a rejected HTTP upgrade.
 
 Transport diagnostics omit passwords, pairing links and secrets, full URLs,
 query strings, workspace paths, remote message bodies, and raw system error

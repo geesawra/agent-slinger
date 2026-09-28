@@ -71,6 +71,25 @@ struct ChatView: View {
 
   private var thread: RemoteThread? { model.threads.first { $0.id == threadID } }
 
+  private var latestThinkingTraceID: String? {
+    model.messages.last(where: \.isThinkingTrace)?.id
+  }
+
+  private var agentActivityMessage: String? {
+    guard model.connectionState == .connected, let thread else { return nil }
+    let hasBufferedOutput = model.messages.contains { message in
+      message.author == .agent && model.bufferedAgentMessageIDs.contains(message.id)
+    }
+    if thread.state == .running {
+      return hasBufferedOutput || latestThinkingTraceID != nil ? nil : "Thinking…"
+    }
+    if model.agentSendFeedback(for: threadID)?.phase == .accepted {
+      return "Waiting for the agent…"
+    }
+    if thread.state == .initializing { return "Starting agent…" }
+    return nil
+  }
+
   var body: some View {
     GeometryReader { viewport in
       ScrollViewReader { proxy in
@@ -177,11 +196,20 @@ struct ChatView: View {
                   )
                 )
                 .id(message.id)
+              } else if message.isThinkingTrace {
+                if message.id == latestThinkingTraceID {
+                  ThinkingTraceView(
+                    message: message,
+                    isUpdating: model.connectionState == .connected && thread?.state == .running
+                  )
+                  .id(message.id)
+                }
               } else {
                 MessageBubble(
                   message: message,
                   threadID: threadID,
                   timelineGeneration: model.timelineGeneration,
+                  buffersAgentOutput: model.bufferedAgentMessageIDs.contains(message.id),
                   loadRemoteImage: { source, imageThreadID in
                     try await model.loadRemoteImage(source: source, threadID: imageThreadID)
                   }
@@ -191,11 +219,17 @@ struct ChatView: View {
               }
             }
 
+            if let activity = agentActivityMessage {
+              AgentActivityIndicator(message: activity)
+                .id("agent-activity-\(threadID)")
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             if model.loadingHistory && !model.messages.isEmpty {
               ProgressView().frame(maxWidth: .infinity).padding(.vertical, 8)
             }
 
-            if let feedback = model.agentSendFeedback(for: threadID) {
+            if let feedback = model.agentSendFeedback(for: threadID), feedback.phase != .accepted {
               AgentActionStatus(
                 feedback: feedback,
                 identifier: "agent-message-status-\(threadID)",
@@ -241,6 +275,10 @@ struct ChatView: View {
           .padding(.bottom, 20)
           .frame(maxWidth: 900)
           .frame(maxWidth: .infinity)
+          .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.22),
+            value: model.bufferedAgentMessageIDs
+          )
           .background {
             // The full stack exists even when the lazy bottom row is offscreen.
             GeometryReader { geometry in
@@ -275,6 +313,10 @@ struct ChatView: View {
           if feedback != nil { proxy.scrollTo("agent-action-status-\(threadID)", anchor: .bottom) }
         }
         .onChange(of: threadID) { _, _ in expandedToolCallIDs.removeAll() }
+        .onChange(of: thread?.requiresAttention) { _, requiresAttention in
+          guard requiresAttention == true else { return }
+          Task { await model.markThreadRead(threadID, reportsFailure: false) }
+        }
         .onChange(of: model.selectedThreadID) { _, selectedID in
           if selectedID != threadID {
             actionConfirmation = nil
@@ -424,6 +466,7 @@ struct ChatView: View {
         }
         .task(id: "\(threadID)-\(model.timelineGeneration)") {
           viewportHeight = viewport.size.height
+          Task { await model.markThreadRead(threadID, reportsFailure: false) }
           await model.watchTimeline(threadID: threadID)
         }
         .alert(
@@ -761,29 +804,47 @@ private struct PermissionCard: View {
 
 private struct MessageBubble: View, Equatable {
   static func == (lhs: Self, rhs: Self) -> Bool {
-    lhs.message == rhs.message && lhs.threadID == rhs.threadID
+    let messageMatches =
+      lhs.buffersAgentOutput && rhs.buffersAgentOutput
+      ? lhs.message.id == rhs.message.id && lhs.message.author == rhs.message.author
+      : lhs.message == rhs.message
+    return messageMatches && lhs.buffersAgentOutput == rhs.buffersAgentOutput
+      && lhs.threadID == rhs.threadID
       && lhs.timelineGeneration == rhs.timelineGeneration
   }
 
   let message: RemoteMessage
   let threadID: String
   let timelineGeneration: Int
+  let buffersAgentOutput: Bool
   let loadRemoteImage: (String, String) async throws -> Data
 
   var body: some View {
     HStack {
       if message.author == .user { Spacer(minLength: 42) }
       VStack(alignment: .leading, spacing: 5) {
-        Text(message.author.label)
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(Color.primary.opacity(0.75))
-        MessageMarkdownView(
-          source: message.text,
-          cacheKey: "\(threadID)-\(timelineGeneration)-\(message.id)",
-          threadID: threadID,
-          loadRemoteImage: loadRemoteImage
-        )
-        .id("\(threadID)-\(timelineGeneration)-\(message.id)")
+        if buffersAgentOutput {
+          HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Thinking…")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .accessibilityElement(children: .combine)
+          .accessibilityLabel("Agent is thinking")
+          .transition(.move(edge: .bottom).combined(with: .opacity))
+        } else {
+          MessageMarkdownView(
+            source: message.text,
+            cacheKey: "\(threadID)-\(timelineGeneration)-\(message.id)",
+            threadID: threadID,
+            deferUntilRendered: message.author == .agent,
+            loadRemoteImage: loadRemoteImage
+          )
+          .id("\(threadID)-\(timelineGeneration)-\(message.id)")
+          .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
         if !message.images.isEmpty {
           ScrollView(.horizontal) {
             HStack(spacing: 8) {
@@ -805,6 +866,7 @@ private struct MessageBubble: View, Equatable {
       .padding(.horizontal, 14)
       .padding(.vertical, 11)
       .frame(maxWidth: .infinity, alignment: .leading)
+      .textSelection(.enabled)
       .background(
         message.author == .user
           ? Color(uiColor: .secondarySystemBackground)
@@ -818,13 +880,77 @@ private struct MessageBubble: View, Equatable {
   }
 }
 
-extension RemoteMessage.Author {
-  fileprivate var label: String {
-    switch self {
-    case .user: "You"
-    case .agent: "Agent"
-    case .system: "Paseo"
+private struct AgentActivityIndicator: View {
+  let message: String
+
+  var body: some View {
+    HStack(spacing: 8) {
+      ProgressView().controlSize(.small)
+      Text(message)
+        .font(.footnote)
+        .foregroundStyle(.secondary)
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, 14)
+    .padding(.vertical, 8)
+    .accessibilityElement(children: .combine)
+  }
+}
+
+private struct ThinkingTraceView: View {
+  let message: RemoteMessage
+  let isUpdating: Bool
+
+  @State private var isExpanded = false
+
+  var body: some View {
+    Group {
+      if message.thinkingIsEncrypted {
+        HStack(spacing: 8) {
+          Image(systemName: "lock.fill")
+            .accessibilityHidden(true)
+          Text(isUpdating ? "Updating encrypted thinking…" : "Thinking is encrypted")
+          if isUpdating {
+            ProgressView().controlSize(.small)
+          }
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+      } else if message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        HStack(spacing: 8) {
+          if isUpdating { ProgressView().controlSize(.small) }
+          Text(isUpdating ? "Thinking…" : "Thinking text unavailable")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+      } else {
+        DisclosureGroup(isExpanded: $isExpanded) {
+          Text(verbatim: message.text)
+            .font(.body)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 4)
+        } label: {
+          HStack(spacing: 8) {
+            Image(systemName: "brain")
+              .accessibilityHidden(true)
+            Text(isUpdating ? "Thinking…" : "Thinking")
+            if isUpdating {
+              ProgressView().controlSize(.small)
+            }
+          }
+          .font(.footnote.weight(.medium))
+          .foregroundStyle(.secondary)
+        }
+        .accessibilityIdentifier("thinking-trace-\(message.id)")
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(12)
+    .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .textSelection(.enabled)
   }
 }
 

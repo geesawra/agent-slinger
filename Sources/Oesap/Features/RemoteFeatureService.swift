@@ -304,6 +304,8 @@ struct RemoteMessage: Identifiable, Sendable, Equatable {
   var toolCall: RemoteToolCall? = nil
   var clientMessageID: String? = nil
   var images: [RemoteDraftImage] = []
+  var isThinkingTrace = false
+  var thinkingIsEncrypted = false
 }
 
 struct RemoteToolCall: Sendable, Equatable {
@@ -414,6 +416,8 @@ protocol OesapRemoteService: Sendable {
   func directoryEntries(cwd: String?) async throws -> [RemoteDirectoryEntry]
   func addProject(path: String) async throws -> RemoteProject
   func threads(projectID: String) async throws -> [RemoteThread]
+  func archiveThread(agentID: String) async throws
+  func markThreadRead(agentID: String) async throws
   func history(agentID: String, before cursor: RemoteTimelineCursor?) async throws -> RemoteTimeline
   func events(agentID: String) async throws -> AsyncThrowingStream<RemoteTimelineUpdate, Error>
   func send(agentID: String, text: String) async throws
@@ -438,6 +442,12 @@ extension OesapRemoteService {
   }
   func addProject(path: String) async throws -> RemoteProject {
     throw RemoteServiceError.unavailable("This host does not support adding projects.")
+  }
+  func archiveThread(agentID: String) async throws {
+    throw RemoteServiceError.unavailable("This host does not support archiving threads.")
+  }
+  func markThreadRead(agentID: String) async throws {
+    throw RemoteServiceError.unavailable("This host does not support marking threads as read.")
   }
   func serverID() async -> String? { nil }
   func supportsNewThreads() async -> Bool { false }
@@ -667,6 +677,8 @@ enum RemoteServiceError: LocalizedError, Sendable {
     private var sentMessages: [String: [RemoteMessage]] = [:]
     private var acceptedMessageIDs: [String: Set<String>] = [:]
     private var createdThreads: [RemoteThread] = []
+    private var archivedThreadIDs: Set<String> = []
+    private var readThreadIDs: Set<String> = []
     private var creations: [String: RemoteNewThreadResult] = [:]
     private var resolvedPermissions: Set<String> = []
     private var stoppedAgents: Set<String> = []
@@ -971,7 +983,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
         if overviewFailure {
           throw RemoteServiceError.unavailable("The demo tools project could not be loaded.")
         }
-        return [
+        return visibleThreads([
           RemoteThread(
             id: "demo-tools-running", title: "Check tool integrations", provider: "codex",
             model: "gpt-6-sol", state: .running, requiresAttention: false,
@@ -981,36 +993,61 @@ enum RemoteServiceError: LocalizedError, Sendable {
             id: "demo-tools-failed", title: "Fix release build", provider: "codex",
             model: "gpt-6-astra", state: .failed, requiresAttention: true,
             attentionReason: "An agent run failed."),
-        ]
+        ])
       }
       guard projectID == "demo-project" else { return [] }
-      return createdThreads + [
-        RemoteThread(
-          id: "demo-agent-running",
-          title: "Build the iOS app",
-          provider: "codex",
-          model: "gpt-6-sol",
-          state: stoppedAgents.contains("demo-agent-running") ? .idle : .running,
-          requiresAttention: false,
-          attentionReason: nil,
-          contextUsage: RemoteContextUsage(usedTokens: 64_000, maxTokens: 200_000),
-          cwd: "/demo/oesap"
-        ),
-        RemoteThread(
-          id: "demo-agent-attention",
-          title: "Review connection flow",
-          provider: "claude",
-          model: nil,
-          state: .waiting,
-          requiresAttention: true,
-          attentionReason: "The agent is waiting for approval."
-        ),
-        RemoteThread(
-          id: "demo-agent-idle", title: "Review older changes", provider: "codex",
-          model: "gpt-6-sol", state: .idle, requiresAttention: false,
-          attentionReason: nil,
-          contextUsage: RemoteContextUsage(usedTokens: 18_000, maxTokens: nil)),
-      ]
+      return visibleThreads(
+        createdThreads + [
+          RemoteThread(
+            id: "demo-agent-running",
+            title: "Build the iOS app",
+            provider: "codex",
+            model: "gpt-6-sol",
+            state: stoppedAgents.contains("demo-agent-running") ? .idle : .running,
+            requiresAttention: false,
+            attentionReason: nil,
+            contextUsage: RemoteContextUsage(usedTokens: 64_000, maxTokens: 200_000),
+            cwd: "/demo/oesap"
+          ),
+          RemoteThread(
+            id: "demo-agent-attention",
+            title: "Review connection flow",
+            provider: "claude",
+            model: nil,
+            state: .waiting,
+            requiresAttention: true,
+            attentionReason: "The agent is waiting for approval."
+          ),
+          RemoteThread(
+            id: "demo-agent-idle", title: "Review older changes", provider: "codex",
+            model: "gpt-6-sol", state: .idle, requiresAttention: false,
+            attentionReason: nil,
+            contextUsage: RemoteContextUsage(usedTokens: 18_000, maxTokens: nil)),
+        ])
+    }
+
+    func archiveThread(agentID: String) async throws {
+      try ensureConnected()
+      archivedThreadIDs.insert(agentID)
+    }
+
+    func markThreadRead(agentID: String) async throws {
+      try ensureConnected()
+      readThreadIDs.insert(agentID)
+    }
+
+    private func applyReadState(_ thread: RemoteThread) -> RemoteThread {
+      guard readThreadIDs.contains(thread.id) else { return thread }
+      return RemoteThread(
+        id: thread.id, title: thread.title, provider: thread.provider, model: thread.model,
+        state: thread.state, requiresAttention: false, attentionReason: nil,
+        contextUsage: thread.contextUsage, cwd: thread.cwd)
+    }
+
+    private func visibleThreads(_ threads: [RemoteThread]) -> [RemoteThread] {
+      threads
+        .filter { !archivedThreadIDs.contains($0.id) }
+        .map { applyReadState($0) }
     }
 
     func history(agentID: String, before cursor: RemoteTimelineCursor?) async throws

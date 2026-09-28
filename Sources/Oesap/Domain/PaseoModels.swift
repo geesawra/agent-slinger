@@ -615,6 +615,8 @@ public protocol PaseoService: Sendable {
     agentID: String, thinkingOptionID: String?, modeID: String?
   ) async throws -> PaseoAgentSettingsApplyResult
   func createAgent(_ intent: PaseoAgentCreationIntent) async throws -> PaseoAgentCreationResult
+  func archiveAgent(agentID: String) async throws
+  func clearAgentAttention(agentID: String) async throws
   func listThreads(projectID: String, page: PaseoPageRequest) async throws -> PaseoPage<PaseoThread>
   func history(
     agentID: String, direction: PaseoTimelineDirection, cursor: PaseoTimelineCursor?, limit: Int
@@ -644,6 +646,12 @@ extension PaseoService {
   }
   public func addProject(path: String) async throws -> PaseoProject {
     throw PaseoProtocolError.unsupportedCapability("project registration")
+  }
+  public func archiveAgent(agentID: String) async throws {
+    throw PaseoProtocolError.unsupportedCapability("agent archive")
+  }
+  public func clearAgentAttention(agentID: String) async throws {
+    throw PaseoProtocolError.unsupportedCapability("agent attention clearing")
   }
   public func agentContextUsage(agentID: String) async throws -> PaseoAgentContextUsage {
     throw PaseoProtocolError.unsupportedCapability("agent context usage")

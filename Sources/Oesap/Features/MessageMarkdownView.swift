@@ -7,7 +7,9 @@ import SwiftUI
 struct MessageMarkdownView: View {
   let source: String
   let cacheKey: String?
+  let deferUntilRendered: Bool
 
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var localCacheKey = UUID().uuidString
   @State private var renderer: MessageMarkdownRenderer
   @State private var viewerItem: ImageAttachmentViewerItem?
@@ -17,10 +19,12 @@ struct MessageMarkdownView: View {
     source: String,
     cacheKey: String? = nil,
     threadID: String? = nil,
+    deferUntilRendered: Bool = false,
     loadRemoteImage: ReceivedImageLoader.HostFileLoader? = nil
   ) {
     self.source = source
     self.cacheKey = cacheKey
+    self.deferUntilRendered = deferUntilRendered
     _renderer = State(initialValue: MessageMarkdownRenderer(source: source))
     _imageLoader = State(
       initialValue: ReceivedImageLoader(threadID: threadID, hostFileLoader: loadRemoteImage))
@@ -28,7 +32,7 @@ struct MessageMarkdownView: View {
 
   var body: some View {
     Group {
-      if let result = renderer.result {
+      if let result = renderer.result, renderer.renderedSource == source {
         Markdown(result.content)
           .markdownTheme(.basic)
           .markdownImageProvider(
@@ -58,6 +62,24 @@ struct MessageMarkdownView: View {
           )
           .textSelection(.enabled)
           .foregroundStyle(.primary)
+          .transition(.move(edge: .bottom).combined(with: .opacity))
+      } else if deferUntilRendered {
+        if renderer.failedSource == source {
+          Text(verbatim: source)
+            .font(.body)
+            .textSelection(.enabled)
+            .foregroundStyle(.primary)
+        } else {
+          HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Preparing response…")
+              .font(.footnote)
+              .foregroundStyle(.secondary)
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .accessibilityElement(children: .combine)
+          .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
       } else {
         Text(verbatim: source)
           .font(.body)
@@ -66,6 +88,10 @@ struct MessageMarkdownView: View {
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
+    .animation(
+      reduceMotion ? nil : .easeInOut(duration: 0.22),
+      value: renderer.renderedSource == source
+    )
     .appFullScreenCover(item: $viewerItem) { item in
       ImageAttachmentViewer(item: item)
     }
@@ -86,6 +112,7 @@ final class MessageMarkdownRenderer {
   typealias Parser = @Sendable (String, String) async throws -> MessageMarkdownContentResult
 
   private(set) var result: MessageMarkdownContentResult?
+  private(set) var failedSource: String?
   @ObservationIgnored private(set) var renderedSource: String?
   @ObservationIgnored private var latestSource: String
   @ObservationIgnored private var continuation: AsyncStream<Void>.Continuation?
@@ -104,6 +131,7 @@ final class MessageMarkdownRenderer {
 
   func update(source: String) {
     latestSource = source
+    if failedSource != source { failedSource = nil }
     continuation?.yield(())
   }
 
@@ -123,6 +151,7 @@ final class MessageMarkdownRenderer {
     }
     var lastParseTime: ContinuousClock.Instant?
     for await _ in updates {
+      var attemptedSource: String?
       do {
         if let lastParseTime {
           try await ContinuousClock().sleep(until: lastParseTime.advanced(by: .milliseconds(50)))
@@ -131,17 +160,19 @@ final class MessageMarkdownRenderer {
         guard activeRunID == runID else { return }
         // Read after the cadence delay, discarding obsolete buffered snapshots.
         let snapshot = latestSource
+        attemptedSource = snapshot
         guard snapshot != renderedSource else { continue }
         let parsed = try await parse(snapshot, cacheKey)
         try Task.checkCancellation()
         guard activeRunID == runID else { return }
         result = parsed
         renderedSource = snapshot
+        failedSource = nil
         lastParseTime = .now
       } catch is CancellationError {
         return
       } catch {
-        // Keep selectable source / the last successful tree on parser failure.
+        failedSource = attemptedSource
       }
     }
   }

@@ -181,7 +181,12 @@ struct ConnectionFailure: Equatable, Sendable {
       default: continue
       }
     }
-    if closeCode != nil || (error as? PaseoConnectionError) == .disconnected { return .closed }
+    // HTTP 101 means the WebSocket upgrade succeeded. If a later socket error
+    // has no more specific cause or close code, report a closed WebSocket,
+    // rather than claiming the server rejected its upgrade.
+    if httpStatus == 101 || closeCode != nil || (error as? PaseoConnectionError) == .disconnected {
+      return .closed
+    }
     return .unknown
   }
 }

@@ -820,6 +820,7 @@ private struct ThreadListView: View {
               }
               .disabled(model.connectionState.isBusy)
               .accessibilityIdentifier("thread-\(thread.id)")
+              .contextMenu { threadContextMenu(for: thread) }
             } else {
               Button {
                 onOpenThread(thread)
@@ -829,6 +830,7 @@ private struct ThreadListView: View {
               .buttonStyle(.plain)
               .disabled(model.connectionState.isBusy)
               .accessibilityIdentifier("thread-\(thread.id)")
+              .contextMenu { threadContextMenu(for: thread) }
             }
           }
         } header: {
@@ -882,6 +884,23 @@ private struct ThreadListView: View {
         await model.refreshThreads(projectID: projectID)
       }
     }
+  }
+
+  @ViewBuilder
+  private func threadContextMenu(for thread: RemoteThread) -> some View {
+    Button {
+      Task { await model.markThreadRead(thread.id) }
+    } label: {
+      Label("Mark as Read", systemImage: "envelope.open")
+    }
+    .disabled(!thread.requiresAttention || model.connectionState != .connected)
+
+    Button(role: .destructive) {
+      Task { await model.archiveThread(thread.id) }
+    } label: {
+      Label("Archive Thread", systemImage: "archivebox")
+    }
+    .disabled(model.connectionState != .connected)
   }
 }
 

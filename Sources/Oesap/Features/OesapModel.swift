@@ -47,8 +47,10 @@ final class OesapModel {
   private(set) var projects: [RemoteProject] = []
   private(set) var threads: [RemoteThread] = []
   private(set) var messages: [RemoteMessage] = []
+  private(set) var bufferedAgentMessageIDs: Set<String> = []
   private(set) var timelineStructureRevision = 0
   @ObservationIgnored private var messageIndices: [String: Int] = [:]
+  @ObservationIgnored private var bufferedAgentMessageTexts: [String: String] = [:]
   private(set) var permissions: [RemotePermission] = []
   private(set) var historyMayBeIncomplete = false
   private(set) var loadingProjects = false
@@ -1208,6 +1210,73 @@ final class OesapModel {
       selectionGeneration: projectSelectionGeneration, reconcileStopWait: true)
   }
 
+  func markThreadRead(_ threadID: String, reportsFailure: Bool = true) async {
+    guard connectionState == .connected, let service,
+      let thread = threads.first(where: { $0.id == threadID }), thread.requiresAttention
+    else { return }
+    let generation = connectionGeneration
+    do {
+      try await service.markThreadRead(agentID: threadID)
+      guard connectionGeneration == generation, connectionState == .connected,
+        let index = threads.firstIndex(where: { $0.id == threadID })
+      else { return }
+      threads[index].requiresAttention = false
+      threads[index].attentionReason = nil
+    } catch {
+      guard connectionGeneration == generation else { return }
+      if reportsFailure {
+        workspaceError =
+          "Thread couldn’t be marked as read. Try again. \(error.localizedDescription)"
+      }
+      if Self.isConnectionFailure(error) {
+        await markConnectionLost(
+          generation: generation,
+          reason: "The host disconnected while marking the thread as read.",
+          replaceWorkspaceError: reportsFailure)
+      }
+    }
+  }
+
+  func archiveThread(_ threadID: String) async {
+    guard connectionState == .connected, let service,
+      threads.contains(where: { $0.id == threadID })
+    else { return }
+    let generation = connectionGeneration
+    do {
+      try await service.archiveThread(agentID: threadID)
+      guard connectionGeneration == generation, connectionState == .connected else { return }
+      threads.removeAll { $0.id == threadID }
+      permissions.removeAll { $0.agentID == threadID }
+      if selectedThreadID == threadID {
+        clearSessionDetails()
+        contextUsageRefreshTask?.cancel()
+        contextUsageRefreshTask = nil
+        contextUsageRequestGeneration += 1
+        contextUsageRevision += 1
+        loadingContextUsage = false
+        contextUsageError = nil
+        threadSelectionGeneration += 1
+        selectedThreadID = nil
+        UserDefaults.standard.removeObject(forKey: Self.selectedThreadKey)
+        replaceMessages([])
+        timelineGeneration += 1
+        timelineError = nil
+        timelineHasOlder = false
+        olderTimelineCursor = nil
+        latestTimelineCursor = nil
+      }
+      workspaceError = nil
+    } catch {
+      guard connectionGeneration == generation else { return }
+      workspaceError = "Thread couldn’t be archived. Try again. \(error.localizedDescription)"
+      if Self.isConnectionFailure(error) {
+        await markConnectionLost(
+          generation: generation,
+          reason: "The host disconnected while archiving the thread.")
+      }
+    }
+  }
+
   func draft(for threadID: String) -> String {
     drafts[threadID, default: ""]
   }
@@ -1643,8 +1712,9 @@ final class OesapModel {
     timelineError = nil
     permissionError = nil
     do {
-      // Subscribe before loading the authoritative snapshot so updates arriving
-      // during history loading remain buffered by the stream.
+      // This view owns only its timeline subscription. Subscribe before loading
+      // the authoritative snapshot so updates arriving during history loading
+      // remain buffered; the app-level connection observer owns host liveness.
       let updates = try await service.events(agentID: threadID)
       guard
         isCurrentTimeline(
@@ -1700,6 +1770,14 @@ final class OesapModel {
           latestTimelineCursor = refreshedHistory.latestCursor
         case .threadState(let state, let requiresAttention, let reason):
           updateThread(threadID, state: state, requiresAttention: requiresAttention, reason: reason)
+          if let key = agentControlKey(for: threadID),
+            agentSendFeedback[key]?.phase == .accepted
+          {
+            agentSendFeedback[key] = nil
+          }
+          if state != .running && state != .initializing {
+            commitBufferedAgentMessages()
+          }
         case .contextUsage(let usage):
           if let index = threads.firstIndex(where: { $0.id == threadID }) {
             threads[index].contextUsage = threads[index].contextUsage?.merging(usage) ?? usage
@@ -1709,6 +1787,7 @@ final class OesapModel {
         case .contextUsageNeedsRefresh:
           startContextUsageRefresh(threadID: threadID)
         case .permissionRequested(let permission):
+          commitBufferedAgentMessages()
           if let existingIndex = permissions.firstIndex(where: { $0.id == permission.id }) {
             permissions[existingIndex] = permission
           } else {
@@ -1723,10 +1802,10 @@ final class OesapModel {
         threadID: threadID, generation: generation,
         selectionGeneration: selectionGeneration)
       {
+        commitBufferedAgentMessages()
+        // A timeline ending does not prove the host socket ended. Keep the
+        // connection available for other screens and offer timeline recovery.
         timelineError = "The live timeline ended. Reconnect to restore updates."
-        await markConnectionLost(
-          generation: generation,
-          reason: "The Paseo host disconnected. Reconnect to continue.")
       }
     } catch is CancellationError {
       return
@@ -1736,12 +1815,10 @@ final class OesapModel {
           threadID: threadID, generation: generation,
           selectionGeneration: selectionGeneration)
       else { return }
+      commitBufferedAgentMessages()
       loadingHistory = false
       timelineError =
         "The timeline connection ended. Reconnect to restore this history and its live updates. \(error.localizedDescription)"
-      await markConnectionLost(
-        generation: generation,
-        reason: "The timeline connection ended.\n\n\(error.localizedDescription)")
     }
     if isCurrentTimeline(
       threadID: threadID, generation: generation,
@@ -2072,10 +2149,16 @@ final class OesapModel {
       imageDrafts[threadID]?.removeAll { submittedImageIDs.contains($0.id) }
       if !intent.images.isEmpty {
         acceptedMessageImages[threadID, default: [:]][intent.messageID] = intent.images
-        replaceMessages(messages.map { imageOverlay($0, threadID: threadID) })
+        for index in messages.indices {
+          messages[index] = imageOverlay(messages[index], threadID: threadID)
+        }
       }
-      agentSendFeedback[key] = RemoteAgentActionFeedback(
-        phase: .accepted, message: "Message accepted by host.")
+      if threads.first(where: { $0.id == threadID })?.state == .running {
+        agentSendFeedback[key] = nil
+      } else {
+        agentSendFeedback[key] = RemoteAgentActionFeedback(
+          phase: .accepted, message: "Message accepted by host.")
+      }
       return true
     } catch {
       guard agentSendTokens[key] == token,
@@ -2129,6 +2212,8 @@ final class OesapModel {
 
   private func replaceMessages(_ replacement: [RemoteMessage]) {
     messages = replacement
+    bufferedAgentMessageIDs.removeAll()
+    bufferedAgentMessageTexts.removeAll()
     messageIndices.removeAll(keepingCapacity: true)
     for (index, message) in replacement.enumerated() {
       // Preserve the existing first-match behavior for defensive handling of
@@ -2149,12 +2234,17 @@ final class OesapModel {
         return
       }
     }
+    if isDelta, message.author == .agent, !message.isThinkingTrace, message.toolCall == nil {
+      appendBufferedAgentDelta(message)
+      if let cursor { latestTimelineCursor = cursor }
+      return
+    }
     if let existingIndex = messageIndices[message.id] {
       if isDelta, message.toolCall == nil, messages[existingIndex].toolCall == nil {
         messages[existingIndex].text += message.text
       } else {
         var replacement = message
-        if message.toolCall != nil {
+        if message.toolCall != nil || message.isThinkingTrace {
           replacement.timestamp = messages[existingIndex].timestamp ?? message.timestamp
         }
         messages[existingIndex] = replacement
@@ -2165,6 +2255,37 @@ final class OesapModel {
       timelineStructureRevision += 1
     }
     if let cursor { latestTimelineCursor = cursor }
+  }
+
+  private func appendBufferedAgentDelta(_ message: RemoteMessage) {
+    if let existingIndex = messageIndices[message.id] {
+      if bufferedAgentMessageIDs.insert(message.id).inserted {
+        bufferedAgentMessageTexts[message.id] = messages[existingIndex].text + message.text
+        messages[existingIndex].text = ""
+      } else {
+        bufferedAgentMessageTexts[message.id, default: ""] += message.text
+      }
+    } else {
+      var placeholder = message
+      placeholder.text = ""
+      messageIndices[message.id] = messages.count
+      messages.append(placeholder)
+      bufferedAgentMessageIDs.insert(message.id)
+      bufferedAgentMessageTexts[message.id] = message.text
+      timelineStructureRevision += 1
+    }
+  }
+
+  private func commitBufferedAgentMessages() {
+    guard !bufferedAgentMessageIDs.isEmpty else { return }
+    for messageID in bufferedAgentMessageIDs {
+      guard let index = messageIndices[messageID],
+        let text = bufferedAgentMessageTexts[messageID]
+      else { continue }
+      messages[index].text = text
+    }
+    bufferedAgentMessageIDs.removeAll()
+    bufferedAgentMessageTexts.removeAll()
   }
 
   private func imageOverlay(_ message: RemoteMessage, threadID: String) -> RemoteMessage {

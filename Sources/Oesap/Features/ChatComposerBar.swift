@@ -95,7 +95,7 @@ struct ChatComposerBar: View {
       }
 
       HStack(alignment: .bottom, spacing: 8) {
-        imagePicker.padding(.bottom, 4)
+        imagePicker.padding(.bottom, 6)
         messageField
       }
     }
@@ -404,6 +404,7 @@ struct ChatComposerBar: View {
     .buttonStyle(style)
     .buttonBorderShape(.circle)
     .frame(width: 44, height: 44)
+    .offset(y: -2)
     .contentShape(Rectangle())
     .disabled(!canSend)
     .accessibilityLabel(isSending ? "Sending message" : "Send message")

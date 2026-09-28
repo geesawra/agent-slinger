@@ -575,6 +575,38 @@ public actor PaseoProtocolClient: PaseoService {
     )
   }
 
+  public func archiveAgent(agentID: String) async throws {
+    try requireConnected()
+    guard !agentID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose a thread before archiving it.")
+    }
+    let payload = try await request(
+      type: "archive_agent_request",
+      fields: ["agentId": .string(agentID)],
+      responseType: "agent_archived",
+      operation: "thread archive"
+    )
+    guard payload["agentId"]?.stringValue == agentID,
+      let archivedAt = payload["archivedAt"]?.stringValue,
+      !archivedAt.isEmpty
+    else {
+      throw PaseoProtocolError.malformedMessage("thread archive returned an invalid result")
+    }
+  }
+
+  public func clearAgentAttention(agentID: String) async throws {
+    try requireConnected()
+    guard !agentID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose a thread before marking it as read.")
+    }
+    _ = try await request(
+      type: "clear_agent_attention",
+      fields: ["agentId": .string(agentID)],
+      responseType: "clear_agent_attention_response",
+      operation: "mark thread as read"
+    )
+  }
+
   public func history(
     agentID: String,
     direction: PaseoTimelineDirection = .tail,

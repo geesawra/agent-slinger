@@ -10,7 +10,6 @@ struct NewChatView: View {
   @State private var composerFocused = false
   @State private var hasInitiallyFocusedComposer = false
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-  private var project: RemoteProject? { model.projects.first { $0.id == projectID } }
   private var draftKey: String { model.newThreadDraftKey(for: projectID) }
   private var configuration: RemoteAgentConfiguration? {
     model.agentConfiguration(for: projectID)
@@ -30,19 +29,6 @@ struct NewChatView: View {
     VStack(spacing: 0) {
       ScrollView {
         VStack(alignment: .leading, spacing: 18) {
-          if let project {
-            VStack(alignment: .leading, spacing: 5) {
-              Text(project.name)
-                .font(.headline)
-              if let subtitle = project.subtitle {
-                Text(subtitle)
-                  .font(.subheadline)
-                  .foregroundStyle(Color.primary.opacity(0.75))
-                  .lineLimit(2)
-              }
-            }
-          }
-
           projectAgentCard
 
           ContentUnavailableView(

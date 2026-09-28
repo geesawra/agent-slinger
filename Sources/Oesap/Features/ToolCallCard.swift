@@ -7,6 +7,7 @@ struct ToolCallCard: View {
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @State private var presentedSection: RemoteToolCallSection?
+  @State private var wrapsOutputLines = true
 
   var body: some View {
     DisclosureGroup(isExpanded: $isExpanded) {
@@ -20,22 +21,12 @@ struct ToolCallCard: View {
         if let command = call.command, !command.isEmpty {
           ToolCallSectionCard(
             callID: rowID,
+            wrapsLines: wrapsOutputLines,
             section: RemoteToolCallSection(
               id: "command", kind: .code, title: "Command", content: command, language: "shell")
           ) {
             presentedSection = RemoteToolCallSection(
               id: "command", kind: .code, title: "Command", content: command, language: "shell")
-          }
-        }
-
-        if let cwd = call.cwd, !cwd.isEmpty {
-          ToolCallSectionCard(
-            callID: rowID,
-            section: RemoteToolCallSection(
-              id: "cwd", kind: .filePreview, title: "Working directory", content: cwd)
-          ) {
-            presentedSection = RemoteToolCallSection(
-              id: "cwd", kind: .filePreview, title: "Working directory", content: cwd)
           }
         }
 
@@ -50,7 +41,9 @@ struct ToolCallCard: View {
         }
 
         ForEach(call.sections) { section in
-          ToolCallSectionCard(callID: rowID, section: section) {
+          ToolCallSectionCard(
+            callID: rowID, wrapsLines: wrapsOutputLines, section: section
+          ) {
             presentedSection = section
           }
         }
@@ -58,6 +51,7 @@ struct ToolCallCard: View {
         if let errorText = call.errorText, !errorText.isEmpty {
           ToolCallSectionCard(
             callID: rowID,
+            wrapsLines: wrapsOutputLines,
             section: RemoteToolCallSection(
               id: "error-\(rowID)", kind: .text, title: "Error", content: errorText)
           ) {
@@ -91,16 +85,6 @@ struct ToolCallCard: View {
             .fixedSize(horizontal: false, vertical: true)
         }
 
-        if !isExpanded, let cwd = call.cwd, !cwd.isEmpty {
-          HStack(spacing: 5) {
-            Image(systemName: "folder").accessibilityHidden(true)
-            Text(verbatim: cwd)
-          }
-          .font(.caption)
-          .foregroundStyle(Color.primary.opacity(0.75))
-          .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-          .textSelection(.enabled)
-        }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
       .multilineTextAlignment(.leading)
@@ -115,7 +99,7 @@ struct ToolCallCard: View {
       in: RoundedRectangle(cornerRadius: 16, style: .continuous)
     )
     .sheet(item: $presentedSection) { section in
-      ToolCallFullSectionSheet(section: section)
+      ToolCallFullSectionSheet(section: section, wrapsLines: $wrapsOutputLines)
     }
   }
 
@@ -171,7 +155,6 @@ struct ToolCallCard: View {
 
   private var hasNoDetails: Bool {
     (call.command?.isEmpty ?? true)
-      && (call.cwd?.isEmpty ?? true)
       && call.exitCode == nil
       && (call.errorText?.isEmpty ?? true)
       && call.sections.isEmpty
@@ -181,6 +164,7 @@ struct ToolCallCard: View {
 
 private struct ToolCallSectionCard: View {
   let callID: String
+  let wrapsLines: Bool
   let section: RemoteToolCallSection
   var onOpenFull: () -> Void
 
@@ -242,16 +226,11 @@ private struct ToolCallSectionCard: View {
 
       switch section.kind {
       case .text:
-        Text(verbatim: boundedPreview.text)
-          .font(.subheadline)
-          .foregroundStyle(.primary)
-          .textSelection(.enabled)
-          .multilineTextAlignment(.leading)
-          .fixedSize(horizontal: false, vertical: true)
+        ToolTextBlock(content: boundedPreview.text, font: .subheadline, wrapsLines: wrapsLines)
       case .code, .filePreview:
-        ToolMonospacedBlock(content: boundedPreview.text)
+        ToolMonospacedBlock(content: boundedPreview.text, wrapsLines: wrapsLines)
       case .diff:
-        ToolDiffBlock(content: boundedPreview.text)
+        ToolDiffBlock(content: boundedPreview.text, wrapsLines: wrapsLines)
       }
 
       if boundedPreview.hasMore {
@@ -293,45 +272,103 @@ private struct ToolCallSectionCard: View {
 
 private struct ToolMonospacedBlock: View {
   let content: String
+  var wrapsLines = true
 
   var body: some View {
+    Group {
+      if wrapsLines {
+        selectableText
+          .fixedSize(horizontal: false, vertical: true)
+      } else {
+        ScrollView(.horizontal) {
+          selectableText
+            .fixedSize(horizontal: true, vertical: true)
+        }
+        .scrollIndicators(.hidden)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(10)
+    .background(.background.opacity(0.78), in: RoundedRectangle(cornerRadius: 10))
+  }
+
+  private var selectableText: some View {
     Text(verbatim: content)
       .font(.system(.caption, design: .monospaced))
       .foregroundStyle(.primary)
       .textSelection(.enabled)
       .multilineTextAlignment(.leading)
-      .fixedSize(horizontal: false, vertical: true)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(10)
-      .background(.background.opacity(0.78), in: RoundedRectangle(cornerRadius: 10))
+  }
+}
+
+private struct ToolTextBlock: View {
+  let content: String
+  let font: Font
+  var wrapsLines = true
+
+  var body: some View {
+    Group {
+      if wrapsLines {
+        selectableText
+          .fixedSize(horizontal: false, vertical: true)
+      } else {
+        ScrollView(.horizontal) {
+          selectableText
+            .fixedSize(horizontal: true, vertical: true)
+        }
+        .scrollIndicators(.hidden)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private var selectableText: some View {
+    Text(verbatim: content)
+      .font(font)
+      .foregroundStyle(.primary)
+      .textSelection(.enabled)
+      .multilineTextAlignment(.leading)
   }
 }
 
 private struct ToolDiffBlock: View {
   let content: String
+  var wrapsLines = true
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 1) {
-      ForEach(
-        Array(content.split(separator: "\n", omittingEmptySubsequences: false).enumerated()),
-        id: \.offset
-      ) {
-        _, line in
-        Text(verbatim: String(line).isEmpty ? " " : String(line))
-          .font(.system(.caption, design: .monospaced))
-          .foregroundStyle(color(for: line))
-          .textSelection(.enabled)
-          .multilineTextAlignment(.leading)
-          .fixedSize(horizontal: false, vertical: true)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(.horizontal, 10)
-          .padding(.vertical, 1)
-          .background(backgroundColor(for: line))
+    Group {
+      if wrapsLines {
+        diffLines(fixedWidth: false)
+      } else {
+        ScrollView(.horizontal) {
+          diffLines(fixedWidth: true)
+        }
+        .scrollIndicators(.hidden)
       }
     }
     .padding(.vertical, 8)
     .multilineTextAlignment(.leading)
     .background(.background.opacity(0.78), in: RoundedRectangle(cornerRadius: 10))
+  }
+
+  private func diffLines(fixedWidth: Bool) -> some View {
+    VStack(alignment: .leading, spacing: 1) {
+      ForEach(
+        Array(content.split(separator: "\n", omittingEmptySubsequences: false).enumerated()),
+        id: \.offset
+      ) { _, line in
+        Text(verbatim: String(line).isEmpty ? " " : String(line))
+          .font(.system(.caption, design: .monospaced))
+          .foregroundStyle(color(for: line))
+          .textSelection(.enabled)
+          .multilineTextAlignment(.leading)
+          .fixedSize(horizontal: fixedWidth, vertical: true)
+          .frame(maxWidth: fixedWidth ? nil : .infinity, alignment: .leading)
+          .padding(.horizontal, 10)
+          .padding(.vertical, 1)
+          .background(backgroundColor(for: line))
+      }
+    }
   }
 
   private func color(for _: Substring) -> Color { .primary }
@@ -345,13 +382,15 @@ private struct ToolDiffBlock: View {
 
 private struct ToolCallFullSectionSheet: View {
   let section: RemoteToolCallSection
+  @Binding var wrapsLines: Bool
 
   @Environment(\.dismiss) private var dismiss
   @State private var visibleRanges: [Range<String.Index>]
   private let rangesPerPage = 2
 
-  init(section: RemoteToolCallSection) {
+  init(section: RemoteToolCallSection, wrapsLines: Binding<Bool>) {
     self.section = section
+    _wrapsLines = wrapsLines
     _visibleRanges = State(
       initialValue: Self.nextRanges(
         in: section.content, startingAt: section.content.startIndex, count: 2)
@@ -374,15 +413,11 @@ private struct ToolCallFullSectionSheet: View {
             let content = String(section.content[range])
             switch section.kind {
             case .text:
-              Text(verbatim: content)
-                .font(.body)
-                .textSelection(.enabled)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
+              ToolTextBlock(content: content, font: .body, wrapsLines: wrapsLines)
             case .code, .filePreview:
-              ToolMonospacedBlock(content: content)
+              ToolMonospacedBlock(content: content, wrapsLines: wrapsLines)
             case .diff:
-              ToolDiffBlock(content: content)
+              ToolDiffBlock(content: content, wrapsLines: wrapsLines)
             }
           }
 
@@ -408,6 +443,16 @@ private struct ToolCallFullSectionSheet: View {
       .navigationTitle(Text(verbatim: section.title.isEmpty ? "Tool details" : section.title))
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button {
+            wrapsLines.toggle()
+          } label: {
+            Label(
+              wrapsLines ? "Disable line wrapping" : "Enable line wrapping",
+              systemImage: wrapsLines ? "text.alignleft" : "text.justify")
+          }
+          .accessibilityIdentifier("tool-call-toggle-line-wrapping")
+        }
         ToolbarItem(placement: .topBarTrailing) {
           Button("Done") { dismiss() }
             .accessibilityIdentifier("tool-call-full-output-done")
