@@ -36,7 +36,7 @@ struct MessageMarkdownView: View {
           .font(.body)
       } else {
         Markdown(displayed.content)
-          .markdownTheme(.basic)
+          .markdownTheme(.basic.thematicBreak { EmptyView() })
           .markdownImageProvider(
             ReceivedMarkdownImageProvider(
               imagesByID: displayed.imagesByID,
