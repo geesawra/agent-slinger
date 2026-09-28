@@ -1,4 +1,19 @@
 import SwiftUI
+import UIKit
+
+enum InteractionFeedback {
+  static func selection() {
+    #if !targetEnvironment(macCatalyst)
+      UISelectionFeedbackGenerator().selectionChanged()
+    #endif
+  }
+
+  static func send() {
+    #if !targetEnvironment(macCatalyst)
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    #endif
+  }
+}
 
 extension View {
   @ViewBuilder

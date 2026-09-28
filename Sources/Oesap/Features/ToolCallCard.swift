@@ -4,6 +4,7 @@ struct ToolCallCard: View {
   let call: RemoteToolCall
   let rowID: String
   @Binding var isExpanded: Bool
+  var isGrouped = false
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @State private var presentedSection: RemoteToolCallSection?
@@ -93,11 +94,13 @@ struct ToolCallCard: View {
       .accessibilityIdentifier("tool-call-disclosure-\(rowID)")
     }
     .tint(.primary)
-    .padding(14)
-    .background(
-      Color(uiColor: .secondarySystemBackground),
-      in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-    )
+    .padding(isGrouped ? 0 : 14)
+    .background {
+      if !isGrouped {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+          .fill(Color(uiColor: .secondarySystemBackground))
+      }
+    }
     .sheet(item: $presentedSection) { section in
       ToolCallFullSectionSheet(section: section, wrapsLines: $wrapsOutputLines)
     }
@@ -160,6 +163,89 @@ struct ToolCallCard: View {
       && call.sections.isEmpty
   }
 
+}
+
+struct ToolCallGroupCard: View {
+  let messages: [RemoteMessage]
+  @Binding var isExpanded: Bool
+
+  @State private var expandedCallIDs: Set<String> = []
+  @State private var collapsedActiveCallID: String?
+
+  private var activeMessage: RemoteMessage? {
+    messages.last { $0.toolCall?.status == .running }
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      DisclosureGroup(isExpanded: $isExpanded) {
+        VStack(alignment: .leading, spacing: 12) {
+          ForEach(messages) { message in
+            if message.id != messages.first?.id { Divider() }
+            toolCall(message)
+          }
+        }
+        .padding(.top, 10)
+      } label: {
+        HStack(spacing: 8) {
+          Label("Tools (\(messages.count))", systemImage: "hammer")
+            .font(.headline)
+          Spacer(minLength: 4)
+          if let activeMessage, let call = activeMessage.toolCall {
+            ProgressView().controlSize(.small)
+            Text(verbatim: call.title)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+          }
+        }
+        .contentShape(Rectangle())
+      }
+
+      if !isExpanded, let activeMessage {
+        Divider()
+        toolCall(activeMessage)
+      }
+    }
+    .tint(.primary)
+    .padding(14)
+    .background(
+      Color(uiColor: .secondarySystemBackground),
+      in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+    )
+    .accessibilityIdentifier("tool-call-group-\(messages.first?.id ?? "empty")")
+    .onChange(of: activeMessage?.id) { _, _ in
+      collapsedActiveCallID = nil
+      expandedCallIDs.removeAll()
+    }
+  }
+
+  @ViewBuilder
+  private func toolCall(_ message: RemoteMessage) -> some View {
+    if let call = message.toolCall {
+      ToolCallCard(
+        call: call, rowID: message.id,
+        isExpanded: Binding(
+          get: {
+            if message.id == activeMessage?.id {
+              return collapsedActiveCallID != message.id
+            }
+            return expandedCallIDs.contains(message.id)
+          },
+          set: { expanded in
+            if message.id == activeMessage?.id {
+              collapsedActiveCallID = expanded ? nil : message.id
+            } else if expanded {
+              expandedCallIDs.insert(message.id)
+            } else {
+              expandedCallIDs.remove(message.id)
+            }
+          }
+        ),
+        isGrouped: true
+      )
+    }
+  }
 }
 
 private struct ToolCallSectionCard: View {

@@ -37,7 +37,9 @@ struct AgentSettingsSheet: View {
         }
         ToolbarItem(placement: .topBarTrailing) {
           Button {
-            Task { await model.applySessionSettings(threadID: threadID) }
+            Task {
+              if await model.applySessionSettings(threadID: threadID) { dismiss() }
+            }
           } label: {
             if model.sessionDetailsApplying {
               ProgressView()
@@ -51,8 +53,8 @@ struct AgentSettingsSheet: View {
         }
       }
     }
-    .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.medium, .large])
-    .presentationDragIndicator(.visible)
+    .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.medium])
+    .presentationDragIndicator(.hidden)
     .interactiveDismissDisabled(model.sessionDetailsApplying)
     .task(id: threadID) { await model.openSessionDetails(threadID: threadID) }
   }

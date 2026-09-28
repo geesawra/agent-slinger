@@ -78,7 +78,8 @@ the upstream `agent_permission_response` shape and waits for the matching
 New threads use the host's `creationLifecycle` feature and `agent.create.request` with
 one `initialPrompt`, a stable `idempotencyKey`, and a stable `clientMessageId`. The
 request includes `config.provider` and `config.cwd` set to the selected project's
-`projectRootPath`; `config.model` is included only when the user selected a model.
+`projectRootPath`; `config.model` and `config.modeId` are included only when the
+user selected a model or permission mode.
 It omits `workspaceId`, allowing the daemon to create a new directory workspace
 under that project. The app never sends an older `create_agent_request` with a
 prompt, because upstream legacy creation cannot safely key that combination.
@@ -90,7 +91,7 @@ the app opens that thread with the draft intact. A definitive pre-agent failure 
 start a new intent after the user corrects the setting.
 
 Paseo project descriptors do not carry a project agent binding. Oesap therefore
-saves a **device-local** provider and optional model per stable `serverId` and
+saves a **device-local** provider, optional model, and optional permission mode per stable `serverId` and
 `projectId`, and refuses to save under a missing or unknown server ID. The Agent
 screen discovers providers and models for the project's root directory through
 `get_providers_snapshot_request`, gated by `providersSnapshot` and

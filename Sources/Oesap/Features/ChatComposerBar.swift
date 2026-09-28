@@ -22,6 +22,7 @@ struct ChatComposerBar: View {
   var refocusAfterSend = true
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var showsExpandedComposer = false
   @State private var pendingExpandedStop = false
   @State private var showsCompactExpandControl = false
@@ -58,14 +59,17 @@ struct ChatComposerBar: View {
           },
           onRemoveImage: removeImage,
           onStop: {
+            InteractionFeedback.selection()
             pendingExpandedStop = true
             showsExpandedComposer = false
           },
           onInterrupt: {
+            InteractionFeedback.send()
             pendingExpandedInterrupt = (draft, images)
             showsExpandedComposer = false
           },
           onSend: {
+            InteractionFeedback.send()
             pendingExpandedSend = (draft, images)
             showsExpandedComposer = false
           }
@@ -268,7 +272,10 @@ struct ChatComposerBar: View {
   private func makeContextUsageButton<Style: PrimitiveButtonStyle>(
     action: @escaping () -> Void, style: Style
   ) -> some View {
-    Button(action: action) {
+    Button {
+      InteractionFeedback.selection()
+      action()
+    } label: {
       ContextUsageIndicator(usage: contextUsage, isLoading: isLoadingContextUsage)
         .padding(.horizontal, 10)
         .frame(minHeight: 44)
@@ -278,48 +285,6 @@ struct ChatComposerBar: View {
     .tint(accessoryTint)
     .accessibilityHint("Opens model, effort, and permission settings.")
     .accessibilityIdentifier("context-usage-button")
-  }
-
-  @ViewBuilder
-  private var stopControl: some View {
-    if let onStop, showsStopAction {
-      #if targetEnvironment(macCatalyst)
-        makeStopButton(action: onStop, style: .bordered)
-      #else
-        if #available(iOS 26.0, *) {
-          makeStopButton(action: onStop, style: .glass)
-        } else {
-          makeStopButton(action: onStop, style: .bordered)
-        }
-      #endif
-    }
-  }
-
-  private func makeStopButton<Style: PrimitiveButtonStyle>(
-    action: @escaping () -> Void, style: Style
-  )
-    -> some View
-  {
-    Button(action: action) {
-      Group {
-        if isStopPending {
-          ProgressView()
-            .tint(Color.secondary)
-        } else {
-          Image(systemName: "square.fill")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Color.primary)
-        }
-      }
-      .frame(minWidth: 44, minHeight: 44)
-      .contentShape(Rectangle())
-      .foregroundStyle(Color.primary)
-    }
-    .buttonStyle(style)
-    .tint(accessoryTint)
-    .disabled(!isStopEnabled || isStopPending)
-    .accessibilityLabel(isStopPending ? "Stopping agent" : "Stop agent")
-    .accessibilityIdentifier(stopButtonIdentifier)
   }
 
   @ViewBuilder
@@ -388,11 +353,7 @@ struct ChatComposerBar: View {
       if showsCompactExpandControl {
         expandControl
       }
-      if showsStopAction {
-        stopControl
-      } else {
-        sendControl
-      }
+      sendControl
     }
     .frame(width: 44, alignment: .bottom)
   }
@@ -407,13 +368,23 @@ struct ChatComposerBar: View {
   }
 
   private func makeSendButton<Style: PrimitiveButtonStyle>(style: Style) -> some View {
-    Button(action: sendDraft) {
+    Button {
+      if showsStopAction {
+        InteractionFeedback.selection()
+        onStop?()
+      } else {
+        sendDraft()
+      }
+    } label: {
       Group {
-        if isSending {
+        if showsStopAction && isStopPending {
+          ProgressView().tint(Color.secondary)
+        } else if isSending {
           ProgressView()
         } else {
-          Image(systemName: "arrow.up")
-            .font(.system(size: 16, weight: .semibold))
+          Image(systemName: showsStopAction ? "square.fill" : "arrow.up")
+            .font(.system(size: showsStopAction ? 12 : 16, weight: .semibold))
+            .contentTransition(.symbolEffect(.replace))
         }
       }
       .frame(width: 32, height: 32)
@@ -425,7 +396,8 @@ struct ChatComposerBar: View {
     .frame(width: 44, height: 44)
     .offset(y: -2)
     .contentShape(Rectangle())
-    .disabled(!canSend)
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: showsStopAction)
+    .disabled(showsStopAction ? (!isStopEnabled || isStopPending) : !canSend)
     .contextMenu {
       if isAgentRunning, interrupt != nil {
         Button(action: sendDraft) {
@@ -437,12 +409,18 @@ struct ChatComposerBar: View {
       }
     }
     .accessibilityLabel(
-      isSending ? "Sending message" : isAgentRunning ? "Steer current turn" : "Send message")
+      showsStopAction
+        ? (isStopPending ? "Stopping agent" : "Stop agent")
+        : (isSending ? "Sending message" : isAgentRunning ? "Steer current turn" : "Send message")
+    )
     .accessibilityHint(
-      isAgentRunning
-        ? "Sends this message to the active turn using Paseo steering. Long press to interrupt and restart instead."
-        : "")
-    .accessibilityIdentifier("send-message")
+      showsStopAction
+        ? "Stops the running agent."
+        : isAgentRunning
+          ? "Sends this message to the active turn using Paseo steering. Long press to interrupt and restart instead."
+          : ""
+    )
+    .accessibilityIdentifier(showsStopAction ? stopButtonIdentifier : "send-message")
   }
 
   @ViewBuilder
@@ -505,12 +483,14 @@ struct ChatComposerBar: View {
 
   private func sendDraft() {
     guard canSend else { return }
+    InteractionFeedback.send()
     send(draft, images)
     focus.wrappedValue = refocusAfterSend
   }
 
   private func interruptDraft() {
     guard canSend else { return }
+    InteractionFeedback.send()
     (interrupt ?? send)(draft, images)
     focus.wrappedValue = refocusAfterSend
   }

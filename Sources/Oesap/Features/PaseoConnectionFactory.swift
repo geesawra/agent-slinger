@@ -235,7 +235,11 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       RemoteAgentProvider(
         id: provider.id, available: provider.available, error: provider.error,
         label: provider.label,
-        models: provider.models.map(Self.mapAgentModel))
+        models: provider.models.map(Self.mapAgentModel),
+        modes: provider.modes.map {
+          RemoteAgentMode(id: $0.id, label: $0.label, description: $0.description)
+        },
+        defaultModeID: provider.defaultModeID)
     }
   }
 
@@ -309,6 +313,7 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
         clientMessageID: intent.clientMessageID,
         provider: intent.provider,
         model: intent.model,
+        modeID: intent.modeID,
         cwd: intent.cwd,
         initialPrompt: intent.prompt,
         images: intent.images.map { PaseoImage(data: $0.data, mimeType: $0.mimeType) }))
@@ -825,11 +830,19 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
         item = .object(merged)
       }
       guard
-        let message = mapTimelineItem(
+        var message = mapTimelineItem(
           item, fallbackID: entry.id, timestamp: entry.timestamp, turnID: entry.turnID)
       else { continue }
+      if let compaction = message.compaction, compaction.status == .completed,
+        !messages.contains(where: { $0.id == message.id }),
+        let loadingIndex = messages.lastIndex(where: {
+          $0.compaction?.status == .loading && $0.compaction?.turnID == compaction.turnID
+        })
+      {
+        message.id = messages[loadingIndex].id
+      }
       if let index = messages.firstIndex(where: { $0.id == message.id }) {
-        if message.toolCall != nil || message.isThinkingTrace {
+        if message.toolCall != nil || message.isThinkingTrace || message.compaction != nil {
           var replacement = message
           replacement.timestamp = messages[index].timestamp ?? message.timestamp
           messages[index] = replacement
@@ -856,6 +869,7 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     let id =
       object["messageId"]?.stringValue
       ?? (type == "reasoning" ? turnID.map { "thinking-turn:\($0)" } : nil)
+      ?? (type == "compaction" ? turnID.map { "compaction-turn:\($0)" } : nil)
       ?? fallbackID
     let date = timestamp.flatMap(parseTimestamp)
     switch type {
@@ -890,8 +904,13 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       return RemoteMessage(
         id: id, author: .system, text: "Agent checklist updated.", timestamp: date)
     case "compaction":
+      let status: RemoteCompaction.Status =
+        object["status"]?.stringValue == "loading" ? .loading : .completed
       return RemoteMessage(
-        id: id, author: .system, text: "Conversation context compacted.", timestamp: date)
+        id: id, author: .system, text: "", timestamp: date,
+        compaction: RemoteCompaction(
+          status: status, turnID: turnID, trigger: object["trigger"]?.stringValue,
+          preTokens: object["preTokens"]?.intValue))
     default:
       return nil
     }

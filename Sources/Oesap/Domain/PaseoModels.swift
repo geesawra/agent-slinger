@@ -202,15 +202,20 @@ public struct PaseoProvider: Sendable, Equatable {
   public let available: Bool
   public let error: String?
   public let models: [PaseoProviderModel]
+  public let modes: [PaseoAgentMode]
+  public let defaultModeID: String?
 
   public init(
-    id: String, label: String, available: Bool, error: String?, models: [PaseoProviderModel]
+    id: String, label: String, available: Bool, error: String?, models: [PaseoProviderModel],
+    modes: [PaseoAgentMode] = [], defaultModeID: String? = nil
   ) {
     self.id = id
     self.label = label
     self.available = available
     self.error = error
     self.models = models
+    self.modes = modes
+    self.defaultModeID = defaultModeID
   }
 }
 
@@ -219,18 +224,20 @@ public struct PaseoAgentCreationIntent: Sendable, Equatable {
   public let clientMessageID: String
   public let provider: String
   public let model: String?
+  public let modeID: String?
   public let cwd: String
   public let initialPrompt: String
   public let images: [PaseoImage]
 
   public init(
     idempotencyKey: String, clientMessageID: String, provider: String, model: String?,
-    cwd: String, initialPrompt: String, images: [PaseoImage] = []
+    modeID: String? = nil, cwd: String, initialPrompt: String, images: [PaseoImage] = []
   ) {
     self.idempotencyKey = idempotencyKey
     self.clientMessageID = clientMessageID
     self.provider = provider
     self.model = model
+    self.modeID = modeID
     self.cwd = cwd
     self.initialPrompt = initialPrompt
     self.images = images

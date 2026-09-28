@@ -44,6 +44,36 @@ private enum AgentActionConfirmation: Identifiable {
   }
 }
 
+private enum ChatTimelineRow: Identifiable {
+  case message(RemoteMessage)
+  case tools([RemoteMessage])
+
+  var id: String {
+    switch self {
+    case .message(let message): message.id
+    case .tools(let messages): "tools-\(messages.first?.id ?? "empty")"
+    }
+  }
+
+  static func grouped(_ messages: [RemoteMessage], hiding hiddenIDs: Set<String>) -> [Self] {
+    var rows: [Self] = []
+    var tools: [RemoteMessage] = []
+    for message in messages where !message.isThinkingTrace && !hiddenIDs.contains(message.id) {
+      if message.toolCall != nil {
+        tools.append(message)
+      } else {
+        if !tools.isEmpty {
+          rows.append(.tools(tools))
+          tools.removeAll(keepingCapacity: true)
+        }
+        rows.append(.message(message))
+      }
+    }
+    if !tools.isEmpty { rows.append(.tools(tools)) }
+    return rows
+  }
+}
+
 struct ChatView: View {
   @Bindable var model: OesapModel
   let threadID: String
@@ -52,24 +82,30 @@ struct ChatView: View {
   @State private var composerFocused = false
   @State private var isNearBottom = true
   @State private var isUserScrolling = false
+  @State private var jumpToLatestRequested = false
   @State private var expandedToolCallIDs: Set<String> = []
+  @State private var collapsedRunningToolCallIDs: Set<String> = []
+  @State private var expandedToolGroupIDs: Set<String> = []
   @State private var actionSheet: AgentActionSheet?
   @State private var actionConfirmation: AgentActionConfirmation?
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var thread: RemoteThread? { model.threads.first { $0.id == threadID } }
+  private var timelineRows: [ChatTimelineRow] {
+    ChatTimelineRow.grouped(model.messages, hiding: model.bufferedAgentMessageIDs)
+  }
 
-  private var latestThinkingTraceID: String? {
-    model.messages.last(where: \.isThinkingTrace)?.id
+  private var latestThinkingTrace: RemoteMessage? {
+    let start =
+      model.messages.lastIndex(where: { $0.author == .user })
+      .map { model.messages.index(after: $0) } ?? model.messages.startIndex
+    return model.messages[start...].last(where: \.isThinkingTrace)
   }
 
   private var agentActivityMessage: String? {
     guard model.connectionState == .connected, let thread else { return nil }
-    let hasBufferedOutput = model.messages.contains { message in
-      message.author == .agent && model.bufferedAgentMessageIDs.contains(message.id)
-    }
     if thread.state == .running {
-      return hasBufferedOutput || latestThinkingTraceID != nil ? nil : "Thinking…"
+      return latestThinkingTrace == nil ? "Thinking…" : nil
     }
     if model.agentSendFeedback(for: threadID)?.phase == .accepted {
       return "Waiting for the agent…"
@@ -167,50 +203,8 @@ struct ChatView: View {
               .frame(maxWidth: .infinity, minHeight: 150)
             }
 
-            ForEach(model.messages) { message in
-              if let toolCall = message.toolCall {
-                ToolCallCard(
-                  call: toolCall,
-                  rowID: message.id,
-                  isExpanded: Binding(
-                    get: { expandedToolCallIDs.contains(message.id) },
-                    set: { expanded in
-                      if expanded {
-                        expandedToolCallIDs.insert(message.id)
-                      } else {
-                        expandedToolCallIDs.remove(message.id)
-                      }
-                    }
-                  )
-                )
-                .id(message.id)
-              } else if message.isThinkingTrace {
-                if message.id == latestThinkingTraceID {
-                  ThinkingTraceView(
-                    message: message,
-                    isUpdating: model.connectionState == .connected && thread?.state == .running
-                  )
-                  .id(message.id)
-                }
-              } else {
-                MessageBubble(
-                  message: message,
-                  threadID: threadID,
-                  timelineGeneration: model.timelineGeneration,
-                  buffersAgentOutput: model.bufferedAgentMessageIDs.contains(message.id),
-                  loadRemoteImage: { source, imageThreadID in
-                    try await model.loadRemoteImage(source: source, threadID: imageThreadID)
-                  }
-                )
-                .equatable()
-                .id(message.id)
-              }
-            }
-
-            if let activity = agentActivityMessage {
-              AgentActivityIndicator(message: activity)
-                .id("agent-activity-\(threadID)")
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+            ForEach(timelineRows) { row in
+              timelineRow(row)
             }
 
             if model.loadingHistory && !model.messages.isEmpty {
@@ -254,6 +248,19 @@ struct ChatView: View {
               .id("agent-action-status-\(threadID)")
             }
 
+            if let trace = latestThinkingTrace {
+              ThinkingTraceView(
+                message: trace,
+                isUpdating: model.connectionState == .connected && thread?.state == .running
+              )
+              .id(trace.id)
+              .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let activity = agentActivityMessage {
+              AgentActivityIndicator(message: activity)
+                .id("agent-activity-\(threadID)")
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             Color.clear
               .frame(height: 1)
               .id("timeline-bottom")
@@ -267,6 +274,8 @@ struct ChatView: View {
             reduceMotion ? nil : .easeInOut(duration: 0.22),
             value: model.bufferedAgentMessageIDs
           )
+          .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: latestThinkingTrace?.id)
+          .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: agentActivityMessage)
           .background {
             // The full stack exists even when the lazy bottom row is offscreen.
             GeometryReader { geometry in
@@ -283,16 +292,44 @@ struct ChatView: View {
         .modifier(
           TimelineScrollTracking(
             isNearBottom: $isNearBottom, isUserScrolling: $isUserScrolling,
-            viewportHeight: viewport.size.height, hasExpandedToolCall: !expandedToolCallIDs.isEmpty)
+            jumpToLatestRequested: $jumpToLatestRequested,
+            viewportHeight: viewport.size.height,
+            hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
         )
         .onChange(of: model.timelineStructureRevision) { _, _ in
-          let liveToolCallIDs = Set(model.messages.filter { $0.toolCall != nil }.map(\.id))
-          expandedToolCallIDs.formIntersection(liveToolCallIDs)
+          let standaloneToolCallIDs = Set(
+            timelineRows.compactMap { row -> String? in
+              if case .tools(let messages) = row, messages.count == 1 {
+                return messages.first?.id
+              }
+              return nil
+            })
+          expandedToolCallIDs.formIntersection(standaloneToolCallIDs)
+          let runningStandaloneIDs = Set(
+            timelineRows.compactMap { row -> String? in
+              if case .tools(let messages) = row, messages.count == 1,
+                let message = messages.first, message.toolCall?.status == .running
+              {
+                return message.id
+              }
+              return nil
+            })
+          collapsedRunningToolCallIDs.formIntersection(runningStandaloneIDs)
+          let liveGroupIDs = Set(
+            timelineRows.compactMap { row -> String? in
+              if case .tools(let messages) = row, messages.count > 1 { return row.id }
+              return nil
+            })
+          expandedToolGroupIDs.formIntersection(liveGroupIDs)
+          followLatestIfNeeded(proxy)
         }
         .onChange(of: threadID) { _, _ in
           expandedToolCallIDs.removeAll()
+          collapsedRunningToolCallIDs.removeAll()
+          expandedToolGroupIDs.removeAll()
           isNearBottom = true
           isUserScrolling = false
+          jumpToLatestRequested = false
         }
         .onChange(of: thread?.requiresAttention) { _, requiresAttention in
           guard requiresAttention == true else { return }
@@ -317,65 +354,22 @@ struct ChatView: View {
             // iOS 17 baseline without separate scroll-anchor roles.
             isNearBottom = true
             proxy.scrollTo("timeline-bottom", anchor: .bottom)
+          } else {
+            followLatestIfNeeded(proxy)
           }
         }
-        .overlay(alignment: .bottomTrailing) {
-          if !isNearBottom, !model.messages.isEmpty {
-            Button {
-              isNearBottom = true
-              isUserScrolling = false
-              proxy.scrollTo("timeline-bottom", anchor: .bottom)
-            } label: {
-              Label("Latest", systemImage: "arrow.down")
-                .font(.callout.weight(.medium))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.capsule)
-            .accessibilityLabel("Jump to latest message")
-            .accessibilityIdentifier("chat-jump-to-latest")
-            .padding()
-          }
+        .onChange(of: latestThinkingTrace) { _, _ in followLatestIfNeeded(proxy) }
+        .onChange(of: agentActivityMessage) { _, _ in followLatestIfNeeded(proxy) }
+        .onChange(of: model.bufferedAgentMessageIDs) { _, _ in followLatestIfNeeded(proxy) }
+        .onChange(of: viewport.size.height) { oldHeight, newHeight in
+          if newHeight < oldHeight { followLatestIfNeeded(proxy) }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-          ChatComposerBar(
-            draft: Binding(
-              get: { model.draft(for: threadID) },
-              set: { model.setDraft($0, for: threadID) }
-            ),
-            images: Binding(
-              get: { model.draftImages(for: threadID) },
-              set: { _ = model.setDraftImages($0, for: threadID) }
-            ),
-            isSending: model.isSendingAgentMessage(for: threadID),
-            isConnected: model.agentControlAvailable(for: threadID),
-            error: nil,
-            focus: $composerFocused,
-            send: submitThreadMessage,
-            interrupt: interruptThreadMessage,
-            clearError: {},
-            contextUsage: model.contextUsage(for: threadID),
-            isLoadingContextUsage: model.loadingContextUsage,
-            onShowContextUsage: {
-              composerFocused = false
-              showsAgentSettings = true
-            },
-            isAgentRunning: thread?.state == .running,
-            isStopPending: model.isStopRequestPending(threadID),
-            isStopEnabled: model.agentControlAvailable(for: threadID)
-              && !model.isSendingAgentMessage(for: threadID),
-            stopButtonIdentifier: "agent-stop-\(threadID)",
-            onStop: {
-              actionConfirmation = .stop(
-                threadID: threadID,
-                revision: model.threadStateRevision(for: threadID))
-            },
-            imageImportIdentity: "\(threadID)-\(model.timelineGeneration)",
-            refocusAfterSend: thread?.state != .running
-              && !model.hasUncertainAgentMessage(for: threadID)
-          )
-        }
+        .modifier(
+          TimelineJumpControls(
+            isNearBottom: $isNearBottom, isUserScrolling: $isUserScrolling,
+            jumpToLatestRequested: $jumpToLatestRequested, proxy: proxy,
+            hasMessages: !model.messages.isEmpty, reduceMotion: reduceMotion)
+        )
         .navigationTitle(thread?.title ?? "Agent thread")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -450,6 +444,127 @@ struct ChatView: View {
         }
       }
     }
+    .safeAreaInset(edge: .bottom, spacing: 0) { composerBar }
+  }
+
+  private var composerBar: some View {
+    ChatComposerBar(
+      draft: Binding(
+        get: { model.draft(for: threadID) },
+        set: { model.setDraft($0, for: threadID) }
+      ),
+      images: Binding(
+        get: { model.draftImages(for: threadID) },
+        set: { _ = model.setDraftImages($0, for: threadID) }
+      ),
+      isSending: model.isSendingAgentMessage(for: threadID),
+      isConnected: model.agentControlAvailable(for: threadID),
+      error: nil,
+      focus: $composerFocused,
+      send: submitThreadMessage,
+      interrupt: interruptThreadMessage,
+      clearError: {},
+      contextUsage: model.contextUsage(for: threadID),
+      isLoadingContextUsage: model.loadingContextUsage,
+      onShowContextUsage: {
+        composerFocused = false
+        showsAgentSettings = true
+      },
+      isAgentRunning: thread?.state == .running,
+      isStopPending: model.isStopRequestPending(threadID),
+      isStopEnabled: model.agentControlAvailable(for: threadID)
+        && !model.isSendingAgentMessage(for: threadID),
+      stopButtonIdentifier: "agent-stop-\(threadID)",
+      onStop: {
+        actionConfirmation = .stop(
+          threadID: threadID,
+          revision: model.threadStateRevision(for: threadID))
+      },
+      imageImportIdentity: "\(threadID)-\(model.timelineGeneration)",
+      refocusAfterSend: thread?.state != .running
+        && !model.hasUncertainAgentMessage(for: threadID)
+    )
+  }
+
+  @ViewBuilder
+  private func timelineRow(_ row: ChatTimelineRow) -> some View {
+    switch row {
+    case .tools(let messages):
+      if messages.count > 1 {
+        ToolCallGroupCard(
+          messages: messages,
+          isExpanded: Binding(
+            get: { expandedToolGroupIDs.contains(row.id) },
+            set: { expanded in
+              if expanded {
+                expandedToolGroupIDs.insert(row.id)
+              } else {
+                expandedToolGroupIDs.remove(row.id)
+              }
+            }
+          )
+        )
+        .id(row.id)
+      } else if let message = messages.first, let toolCall = message.toolCall {
+        ToolCallCard(
+          call: toolCall, rowID: message.id,
+          isExpanded: Binding(
+            get: {
+              toolCall.status == .running
+                ? !collapsedRunningToolCallIDs.contains(message.id)
+                : expandedToolCallIDs.contains(message.id)
+            },
+            set: { expanded in
+              if toolCall.status == .running {
+                if expanded {
+                  collapsedRunningToolCallIDs.remove(message.id)
+                } else {
+                  collapsedRunningToolCallIDs.insert(message.id)
+                }
+              } else if expanded {
+                expandedToolCallIDs.insert(message.id)
+              } else {
+                expandedToolCallIDs.remove(message.id)
+              }
+            }
+          )
+        )
+        .id(row.id)
+      }
+    case .message(let message):
+      if let compaction = message.compaction {
+        CompactionCard(compaction: compaction)
+          .id(message.id)
+      } else {
+        MessageBubble(
+          message: message,
+          threadID: threadID,
+          timelineGeneration: model.timelineGeneration,
+          loadRemoteImage: { source, imageThreadID in
+            try await model.loadRemoteImage(source: source, threadID: imageThreadID)
+          }
+        )
+        .equatable()
+        .id(message.id)
+      }
+    }
+  }
+
+  private func followLatestIfNeeded(_ proxy: ScrollViewProxy) {
+    guard
+      TimelineScrollFollowPolicy.shouldFollowUpdates(
+        isNearBottom: isNearBottom, isUserScrolling: isUserScrolling,
+        hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
+    else { return }
+    Task { @MainActor in
+      await Task.yield()
+      guard
+        TimelineScrollFollowPolicy.shouldFollowUpdates(
+          isNearBottom: isNearBottom, isUserScrolling: isUserScrolling,
+          hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
+      else { return }
+      proxy.scrollTo("timeline-bottom", anchor: .bottom)
+    }
   }
 
   private func submitThreadMessage(_ text: String, images: [RemoteDraftImage]) {
@@ -487,6 +602,56 @@ struct ChatView: View {
         behavior: behavior,
         expectedStateRevision: revision, selectedDuringActiveTurn: selectedDuringActiveTurn,
         images: images)
+    }
+  }
+}
+
+private struct TimelineJumpControls: ViewModifier {
+  @Binding var isNearBottom: Bool
+  @Binding var isUserScrolling: Bool
+  @Binding var jumpToLatestRequested: Bool
+  let proxy: ScrollViewProxy
+  let hasMessages: Bool
+  let reduceMotion: Bool
+
+  func body(content: Content) -> some View {
+    content
+      .onChange(of: isUserScrolling) { _, scrolling in
+        if !scrolling && jumpToLatestRequested { jumpToLatest() }
+      }
+      .onChange(of: isNearBottom) { _, nearBottom in
+        if nearBottom && !isUserScrolling { jumpToLatestRequested = false }
+      }
+      .overlay(alignment: .bottomTrailing) {
+        if !isNearBottom && hasMessages {
+          Button {
+            InteractionFeedback.selection()
+            jumpToLatestRequested = true
+            jumpToLatest()
+          } label: {
+            Label("Latest", systemImage: "arrow.down")
+              .font(.callout.weight(.medium))
+              .padding(.horizontal, 12)
+              .padding(.vertical, 8)
+          }
+          .buttonStyle(.borderedProminent)
+          .buttonBorderShape(.capsule)
+          .accessibilityLabel("Jump to latest message")
+          .accessibilityIdentifier("chat-jump-to-latest")
+          .padding()
+          .transition(.opacity.combined(with: .scale(scale: 0.92)))
+        }
+      }
+      .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isNearBottom)
+  }
+
+  private func jumpToLatest() {
+    proxy.scrollTo("timeline-bottom", anchor: .bottom)
+    Task { @MainActor in
+      await Task.yield()
+      guard jumpToLatestRequested && !isUserScrolling else { return }
+      proxy.scrollTo("timeline-bottom", anchor: .bottom)
+      if isNearBottom { jumpToLatestRequested = false }
     }
   }
 }
@@ -736,46 +901,27 @@ private struct PermissionCard: View {
 
 private struct MessageBubble: View, Equatable {
   static func == (lhs: Self, rhs: Self) -> Bool {
-    let messageMatches =
-      lhs.buffersAgentOutput && rhs.buffersAgentOutput
-      ? lhs.message.id == rhs.message.id && lhs.message.author == rhs.message.author
-      : lhs.message == rhs.message
-    return messageMatches && lhs.buffersAgentOutput == rhs.buffersAgentOutput
-      && lhs.threadID == rhs.threadID
+    lhs.message == rhs.message && lhs.threadID == rhs.threadID
       && lhs.timelineGeneration == rhs.timelineGeneration
   }
 
   let message: RemoteMessage
   let threadID: String
   let timelineGeneration: Int
-  let buffersAgentOutput: Bool
   let loadRemoteImage: (String, String) async throws -> Data
 
   var body: some View {
     HStack {
       if message.author == .user { Spacer(minLength: 42) }
       VStack(alignment: .leading, spacing: 5) {
-        if buffersAgentOutput {
-          HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Thinking…")
-              .font(.subheadline)
-              .foregroundStyle(.secondary)
-          }
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .accessibilityElement(children: .combine)
-          .accessibilityLabel("Agent is thinking")
-          .transition(.move(edge: .bottom).combined(with: .opacity))
-        } else {
-          MessageMarkdownView(
-            source: message.text,
-            cacheKey: "\(threadID)-\(timelineGeneration)-\(message.id)",
-            threadID: threadID,
-            loadRemoteImage: loadRemoteImage
-          )
-          .id("\(threadID)-\(timelineGeneration)-\(message.id)")
-          .transition(.move(edge: .bottom).combined(with: .opacity))
-        }
+        MessageMarkdownView(
+          source: message.text,
+          cacheKey: "\(threadID)-\(timelineGeneration)-\(message.id)",
+          threadID: threadID,
+          loadRemoteImage: loadRemoteImage
+        )
+        .id("\(threadID)-\(timelineGeneration)-\(message.id)")
+        .transition(.move(edge: .bottom).combined(with: .opacity))
         if !message.images.isEmpty {
           ScrollView(.horizontal) {
             HStack(spacing: 8) {
@@ -822,9 +968,53 @@ private struct AgentActivityIndicator: View {
         .foregroundStyle(.secondary)
     }
     .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(.horizontal, 14)
-    .padding(.vertical, 8)
+    .padding(12)
+    .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     .accessibilityElement(children: .combine)
+  }
+}
+
+private struct CompactionCard: View {
+  let compaction: RemoteCompaction
+
+  private var isLoading: Bool { compaction.status == .loading }
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 12) {
+      Image(systemName: "arrow.triangle.2.circlepath")
+        .font(.body.weight(.semibold))
+        .foregroundStyle(.tint)
+        .frame(width: 24, height: 24)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 8) {
+          Text(isLoading ? "Compacting context…" : "Context compacted")
+            .font(.subheadline.weight(.semibold))
+          if isLoading { ProgressView().controlSize(.small) }
+        }
+        Text(detail)
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(14)
+    .background(
+      Color.accentColor.opacity(0.08),
+      in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .strokeBorder(Color.accentColor.opacity(0.18))
+    }
+    .accessibilityElement(children: .combine)
+    .accessibilityIdentifier("compaction-card")
+  }
+
+  private var detail: String {
+    let trigger = compaction.trigger == "manual" ? "Requested by you" : "Conversation memory"
+    guard let preTokens = compaction.preTokens, preTokens > 0 else { return trigger }
+    return "\(trigger) · \(preTokens.formatted()) tokens before compaction"
   }
 }
 
@@ -928,14 +1118,17 @@ private struct TimelinePerformanceProgress: ViewModifier {
 private struct TimelineScrollTracking: ViewModifier {
   @Binding var isNearBottom: Bool
   @Binding var isUserScrolling: Bool
+  @Binding var jumpToLatestRequested: Bool
   let viewportHeight: CGFloat
   let hasExpandedToolCall: Bool
   @State private var previousContentFrame: CGRect?
+  @State private var previousViewportHeight: CGFloat?
   @State private var scrollSettleTask: Task<Void, Never>?
 
   private struct Metrics: Equatable {
     let isNearBottom: Bool
     let contentHeight: CGFloat
+    let viewportHeight: CGFloat
   }
 
   private var sizeChangeAnchor: UnitPoint {
@@ -951,6 +1144,9 @@ private struct TimelineScrollTracking: ViewModifier {
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .defaultScrollAnchor(sizeChangeAnchor, for: .sizeChanges)
         .onScrollPhaseChange { _, phase, context in
+          if phase == .tracking || phase == .interacting {
+            jumpToLatestRequested = false
+          }
           let wasUserScrolling = isUserScrolling
           isUserScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
           if isUserScrolling || wasUserScrolling {
@@ -961,11 +1157,13 @@ private struct TimelineScrollTracking: ViewModifier {
         .onScrollGeometryChange(for: Metrics.self) { geometry in
           Metrics(
             isNearBottom: geometry.visibleRect.maxY >= geometry.contentSize.height - 72,
-            contentHeight: geometry.contentSize.height)
+            contentHeight: geometry.contentSize.height,
+            viewportHeight: geometry.visibleRect.height)
         } action: { old, new in
           isNearBottom = TimelineScrollFollowPolicy.updatedFollowIntent(
             wasFollowing: isNearBottom, isUserScrolling: isUserScrolling,
             contentSizeChanged: old.contentHeight != new.contentHeight,
+            viewportSizeChanged: old.viewportHeight != new.viewportHeight,
             isNearBottom: new.isNearBottom)
         }
     } else {
@@ -975,27 +1173,39 @@ private struct TimelineScrollTracking: ViewModifier {
           DragGesture(minimumDistance: 2)
             .onChanged { _ in
               scrollSettleTask?.cancel()
+              jumpToLatestRequested = false
               isUserScrolling = true
             }
             .onEnded { _ in
-              scrollSettleTask?.cancel()
-              scrollSettleTask = Task { @MainActor in
-                // iOS 17 has no scroll phase callback. Keep the top anchor
-                // through the drag's deceleration before resuming follow.
-                try? await Task.sleep(for: .milliseconds(450))
-                if !Task.isCancelled { isUserScrolling = false }
-              }
+              scheduleScrollSettle()
             }
         )
         .onPreferenceChange(ScrollContentFrameKey.self) { frame in
           guard let frame else { return }
+          if isUserScrolling, let previousContentFrame,
+            abs(frame.minY - previousContentFrame.minY) > 0.5
+          {
+            scheduleScrollSettle()
+          }
           let decision = TimelineScrollFollowPolicy.evaluate(
             previousFrame: previousContentFrame, frame: frame,
-            viewportHeight: viewportHeight, wasFollowing: isNearBottom)
+            viewportHeight: viewportHeight, previousViewportHeight: previousViewportHeight,
+            wasFollowing: isNearBottom)
           previousContentFrame = frame
+          previousViewportHeight = viewportHeight
           isNearBottom = decision.isNearBottom
         }
         .onDisappear { scrollSettleTask?.cancel() }
+    }
+  }
+
+  private func scheduleScrollSettle() {
+    scrollSettleTask?.cancel()
+    scrollSettleTask = Task { @MainActor in
+      // iOS 17 has no scroll phase callback. Wait until the scroll offset
+      // stops changing, including after a fast swipe starts decelerating.
+      try? await Task.sleep(for: .milliseconds(180))
+      if !Task.isCancelled { isUserScrolling = false }
     }
   }
 }
@@ -1014,17 +1224,29 @@ enum TimelineScrollFollowPolicy {
   }
 
   static func updatedFollowIntent(
-    wasFollowing: Bool, isUserScrolling: Bool, contentSizeChanged: Bool, isNearBottom: Bool
+    wasFollowing: Bool, isUserScrolling: Bool, contentSizeChanged: Bool,
+    viewportSizeChanged: Bool = false, isNearBottom: Bool
   ) -> Bool {
     // A pinned viewport can briefly measure above the bottom before the native
     // size-change anchor has applied. Preserve intent for that layout pass.
-    if wasFollowing && !isUserScrolling && contentSizeChanged && !isNearBottom { return true }
+    if wasFollowing && !isUserScrolling && (contentSizeChanged || viewportSizeChanged)
+      && !isNearBottom
+    {
+      return true
+    }
     return isNearBottom
   }
 
   static func evaluate(
-    previousFrame: CGRect?, frame: CGRect, viewportHeight: CGFloat, wasFollowing: Bool
+    previousFrame: CGRect?, frame: CGRect, viewportHeight: CGFloat,
+    previousViewportHeight: CGFloat? = nil, wasFollowing: Bool
   ) -> Decision {
+    if let previousViewportHeight, let previousFrame, wasFollowing,
+      viewportHeight < previousViewportHeight,
+      abs(frame.minY - previousFrame.minY) < 0.5
+    {
+      return Decision(isNearBottom: true)
+    }
     if let previousFrame, wasFollowing,
       abs(frame.minY - previousFrame.minY) < 0.5,
       abs(frame.height - previousFrame.height) > 0.5

@@ -24,6 +24,16 @@ struct NewChatView: View {
     return model.agentModels(for: configuration.provider).first(where: { $0.id == modelID })?
       .label ?? modelID
   }
+  private var configuredModeLabel: String {
+    guard let configuration else { return "Default permissions" }
+    guard let provider = model.agentProviders.first(where: { $0.id == configuration.provider })
+    else { return configuration.modeID ?? "Default permissions" }
+    guard let modeID = configuration.modeID else {
+      return provider.modes.first(where: { $0.id == provider.defaultModeID })?.label
+        ?? "Default permissions"
+    }
+    return provider.modes.first(where: { $0.id == modeID })?.label ?? modeID
+  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -56,6 +66,10 @@ struct NewChatView: View {
         focus: $composerFocused,
         send: sendFirstMessage,
         clearError: model.clearMessageError,
+        onShowContextUsage: {
+          composerFocused = false
+          openAgentSettings()
+        },
         imageImportIdentity: "\(draftKey)-\(model.timelineGeneration)"
       )
     }
@@ -170,6 +184,9 @@ struct NewChatView: View {
             ?? "\(configuredProviderLabel) · Provider default"
         )
         .font(.subheadline)
+        Text(configuredModeLabel)
+          .font(.caption)
+          .foregroundStyle(.secondary)
         Text("Saved on this device")
           .font(.caption)
           .foregroundStyle(Color.primary.opacity(0.75))
@@ -291,6 +308,7 @@ struct AgentConfigurationView: View {
   @Environment(\.dismiss) private var dismiss
   @State private var selectedProviderID: String?
   @State private var selectedModelID: String?
+  @State private var selectedModeID: String?
   @State private var saveError: String?
 
   private var project: RemoteProject? { model.projects.first { $0.id == projectID } }
@@ -301,9 +319,11 @@ struct AgentConfigurationView: View {
         Text(project?.name ?? "This project")
           .font(.headline)
         LabeledContent("Storage", value: "Saved on this device")
-        Text("This provider and optional model apply to new threads for this project on this host.")
-          .font(.footnote)
-          .foregroundStyle(.secondary)
+        Text(
+          "These provider, model, and permission settings apply to new threads for this project."
+        )
+        .font(.footnote)
+        .foregroundStyle(.secondary)
       }
 
       if model.loadingAgentOptions {
@@ -387,6 +407,30 @@ struct AgentConfigurationView: View {
             .font(.footnote)
             .foregroundStyle(.secondary)
         }
+        if !selectedProvider.modes.isEmpty || selectedModeID != nil {
+          Section("Permissions") {
+            Picker("Permissions", selection: $selectedModeID) {
+              Text(defaultModeLabel(for: selectedProvider)).tag(Optional<String>.none)
+              if let selectedModeID,
+                !selectedProvider.modes.contains(where: { $0.id == selectedModeID })
+              {
+                Text("\(selectedModeID) (Unavailable)")
+                  .tag(Optional(selectedModeID))
+                  .disabled(true)
+              }
+              ForEach(selectedProvider.modes, id: \.id) { mode in
+                Text(verbatim: mode.label).tag(Optional(mode.id))
+              }
+            }
+            .accessibilityIdentifier("agent-permissions-picker")
+            if let selectedModeID,
+              let description = selectedProvider.modes.first(where: { $0.id == selectedModeID })?
+                .description
+            {
+              Text(description).font(.footnote).foregroundStyle(.secondary)
+            }
+          }
+        }
       }
 
       if let saveError {
@@ -429,6 +473,7 @@ struct AgentConfigurationView: View {
         guard selectedProviderID != providerID else { return }
         selectedProviderID = providerID
         selectedModelID = nil
+        selectedModeID = nil
         saveError = nil
       }
     )
@@ -437,6 +482,16 @@ struct AgentConfigurationView: View {
   private var canSave: Bool {
     guard !model.loadingAgentOptions, let selectedProvider else { return false }
     return selectedProvider.available
+      && (selectedModeID == nil || selectedProvider.modes.contains { $0.id == selectedModeID })
+  }
+
+  private func defaultModeLabel(for provider: RemoteAgentProvider) -> String {
+    if let defaultModeID = provider.defaultModeID,
+      let mode = provider.modes.first(where: { $0.id == defaultModeID })
+    {
+      return "Provider default (\(mode.label))"
+    }
+    return "Provider default"
   }
 
   private func providerDefaultLabel(for providerID: String) -> String {
@@ -450,6 +505,7 @@ struct AgentConfigurationView: View {
     if let configuration = model.agentConfiguration(for: projectID) {
       selectedProviderID = configuration.provider
       selectedModelID = configuration.model
+      selectedModeID = configuration.modeID
     } else if selectedProviderID == nil {
       selectedProviderID = model.agentProviders.first(where: \.available)?.id
     }
@@ -458,7 +514,7 @@ struct AgentConfigurationView: View {
   private func saveConfiguration() {
     guard let selectedProviderID else { return }
     let configuration = RemoteAgentConfiguration(
-      provider: selectedProviderID, model: selectedModelID)
+      provider: selectedProviderID, model: selectedModelID, modeID: selectedModeID)
     guard model.saveAgentConfiguration(configuration, for: projectID) else {
       saveError = "Couldn’t save this project’s Agent settings on this device."
       return

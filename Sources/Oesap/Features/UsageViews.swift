@@ -14,7 +14,6 @@ struct SessionInfoSheet: View {
   @Bindable var model: OesapModel
   let threadID: String
 
-  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @Environment(\.dismiss) private var dismiss
 
   var body: some View {
@@ -31,8 +30,8 @@ struct SessionInfoSheet: View {
         }
       }
     }
-    .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.medium, .large])
-    .presentationDragIndicator(.visible)
+    .presentationDetents([.large])
+    .presentationDragIndicator(.hidden)
   }
 }
 

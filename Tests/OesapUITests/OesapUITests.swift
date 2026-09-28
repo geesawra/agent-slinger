@@ -102,6 +102,27 @@ final class OesapUITests: XCTestCase {
     XCTAssertNotEqual(composer.value as? String, "Show the app status")
   }
 
+  func testOpeningKeyboardKeepsLatestMessageAndComposerAboveIt() {
+    let app = launchDemo()
+    connect(app)
+    app.buttons["project-demo-project"].tap()
+    app.buttons["thread-demo-agent-idle"].tap()
+
+    let timeline = app.scrollViews["chat-timeline-scroll"]
+    let latest = app.descendants(matching: .any)["message-demo-welcome-agent"]
+    let composer = app.descendants(matching: .any)["chat-composer"]
+    let composerSurface = app.descendants(matching: .any)["chat-composer-surface"]
+    XCTAssertTrue(latest.waitForExistence(timeout: 5))
+    let latestYBeforeKeyboard = latest.frame.minY
+
+    composer.tap()
+    let keyboard = app.keyboards.firstMatch
+    XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+    XCTAssertLessThanOrEqual(composerSurface.frame.maxY, keyboard.frame.minY + 4)
+    XCTAssertLessThanOrEqual(timeline.frame.maxY, composerSurface.frame.minY + 4)
+    XCTAssertLessThan(latest.frame.minY, latestYBeforeKeyboard - 20)
+  }
+
   func testReadingEarlierMessagesStaysPutWhileMarkdownStreams() {
     let app = launchDemo(arguments: ["--demo-performance"])
     connect(app)
@@ -201,7 +222,8 @@ final class OesapUITests: XCTestCase {
     let (app, _) = openAgentControlChat()
     let prompt = "Continue this active turn without restarting"
     sendRunningPrompt(prompt, in: app)
-    XCTAssertTrue(app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
     XCTAssertEqual(app.descendants(matching: .any)["chat-composer"].value as? String, "")
   }
 
@@ -219,7 +241,8 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(send.waitForExistence(timeout: 5))
     XCTAssertTrue(send.isEnabled)
     send.tap()
-    XCTAssertTrue(app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      app.descendants(matching: .any)["message-demo-user-0"].waitForExistence(timeout: 5))
   }
 
   func testConnectionFailureIsVisible() {
@@ -364,12 +387,7 @@ final class OesapUITests: XCTestCase {
     let usageList = app.collectionViews.firstMatch
     XCTAssertTrue(usageList.waitForExistence(timeout: 5))
     attachScreenshot(named: "Session info and usage")
-    let expanded = expandSessionInfoSheet(app)
-    if !expanded {
-      attachScreenshot(named: "Session info sheet expansion failure")
-      attachAccessibilitySnapshot(named: "Session info sheet accessibility", app: app)
-    }
-    XCTAssertTrue(expanded, "Session info should expand before scrolling.")
+    XCTAssertFalse(app.buttons["Sheet Grabber"].exists, "Session info opens fully expanded.")
 
     let usedTokens = staticText(containing: "64,000 tokens", in: app)
     XCTAssertTrue(scrollElementIntoView(usedTokens, in: usageList))
@@ -462,11 +480,9 @@ final class OesapUITests: XCTestCase {
     fullAccess.tap()
     XCTAssertTrue(scrollUntilHittable(apply, in: app))
     apply.tap()
-    XCTAssertTrue(
-      app.staticTexts["session-settings-notice"].waitForExistence(timeout: 5))
+    XCTAssertTrue(waitUntilHittable(context), "Successful Apply should close Agent settings.")
     attachScreenshot(named: "Agent model and effort applied")
 
-    app.buttons["agent-settings-done"].tap()
     context.tap()
     XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
     let reopenedModel = app.descendants(matching: .any)["session-model-picker"]
@@ -484,8 +500,7 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(high.waitForExistence(timeout: 5))
     high.tap()
     app.buttons["apply-session-settings"].tap()
-    XCTAssertTrue(app.staticTexts["session-settings-notice"].waitForExistence(timeout: 5))
-    app.buttons["agent-settings-done"].tap()
+    XCTAssertTrue(waitUntilHittable(context), "Successful Apply should close Agent settings.")
     context.tap()
     XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
     XCTAssertTrue(
@@ -846,23 +861,6 @@ final class OesapUITests: XCTestCase {
       app.swipeUp()
     }
     return element.exists && element.isHittable
-  }
-
-  private func expandSessionInfoSheet(_ app: XCUIApplication) -> Bool {
-    let grabber = app.buttons["Sheet Grabber"]
-    guard grabber.waitForExistence(timeout: 5) else { return false }
-    if grabber.frame.minY < 200 { return true }
-
-    let start = grabber.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-    let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12))
-    start.press(forDuration: 0.1, thenDragTo: end)
-
-    let expanded = XCTNSPredicateExpectation(
-      predicate: NSPredicate(format: "value == %@ OR value == %@", "Expanded", "Full screen"),
-      object: grabber
-    )
-    return XCTWaiter.wait(for: [expanded], timeout: 5) == .completed
-      && app.collectionViews.firstMatch.frame.minY < 200
   }
 
   private func scrollElementIntoView(

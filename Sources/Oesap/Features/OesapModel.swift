@@ -274,12 +274,13 @@ final class OesapModel {
     sessionDraftModeID = modeID
   }
 
-  func applySessionSettings(threadID: String) async {
+  @discardableResult
+  func applySessionSettings(threadID: String) async -> Bool {
     guard activeSessionSettingsMutation == nil, connectionState == .connected,
       sessionDetailsThreadID == threadID, selectedThreadID == threadID,
       let settings = sessionSettings, canApplySessionSettings,
       let remote = service
-    else { return }
+    else { return false }
     let modelID = sessionDraftModelID
     let thinkingOptionID = settings.supportsThinking ? sessionDraftThinkingOptionID : nil
     let modeChanged = sessionDraftModeID != settings.currentModeID
@@ -327,7 +328,7 @@ final class OesapModel {
     } catch {
       refreshError = error.localizedDescription
     }
-    guard activeSessionSettingsMutation == mutationID else { return }
+    guard activeSessionSettingsMutation == mutationID else { return false }
     activeSessionSettingsMutation = nil
     activeSessionSettingsMutationThreadID = nil
     sessionDetailsApplying = false
@@ -336,7 +337,7 @@ final class OesapModel {
       sessionDetailsGeneration == detailsGeneration,
       selectedThreadID == threadID, sessionDetailsThreadID == threadID,
       connectedServerID == serverID
-    else { return }
+    else { return false }
     if let refreshed {
       installSessionSettings(refreshed, threadID: threadID)
       if applyError == nil {
@@ -356,6 +357,7 @@ final class OesapModel {
     } else {
       sessionDetailsNotice = applyNotice ?? "Current settings loaded from the host."
     }
+    return applyError == nil && refreshError == nil
   }
 
   private func refreshSessionDetails(threadID: String, preserveDraft: Bool) async {
@@ -1528,6 +1530,7 @@ final class OesapModel {
         projectID: projectID,
         provider: configuration.provider,
         model: configuration.model,
+        modeID: configuration.modeID,
         cwd: rootPath,
         prompt: trimmed, images: images)
       pendingNewThreadIntents[scope] = intent
@@ -2284,7 +2287,15 @@ final class OesapModel {
 
   private func appendMessage(_ message: RemoteMessage, cursor: RemoteTimelineCursor?, isDelta: Bool)
   {
-    let message = selectedThreadID.map { imageOverlay(message, threadID: $0) } ?? message
+    var message = selectedThreadID.map { imageOverlay(message, threadID: $0) } ?? message
+    if let compaction = message.compaction, compaction.status == .completed,
+      messageIndices[message.id] == nil,
+      let loadingIndex = messages.lastIndex(where: {
+        $0.compaction?.status == .loading && $0.compaction?.turnID == compaction.turnID
+      })
+    {
+      message.id = messages[loadingIndex].id
+    }
     if let cursor, let latest = latestTimelineCursor, cursor.epoch == latest.epoch {
       if cursor.sequence < latest.sequence { return }
       if cursor.sequence == latest.sequence,
@@ -2303,7 +2314,7 @@ final class OesapModel {
         messages[existingIndex].text += message.text
       } else {
         var replacement = message
-        if message.toolCall != nil || message.isThinkingTrace {
+        if message.toolCall != nil || message.isThinkingTrace || message.compaction != nil {
           replacement.timestamp = messages[existingIndex].timestamp ?? message.timestamp
         }
         messages[existingIndex] = replacement

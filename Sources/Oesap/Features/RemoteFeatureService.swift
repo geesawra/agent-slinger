@@ -56,6 +56,7 @@ struct RemoteDirectoryEntry: Identifiable, Sendable, Equatable {
 struct RemoteAgentConfiguration: Codable, Sendable, Equatable {
   var provider: String
   var model: String?
+  var modeID: String? = nil
 }
 
 struct RemoteAgentModel: Identifiable, Sendable, Equatable {
@@ -104,6 +105,8 @@ struct RemoteAgentProvider: Identifiable, Sendable, Equatable {
   var error: String?
   var label: String? = nil
   var models: [RemoteAgentModel] = []
+  var modes: [RemoteAgentMode] = []
+  var defaultModeID: String? = nil
 }
 
 struct RemoteAgentOverviewGroup: Identifiable, Sendable, Equatable {
@@ -201,6 +204,7 @@ struct RemoteNewThreadIntent: Sendable, Equatable {
   var projectID: String
   var provider: String
   var model: String?
+  var modeID: String? = nil
   var cwd: String
   var prompt: String
   var images: [RemoteDraftImage] = []
@@ -306,6 +310,19 @@ struct RemoteMessage: Identifiable, Sendable, Equatable {
   var images: [RemoteDraftImage] = []
   var isThinkingTrace = false
   var thinkingIsEncrypted = false
+  var compaction: RemoteCompaction? = nil
+}
+
+struct RemoteCompaction: Sendable, Equatable {
+  enum Status: String, Sendable, Equatable {
+    case loading
+    case completed
+  }
+
+  var status: Status
+  var turnID: String? = nil
+  var trigger: String? = nil
+  var preTokens: Int? = nil
 }
 
 struct RemoteToolCall: Sendable, Equatable {
@@ -811,7 +828,18 @@ enum RemoteServiceError: LocalizedError, Sendable {
                   id: "xhigh", label: "Extra high", description: nil, isDefault: false),
                 RemoteThinkingOption(id: "max", label: "Max", description: nil, isDefault: false),
               ], defaultThinkingOptionID: "high"),
-          ])
+          ],
+          modes: [
+            RemoteAgentMode(
+              id: "auto", label: "Default Permissions",
+              description: "Edit files and run commands with the default approval flow."),
+            RemoteAgentMode(
+              id: "auto-review", label: "Auto-review",
+              description: "Review eligible permission requests automatically."),
+            RemoteAgentMode(
+              id: "full-access", label: "Full Access",
+              description: "Edit files, run commands, and access the network without prompts."),
+          ], defaultModeID: "auto")
       ]
     }
 
@@ -942,6 +970,9 @@ enum RemoteServiceError: LocalizedError, Sendable {
         model: intent.model, state: .running, requiresAttention: false, attentionReason: nil,
         cwd: intent.cwd)
       createdThreads.insert(thread, at: 0)
+      var settings = try await agentSettings(agentID: id)
+      settings.currentModeID = intent.modeID ?? settings.currentModeID
+      agentSettingsByID[id] = settings
       let timestamp = Date(timeIntervalSince1970: 1_780_000_300)
       sentMessages[id] = [
         RemoteMessage(

@@ -334,10 +334,18 @@ public actor PaseoProtocolClient: PaseoService {
           id: modelID, label: label, isDefault: model["isDefault"]?.boolValue == true,
           thinkingOptions: thinkingOptions, defaultThinkingOptionID: defaultThinkingOptionID)
       }
+      let modes = try optionalArray(entry["modes"], field: "provider modes").map { mode in
+        guard let modeID = mode["id"]?.stringValue, !modeID.isEmpty,
+          let label = mode["label"]?.stringValue
+        else { throw PaseoProtocolError.malformedMessage("provider mode omitted id or label") }
+        return PaseoAgentMode(
+          id: modeID, label: label, description: mode["description"]?.stringValue)
+      }
       return PaseoProvider(
         id: id, label: entry["label"]?.stringValue ?? id,
         available: status == "ready" && entry["enabled"]?.boolValue != false,
-        error: entry["error"]?.stringValue, models: models)
+        error: entry["error"]?.stringValue, models: models, modes: modes,
+        defaultModeID: entry["defaultModeId"]?.stringValue)
     }
   }
 
@@ -460,6 +468,7 @@ public actor PaseoProtocolClient: PaseoService {
       "provider": .string(intent.provider), "cwd": .string(intent.cwd),
     ]
     if let model = intent.model, !model.isEmpty { config["model"] = .string(model) }
+    if let modeID = intent.modeID, !modeID.isEmpty { config["modeId"] = .string(modeID) }
     var fields: [String: PaseoJSONValue] = [
       "idempotencyKey": .string(intent.idempotencyKey),
       "clientMessageId": .string(intent.clientMessageID),
