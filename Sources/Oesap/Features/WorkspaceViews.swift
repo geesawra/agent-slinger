@@ -70,7 +70,7 @@ struct WorkspaceRootView: View {
           && (!usesSplitNavigation || splitProjectID == model.selectedProjectID)
           && model.connectionState == .connected,
         canRefreshWorkspace: hasWorkspace && model.connectionState == .connected,
-        canOpenSettings: !model.connectionState.isBusy && !model.loadingSavedConnections,
+        canOpenSettings: !model.loadingSavedConnections,
         newThread: {
           guard let id = model.selectedProjectID else { return }
           open(.newChat(id))
@@ -252,7 +252,7 @@ struct WorkspaceRootView: View {
       } label: {
         Image(systemName: "ellipsis.circle").accessibilityLabel("Connection options")
       }
-      .disabled(model.connectionState.isBusy || model.loadingSavedConnections)
+      .disabled(model.loadingSavedConnections)
       .accessibilityIdentifier("connection-options")
     }
   }

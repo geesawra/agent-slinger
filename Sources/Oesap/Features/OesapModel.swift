@@ -581,7 +581,6 @@ final class OesapModel {
   }
 
   func connect(_ connection: RemoteConnection) async {
-    guard !connectionState.isBusy else { return }
     defer { scheduleForegroundReconnectIfNeeded() }
     let previousService = service
     let preserveInitialSelection =
@@ -598,7 +597,7 @@ final class OesapModel {
     guard connectionGeneration == generation else { return }
     do {
       let factory = connectionFactory
-      let connectedService = try await connectWithRetry {
+      let connectedService = try await connectWithRetry(generation: generation) {
         try await factory.connect(connection)
       }
       guard connectionGeneration == generation else {
@@ -661,7 +660,6 @@ final class OesapModel {
 
   @discardableResult
   func selectSavedInstance(_ id: String) async -> Bool {
-    guard !connectionState.isBusy else { return false }
     defer { scheduleForegroundReconnectIfNeeded() }
     guard savedInstances.contains(where: { $0.id == id }) else {
       instanceError = "This saved Paseo instance is no longer available. Refresh and try again."
@@ -683,7 +681,7 @@ final class OesapModel {
 
     do {
       let factory = connectionFactory
-      let connectedService = try await connectWithRetry {
+      let connectedService = try await connectWithRetry(generation: generation) {
         try await factory.selectSavedInstance(id: id)
       }
       guard connectionGeneration == generation else {
@@ -746,7 +744,6 @@ final class OesapModel {
   }
 
   func removeSavedInstance(_ id: String) async {
-    guard !connectionState.isBusy else { return }
     let removesActiveInstance = activeInstanceID == id
     let generation: Int
     let previousService: (any OesapRemoteService)?
@@ -799,7 +796,7 @@ final class OesapModel {
     clearErrors()
     do {
       let factory = connectionFactory
-      let connectedService = try await connectWithRetry {
+      let connectedService = try await connectWithRetry(generation: generation) {
         try await factory.reconnect()
       }
       guard connectionGeneration == generation else {
@@ -930,15 +927,18 @@ final class OesapModel {
   }
 
   private func connectWithRetry(
+    generation expectedGeneration: Int,
     operation: @escaping @Sendable () async throws -> any OesapRemoteService
   ) async throws -> any OesapRemoteService {
     var retries = 0
     while true {
       try Task.checkCancellation()
+      guard connectionGeneration == expectedGeneration else { throw CancellationError() }
       do {
         return try await withConnectionAttemptTimeout(
           Self.connectionAttemptTimeout, operation: operation)
       } catch {
+        guard connectionGeneration == expectedGeneration else { throw CancellationError() }
         if Task.isCancelled || error is CancellationError
           || (error as? PaseoConnectionError) == .cancelled
         {

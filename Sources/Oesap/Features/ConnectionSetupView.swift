@@ -32,7 +32,6 @@ struct ConnectionSetupView: View {
         Text("Connect to a Paseo instance to browse its projects and agent threads.")
           .foregroundStyle(Color.primary.opacity(0.75))
       }
-      .disabled(model.connectionState.isBusy)
 
       if connection.method == .direct {
         Section {
@@ -73,7 +72,6 @@ struct ConnectionSetupView: View {
           }
           .foregroundStyle(Color.primary.opacity(0.75))
         }
-        .disabled(model.connectionState.isBusy)
       } else {
         Section {
           TextField("Name (optional)", text: $connection.name)
@@ -100,7 +98,6 @@ struct ConnectionSetupView: View {
           Text("Traffic is relayed and encrypted end-to-end to the paired host.")
             .foregroundStyle(Color.primary.opacity(0.75))
         }
-        .disabled(model.connectionState.isBusy)
       }
 
       if showsReconnectAction, let activeInstanceID = model.activeInstanceID {
@@ -135,7 +132,7 @@ struct ConnectionSetupView: View {
         } label: {
           HStack {
             Spacer()
-            if model.connectionState.isBusy {
+            if model.connectionState.isBusy && connectingTask != nil {
               ProgressView().padding(.trailing, 8)
               Text("Connecting…")
             } else {
@@ -145,7 +142,7 @@ struct ConnectionSetupView: View {
           }
           .fontWeight(.semibold)
         }
-        .disabled(model.connectionState.isBusy || !hasConnectionInput)
+        .disabled(!hasConnectionInput)
         .tint(Color.primary)
         .accessibilityIdentifier("connect-button")
 
@@ -180,7 +177,6 @@ struct ConnectionSetupView: View {
           Button(action: onOpenSettings) {
             Label("Settings", systemImage: "gearshape")
           }
-          .disabled(model.connectionState.isBusy)
           .accessibilityIdentifier("setup-settings-button")
         }
       }

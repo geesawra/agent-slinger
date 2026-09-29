@@ -56,7 +56,7 @@ struct SettingsView: View {
                 .contentShape(Rectangle())
               }
               .buttonStyle(.plain)
-              .disabled(model.connectionState.isBusy || isSelecting)
+              .disabled(isSelecting)
               .accessibilityLabel(
                 model.activeInstanceID == instance.id
                   ? "\(instance.name), Selected" : instance.name
@@ -71,7 +71,7 @@ struct SettingsView: View {
                   .frame(minWidth: 32, minHeight: 44)
               }
               .buttonStyle(.borderless)
-              .disabled(model.connectionState.isBusy || isSelecting)
+              .disabled(isSelecting)
               .accessibilityLabel("Remove \(instance.name)")
               .accessibilityIdentifier("remove-instance-\(instance.id)")
             }
@@ -81,7 +81,6 @@ struct SettingsView: View {
         Button(action: onAddInstance) {
           Label("Add Paseo instance", systemImage: "plus")
         }
-        .disabled(model.connectionState.isBusy || isSelecting)
         .accessibilityIdentifier("add-instance-button")
       } header: {
         Text("Paseo instances").foregroundStyle(Color.primary.opacity(0.75))
@@ -160,7 +159,7 @@ struct SettingsView: View {
   }
 
   private func select(_ instance: SavedPaseoInstance) {
-    guard !model.connectionState.isBusy, !isSelecting else { return }
+    guard !isSelecting else { return }
     isSelecting = true
     Task {
       let connected = await model.selectSavedInstance(instance.id)
