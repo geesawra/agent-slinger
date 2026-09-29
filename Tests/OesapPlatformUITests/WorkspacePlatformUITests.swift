@@ -11,6 +11,26 @@ final class WorkspacePlatformUITests: XCTestCase {
     #endif
   }
 
+  func testColdLaunchWithoutSavedHostShowsConnectionSetup() {
+    let app = launchDemo()
+    XCTAssertTrue(app.textFields["direct-endpoint"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.buttons["connect-button"].exists)
+    app.terminate()
+  }
+
+  func testRelaunchWithSavedDemoHostAutoConnects() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "--demo", "--demo-saved-connection",
+      "--demo-server-id=platform-ui-saved-\(UUID().uuidString.lowercased())",
+      "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+    ]
+    app.launch()
+
+    XCTAssertTrue(element("project-demo-project", in: app).waitForExistence(timeout: 10))
+    app.terminate()
+  }
+
   func testSplitWorkspaceSwitchesThreadsAndPreservesDraft() {
     let app = connectDemo()
     let project = element("project-demo-project", in: app)
@@ -76,12 +96,7 @@ final class WorkspacePlatformUITests: XCTestCase {
   }
 
   private func connectDemo() -> XCUIApplication {
-    let app = XCUIApplication()
-    app.launchArguments = [
-      "--demo", "--demo-server-id=platform-ui-\(UUID().uuidString.lowercased())",
-      "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
-    ]
-    app.launch()
+    let app = launchDemo()
     let endpoint = app.textFields["direct-endpoint"]
     XCTAssertTrue(endpoint.waitForExistence(timeout: 10))
     endpoint.tap()
@@ -90,6 +105,16 @@ final class WorkspacePlatformUITests: XCTestCase {
     let connect = app.buttons["connect-button"]
     XCTAssertTrue(connect.waitForExistence(timeout: 5))
     connect.tap()
+    return app
+  }
+
+  private func launchDemo() -> XCUIApplication {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "--demo", "--demo-server-id=platform-ui-\(UUID().uuidString.lowercased())",
+      "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+    ]
+    app.launch()
     return app
   }
 

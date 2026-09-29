@@ -1,6 +1,16 @@
 import SwiftUI
 import UIKit
 
+enum PlatformToolbarPlacements {
+  static var connectionProgress: ToolbarItemPlacement {
+    #if targetEnvironment(macCatalyst)
+      .status
+    #else
+      .principal
+    #endif
+  }
+}
+
 enum InteractionFeedback {
   static func selection() {
     #if !targetEnvironment(macCatalyst)

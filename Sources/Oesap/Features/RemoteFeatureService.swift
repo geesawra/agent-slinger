@@ -604,6 +604,13 @@ enum RemoteServiceError: LocalizedError, Sendable {
 
     init(mode: Mode = .normal) {
       self.mode = mode
+      if ProcessInfo.processInfo.arguments.contains("--demo-saved-connection") {
+        let instanceID = "demo-saved-instance"
+        savedInstances = [
+          SavedPaseoInstance(id: instanceID, name: "Demo host", subtitle: "Demo connection")
+        ]
+        selectedInstanceID = instanceID
+      }
     }
 
     func savedConnectionExists() async -> Bool { !savedInstances.isEmpty }

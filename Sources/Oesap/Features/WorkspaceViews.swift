@@ -226,7 +226,7 @@ struct WorkspaceRootView: View {
 
   @ToolbarContentBuilder
   private var connectionToolbar: some ToolbarContent {
-    ToolbarItem(placement: .principal) {
+    ToolbarItem(placement: PlatformToolbarPlacements.connectionProgress) {
       if model.loadingSavedConnections || model.connectionState.isBusy {
         ConnectionProgressIndicator(
           title: model.loadingSavedConnections
@@ -428,6 +428,22 @@ private struct ProjectListView: View {
 
   var body: some View {
     List(selection: selection) {
+      #if targetEnvironment(macCatalyst)
+        Section {
+          Button(action: onOpenAgentOverview) {
+            Label("Agents", systemImage: "cpu")
+          }
+          .disabled(model.connectionState.isBusy || model.loadingSavedConnections)
+          .accessibilityIdentifier("agents-overview-button")
+
+          Button(action: onAddProject) {
+            Label("Add project", systemImage: "plus")
+          }
+          .disabled(model.connectionState != .connected)
+          .accessibilityIdentifier("add-project-button")
+        }
+      #endif
+
       if model.loadingSavedConnections {
         Section {
           HStack(spacing: 12) {
@@ -507,23 +523,25 @@ private struct ProjectListView: View {
     .navigationTitle("Projects")
     .navigationBarTitleDisplayMode(model.connectionState.isBusy ? .inline : .large)
     .refreshable { await model.refreshWorkspace() }
-    .toolbar {
-      ToolbarItem(placement: .topBarLeading) {
-        Button(action: onOpenAgentOverview) {
-          Label("Agents", systemImage: "cpu")
+    #if !targetEnvironment(macCatalyst)
+      .toolbar {
+        ToolbarItem(placement: .topBarLeading) {
+          Button(action: onOpenAgentOverview) {
+            Label("Agents", systemImage: "cpu")
+          }
+          .disabled(model.connectionState.isBusy || model.loadingSavedConnections)
+          .accessibilityIdentifier("agents-overview-button")
         }
-        .disabled(model.connectionState.isBusy || model.loadingSavedConnections)
-        .accessibilityIdentifier("agents-overview-button")
-      }
-      ToolbarItem(placement: .topBarTrailing) {
-        Button(action: onAddProject) {
-          Image(systemName: "plus")
+        ToolbarItem(placement: .topBarTrailing) {
+          Button(action: onAddProject) {
+            Image(systemName: "plus")
+          }
+          .disabled(model.connectionState != .connected)
+          .accessibilityLabel("Add project")
+          .accessibilityIdentifier("add-project-button")
         }
-        .disabled(model.connectionState != .connected)
-        .accessibilityLabel("Add project")
-        .accessibilityIdentifier("add-project-button")
       }
-    }
+    #endif
   }
 }
 

@@ -169,7 +169,7 @@ struct ConnectionSetupView: View {
     .navigationTitle(title)
     .navigationBarTitleDisplayMode(model.connectionState.isBusy ? .inline : .large)
     .toolbar {
-      ToolbarItem(placement: .principal) {
+      ToolbarItem(placement: PlatformToolbarPlacements.connectionProgress) {
         if model.connectionState.isBusy {
           ConnectionProgressIndicator(
             title: model.connectionState == .reconnecting ? "Reconnecting…" : "Connecting…")
