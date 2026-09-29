@@ -538,6 +538,38 @@ final class OesapUITests: XCTestCase {
       app.descendants(matching: .any)["session-permissions-picker"].label.contains("Full Access"))
   }
 
+  func testSessionInfoOpensPermissionSettings() {
+    continueAfterFailure = false
+    let app = launchDemo()
+    connect(app)
+    app.buttons["project-demo-project"].tap()
+    app.buttons["thread-demo-agent-running"].tap()
+
+    app.buttons["session-info-button"].tap()
+    XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
+    let settingsButton = app.buttons["session-info-settings-button"]
+    XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
+    settingsButton.tap()
+
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    let permissionsPicker = app.descendants(matching: .any)["session-permissions-picker"]
+    XCTAssertTrue(permissionsPicker.waitForExistence(timeout: 5))
+    XCTAssertTrue(scrollUntilHittable(permissionsPicker, in: app))
+    permissionsPicker.tap()
+    let fullAccess = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "Full Access")
+    ).firstMatch
+    XCTAssertTrue(fullAccess.waitForExistence(timeout: 5))
+    fullAccess.tap()
+    app.buttons["apply-session-settings"].tap()
+
+    XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
+    settingsButton.tap()
+    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      app.descendants(matching: .any)["session-permissions-picker"].label.contains("Full Access"))
+  }
+
   func testProviderUsageUnsupportedUnavailableAndErrorStates() {
     let unsupportedApp = launchDemo(arguments: ["--demo", "--demo-usage-unsupported"])
     connect(unsupportedApp)

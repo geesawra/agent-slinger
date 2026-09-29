@@ -15,11 +15,13 @@ struct SessionInfoSheet: View {
   let threadID: String
 
   @Environment(\.dismiss) private var dismiss
+  @State private var showsAgentSettings = false
 
   var body: some View {
     NavigationStack {
       UsageListContent(
-        model: model, contextThreadID: threadID, includesSessionInformation: true
+        model: model, contextThreadID: threadID, includesSessionInformation: true,
+        onOpenSessionSettings: { showsAgentSettings = true }
       )
       .navigationTitle("Session info")
       .navigationBarTitleDisplayMode(.inline)
@@ -32,6 +34,9 @@ struct SessionInfoSheet: View {
     }
     .presentationDetents([.large])
     .presentationDragIndicator(.hidden)
+    .sheet(isPresented: $showsAgentSettings) {
+      AgentSettingsSheet(model: model, threadID: threadID)
+    }
   }
 }
 
@@ -128,6 +133,7 @@ struct UsageListContent: View {
   @Bindable var model: OesapModel
   let contextThreadID: String?
   var includesSessionInformation = false
+  var onOpenSessionSettings: (() -> Void)? = nil
 
   private var contextThread: RemoteThread? {
     guard let contextThreadID else { return nil }
@@ -231,6 +237,20 @@ struct UsageListContent: View {
       }
       UsageValueRow(label: "Provider", value: thread.provider ?? "Not reported", font: .body)
       UsageValueRow(label: "Model", value: thread.model ?? "Not reported", font: .body)
+      if let onOpenSessionSettings {
+        Button(action: onOpenSessionSettings) {
+          HStack {
+            Label("Model and permissions", systemImage: "slider.horizontal.3")
+            Spacer()
+            Image(systemName: "chevron.right")
+              .font(.caption.weight(.semibold))
+              .foregroundStyle(.secondary)
+              .accessibilityHidden(true)
+          }
+          .contentShape(Rectangle())
+        }
+        .accessibilityIdentifier("session-info-settings-button")
+      }
     }
   }
 
