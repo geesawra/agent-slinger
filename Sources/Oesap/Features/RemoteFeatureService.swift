@@ -277,6 +277,7 @@ struct RemoteThread: Identifiable, Sendable, Equatable {
   var attentionReason: String?
   var contextUsage: RemoteContextUsage? = nil
   var cwd: String? = nil
+  var parentAgentID: String? = nil
 }
 
 enum RemoteActiveTurnBehavior: String, Sendable, Equatable {
@@ -410,6 +411,26 @@ struct RemotePermission: Identifiable, Sendable, Equatable {
   var denyActionID: String?
   var allowLabel: String?
   var denyLabel: String?
+  var input: PaseoJSONValue? = nil
+  var questions: [RemoteQuestion]? = nil
+}
+
+struct RemoteQuestion: Identifiable, Sendable, Equatable {
+  var id: String
+  var answerKey: String
+  var header: String
+  var prompt: String
+  var options: [RemoteQuestionOption]
+  var allowsMultipleSelection: Bool
+  var allowsOtherAnswer: Bool
+  var isRequired: Bool
+  var placeholder: String?
+}
+
+struct RemoteQuestionOption: Identifiable, Sendable, Equatable {
+  var id: String { label }
+  var label: String
+  var description: String?
 }
 
 enum RemoteTimelineUpdate: Sendable {
@@ -467,6 +488,7 @@ protocol OesapRemoteService: Sendable {
   func stop(agentID: String) async throws -> RemoteAgentControlSnapshot?
   func pendingPermissions() async throws -> [RemotePermission]
   func answerPermission(_ permission: RemotePermission, allow: Bool) async throws
+  func answerQuestion(_ permission: RemotePermission, answers: [String: String]?) async throws
   func disconnect() async
 }
 
@@ -522,6 +544,9 @@ extension OesapRemoteService {
     throw RemoteServiceError.unavailable("This host does not support new thread creation.")
   }
   func supportsAgentRequestReceipts() async -> Bool { false }
+  func answerQuestion(_ permission: RemotePermission, answers: [String: String]?) async throws {
+    throw RemoteServiceError.unavailable("This host does not support structured agent questions.")
+  }
   func send(
     agentID: String, text: String, messageID: String, behavior: RemoteActiveTurnBehavior
   ) async throws {

@@ -75,6 +75,34 @@ message. Pending permissions are read from the paged agent snapshots. Answering 
 the upstream `agent_permission_response` shape and waits for the matching
 `agent_permission_resolved` message before reporting success.
 
+## Structured agent questions
+
+The question flow was checked against Paseo commit
+[`d7b7016cc98da02ce5110fb218c70cac419657f3`](https://github.com/getpaseo/paseo/commit/d7b7016cc98da02ce5110fb218c70cac419657f3), including the shared web
+[`QuestionFormCard`](https://github.com/getpaseo/paseo/blob/d7b7016cc98da02ce5110fb218c70cac419657f3/packages/app/src/components/question-form-card.tsx), its [form parser](https://github.com/getpaseo/paseo/blob/d7b7016cc98da02ce5110fb218c70cac419657f3/packages/app/src/components/question-form-card-core.ts), and the [permission wire schema](https://github.com/getpaseo/paseo/blob/d7b7016cc98da02ce5110fb218c70cac419657f3/packages/protocol/src/messages.ts).
+
+Paseo sends questions over the existing permission lifecycle, not as timeline
+messages: a timeline event carries `permission_requested` with a request whose
+`kind` is `question` and whose `input.questions` contains the form; a matching
+`permission_resolved` event clears the pending request. Initial state comes from
+the agent snapshot's `pendingPermissions`. The web UI presents a custom question
+form card with question navigation, single or multiple option selection, option
+descriptions, free-text answers where allowed, and Submit or Dismiss actions.
+Answers are sent through `agent_permission_response` using
+`{behavior: "allow", updatedInput: {...request.input, answers: {header: answer}}}`.
+Dismissal uses a deny response with a short user-dismissal message. The protocol
+allows `updatedInput` as a JSON object and does not define a separate question
+RPC.
+
+Oesap keeps the request input at the protocol boundary, maps recognized question
+forms into typed feature models, and renders them as a native SwiftUI card. It
+retains unknown request fields while adding the answers object, and sends the
+answer through the same correlated permission RPC. Unknown question layouts
+remain visible as structured-request details instead of being answered with an
+empty allow decision. This handles question forms already normalized by the
+Paseo daemon; it does not advertise or implement a separate ACP
+`elicitation/create` lifecycle.
+
 New threads use the host's `creationLifecycle` feature and `agent.create.request` with
 one `initialPrompt`, a stable `idempotencyKey`, and a stable `clientMessageId`. The
 request includes `config.provider` and `config.cwd` set to the selected project's

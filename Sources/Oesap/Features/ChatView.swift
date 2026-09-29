@@ -80,6 +80,7 @@ struct ChatView: View {
   @State private var showsAgentSettings = false
   @State private var showsSessionInfo = false
   @State private var showsGitChanges = false
+  @State private var showsSubagents = false
   @State private var composerFocused = false
   @State private var isNearBottom = true
   @State private var isUserScrolling = false
@@ -92,6 +93,9 @@ struct ChatView: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var thread: RemoteThread? { model.threads.first { $0.id == threadID } }
+  private var subagents: [RemoteThread] {
+    model.agentOverviewGroups.flatMap(\.threads).filter { $0.parentAgentID == threadID }
+  }
   private var timelineRows: [ChatTimelineRow] {
     ChatTimelineRow.grouped(model.messages, hiding: model.bufferedAgentMessageIDs)
   }
@@ -161,13 +165,28 @@ struct ChatView: View {
             }
 
             if let permission = model.permissions.first(where: { $0.agentID == threadID }) {
-              PermissionCard(
-                permission: permission,
-                isResponding: model.answeringPermissionID == permission.id,
-                onChoose: { allow in
-                  actionConfirmation = .permission(permission, allow: allow)
-                }
-              )
+              if let questions = permission.questions {
+                AgentQuestionCard(
+                  permission: permission,
+                  questions: questions,
+                  isResponding: model.answeringPermissionID == permission.id,
+                  onSubmit: { answers in
+                    Task { await model.answerQuestion(permission, answers: answers) }
+                  },
+                  onDismiss: {
+                    Task { await model.answerQuestion(permission, answers: nil) }
+                  }
+                )
+                .id(permission.id)
+              } else {
+                PermissionCard(
+                  permission: permission,
+                  isResponding: model.answeringPermissionID == permission.id,
+                  onChoose: { allow in
+                    actionConfirmation = .permission(permission, allow: allow)
+                  }
+                )
+              }
             }
 
             if let error = model.permissionError {
@@ -269,6 +288,9 @@ struct ChatView: View {
           .padding(.horizontal)
           .padding(.top, 12)
           .padding(.bottom, 20)
+          // Keep short conversations at the top of the viewport. Otherwise a
+          // bottom scroll anchor can leave space above the first message.
+          .frame(minHeight: viewport.size.height, alignment: .top)
           .frame(maxWidth: 900)
           .frame(maxWidth: .infinity)
           .animation(
@@ -449,6 +471,9 @@ struct ChatView: View {
     .sheet(isPresented: $showsGitChanges) {
       GitChangesListSheet(model: model, threadID: threadID)
     }
+    .sheet(isPresented: $showsSubagents) {
+      SubagentViewerSheet(model: model, parentID: threadID)
+    }
     .task(id: threadID) {
       await model.refreshGitStatus(threadID: threadID)
     }
@@ -484,6 +509,11 @@ struct ChatView: View {
       onShowContextUsage: {
         composerFocused = false
         showsAgentSettings = true
+      },
+      subagentCount: subagents.count,
+      onShowSubagents: {
+        composerFocused = false
+        showsSubagents = true
       },
       gitStatus: model.gitStatus,
       isLoadingGitStatus: model.loadingGitStatus,
@@ -868,7 +898,7 @@ private struct PermissionCard: View {
         .font(.caption)
         .foregroundStyle(Color.primary.opacity(0.75))
       if !permission.supportsSimpleDecision {
-        Text("This request needs a structured response. Review and answer it in Paseo.")
+        Text("This request needs a structured response that Oesap can’t render yet.")
           .font(.footnote)
           .foregroundStyle(Color.primary.opacity(0.75))
       } else if dynamicTypeSize.isAccessibilitySize {
@@ -922,7 +952,7 @@ private struct PermissionCard: View {
   }
 }
 
-private struct MessageBubble: View, Equatable {
+struct MessageBubble: View, Equatable {
   static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.message == rhs.message && lhs.threadID == rhs.threadID
       && lhs.timelineGeneration == rhs.timelineGeneration

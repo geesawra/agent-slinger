@@ -471,6 +471,7 @@ public struct PaseoThread: Sendable, Equatable, Identifiable {
   public let archivedAt: String?
   public let requiresAttention: Bool
   public let attentionReason: String?
+  public let parentAgentID: String?
   public let projectKey: String
   public let projectName: String
   public let pendingPermissions: [PaseoPermissionRequest]
@@ -489,6 +490,7 @@ public struct PaseoThread: Sendable, Equatable, Identifiable {
     archivedAt: String?,
     requiresAttention: Bool,
     attentionReason: String?,
+    parentAgentID: String? = nil,
     projectKey: String,
     projectName: String,
     pendingPermissions: [PaseoPermissionRequest] = [],
@@ -506,6 +508,7 @@ public struct PaseoThread: Sendable, Equatable, Identifiable {
     self.archivedAt = archivedAt
     self.requiresAttention = requiresAttention
     self.attentionReason = attentionReason
+    self.parentAgentID = parentAgentID
     self.projectKey = projectKey
     self.projectName = projectName
     self.pendingPermissions = pendingPermissions
@@ -720,7 +723,7 @@ public struct PaseoPermissionRequest: Sendable, Equatable, Identifiable {
 }
 
 public enum PaseoPermissionDecision: Sendable, Equatable {
-  case allow(actionID: String?)
+  case allow(actionID: String?, updatedInput: PaseoJSONValue? = nil)
   case deny(actionID: String?, message: String?, interrupt: Bool?)
 }
 

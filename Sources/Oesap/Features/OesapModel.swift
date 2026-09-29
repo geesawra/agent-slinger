@@ -1341,6 +1341,62 @@ final class OesapModel {
       selectionGeneration: projectSelectionGeneration, reconcileStopWait: true)
   }
 
+  func subagentHistory(_ agentID: String) async throws -> RemoteTimeline {
+    guard connectionState == .connected, let service else {
+      throw RemoteServiceError.connectionLost("Connect to a host to load this subagent.")
+    }
+    let generation = connectionGeneration
+    let timeline = try await service.history(agentID: agentID, before: nil)
+    guard connectionGeneration == generation, connectionState == .connected else {
+      throw RemoteServiceError.connectionLost("The host changed while loading this subagent.")
+    }
+    return RemoteTimeline(
+      messages: timeline.messages.map { imageOverlay($0, threadID: agentID) },
+      historyMayBeIncomplete: timeline.historyMayBeIncomplete,
+      hasOlder: timeline.hasOlder,
+      olderCursor: timeline.olderCursor,
+      latestCursor: timeline.latestCursor)
+  }
+
+  func subagentEvents(_ agentID: String) async throws
+    -> AsyncThrowingStream<RemoteTimelineUpdate, Error>
+  {
+    guard connectionState == .connected, let service else {
+      throw RemoteServiceError.connectionLost("Connect to a host to follow this subagent.")
+    }
+    return try await service.events(agentID: agentID)
+  }
+
+  func loadSubagentImage(source: String, agentID: String) async throws -> Data {
+    guard connectionState == .connected, let service,
+      let group = agentOverviewGroups.first(where: { $0.threads.contains { $0.id == agentID } }),
+      let thread = group.threads.first(where: { $0.id == agentID }),
+      let workspaceRoot = (thread.cwd?.isEmpty == false ? thread.cwd : nil)
+        ?? group.project.rootPath,
+      let target = Self.imageReadTarget(source: source, workspaceRoot: workspaceRoot)
+    else { throw RemoteServiceError.unavailable("Image preview is unavailable for this subagent.") }
+    let generation = connectionGeneration
+    let data = try await service.readImage(
+      cwd: target.cwd, path: target.path, maxBytes: RemoteImageLimits.maximumDisplayBytes)
+    guard connectionGeneration == generation, connectionState == .connected, !Task.isCancelled
+    else { throw CancellationError() }
+    return data
+  }
+
+  func archiveSubagent(_ agentID: String) async throws {
+    guard connectionState == .connected, let service,
+      agentOverviewGroups.contains(where: { $0.threads.contains { $0.id == agentID } })
+    else { throw RemoteServiceError.unavailable("This subagent is no longer available.") }
+    let generation = connectionGeneration
+    try await service.archiveThread(agentID: agentID)
+    guard connectionGeneration == generation, connectionState == .connected else {
+      throw RemoteServiceError.connectionLost("The host changed while archiving this subagent.")
+    }
+    for index in agentOverviewGroups.indices {
+      agentOverviewGroups[index].threads.removeAll { $0.id == agentID }
+    }
+  }
+
   func markThreadRead(_ threadID: String, reportsFailure: Bool = true) async {
     guard connectionState == .connected, let service,
       let thread = threads.first(where: { $0.id == threadID }), thread.requiresAttention
@@ -2011,6 +2067,23 @@ final class OesapModel {
     defer { if connectionGeneration == generation { answeringPermissionID = nil } }
     do {
       try await service.answerPermission(permission, allow: allow)
+      guard connectionGeneration == generation else { return }
+      permissions.removeAll { $0.id == permission.id }
+    } catch {
+      guard connectionGeneration == generation else { return }
+      permissionError =
+        "Your response wasn’t sent. Reconnect and try again. \(error.localizedDescription)"
+    }
+  }
+
+  func answerQuestion(_ permission: RemotePermission, answers: [String: String]?) async {
+    guard let service, answeringPermissionID == nil else { return }
+    let generation = connectionGeneration
+    answeringPermissionID = permission.id
+    permissionError = nil
+    defer { if connectionGeneration == generation { answeringPermissionID = nil } }
+    do {
+      try await service.answerQuestion(permission, answers: answers)
       guard connectionGeneration == generation else { return }
       permissions.removeAll { $0.id == permission.id }
     } catch {

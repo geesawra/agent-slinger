@@ -1018,9 +1018,10 @@ public actor PaseoProtocolClient: PaseoService {
     try requireConnected()
     let response: PaseoJSONValue
     switch decision {
-    case .allow(let actionID):
+    case .allow(let actionID, let updatedInput):
       var values: [String: PaseoJSONValue] = ["behavior": .string("allow")]
       if let actionID { values["selectedActionId"] = .string(actionID) }
+      if let updatedInput { values["updatedInput"] = updatedInput }
       response = .object(values)
     case .deny(let actionID, let message, let interrupt):
       var values: [String: PaseoJSONValue] = ["behavior": .string("deny")]
@@ -1422,6 +1423,7 @@ public actor PaseoProtocolClient: PaseoService {
       archivedAt: agent["archivedAt"]?.stringValue,
       requiresAttention: agent["requiresAttention"]?.boolValue ?? false,
       attentionReason: agent["attentionReason"]?.stringValue,
+      parentAgentID: agent["labels"]?["paseo.parent-agent-id"]?.stringValue,
       projectKey: projectKey,
       projectName: projectName,
       pendingPermissions: permissions,

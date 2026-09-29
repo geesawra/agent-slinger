@@ -13,6 +13,8 @@ struct ChatComposerBar: View {
   var contextUsage: RemoteContextUsage? = nil
   var isLoadingContextUsage = false
   var onShowContextUsage: (() -> Void)? = nil
+  var subagentCount = 0
+  var onShowSubagents: (() -> Void)? = nil
   var gitStatus: RemoteGitStatus? = nil
   var isLoadingGitStatus = false
   var gitStatusError: String? = nil
@@ -158,6 +160,7 @@ struct ChatComposerBar: View {
     HStack(spacing: 8) {
       gitChangesControl
       Spacer(minLength: 0)
+      subagentsControl
       contextUsageControl
     }
     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -166,7 +169,27 @@ struct ChatComposerBar: View {
   }
 
   private var hasAgentStatusControls: Bool {
-    onShowContextUsage != nil || onShowGitChanges != nil
+    onShowContextUsage != nil || onShowGitChanges != nil || onShowSubagents != nil
+  }
+
+  @ViewBuilder
+  private var subagentsControl: some View {
+    if let onShowSubagents {
+      Button {
+        InteractionFeedback.selection()
+        onShowSubagents()
+      } label: {
+        Label("\(subagentCount)", systemImage: "person.2")
+          .font(.subheadline.weight(.semibold).monospacedDigit())
+          .frame(minWidth: 44, minHeight: 44)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.bordered)
+      .tint(accessoryTint)
+      .accessibilityLabel("Subagents, \(subagentCount)")
+      .accessibilityHint("Shows this agent’s subagents and their status.")
+      .accessibilityIdentifier("subagents-button")
+    }
   }
 
   private var remainingImageCount: Int {

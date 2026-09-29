@@ -606,6 +606,23 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       agentID: permission.agentID, requestID: permission.id, decision: decision)
   }
 
+  func answerQuestion(_ permission: RemotePermission, answers: [String: String]?) async throws {
+    let decision: PaseoPermissionDecision
+    if let answers {
+      var updatedInput = permission.input?.objectValue ?? [:]
+      updatedInput["answers"] = .object(answers.mapValues(PaseoJSONValue.string))
+      decision = .allow(
+        actionID: nil,
+        updatedInput: .object(updatedInput)
+      )
+    } else {
+      decision = .deny(
+        actionID: nil, message: "Dismissed by user", interrupt: nil)
+    }
+    try await client.answerPermission(
+      agentID: permission.agentID, requestID: permission.id, decision: decision)
+  }
+
   func disconnect() async {
     await client.disconnect()
     historyCursors.removeAll()
@@ -836,7 +853,8 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       attentionReason: thread.attentionReason,
       contextUsage: mapContextUsage(
         used: thread.contextWindowUsedTokens, max: thread.contextWindowMaxTokens),
-      cwd: thread.cwd
+      cwd: thread.cwd,
+      parentAgentID: thread.parentAgentID
     )
   }
 
@@ -1018,8 +1036,9 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       permission.kind == "tool"
       || (permission.kind != "question" && permission.kind != "other" && allowAction != nil
         && denyAction != nil)
+    let questions = permission.kind == "question" ? RemoteQuestionMapper.map(permission.input) : nil
     var detail = permission.description
-    if let input = permission.input, let inputDescription = jsonText(input) {
+    if questions == nil, let input = permission.input, let inputDescription = jsonText(input) {
       detail = [detail, "Input: \(inputDescription)"].compactMap { $0 }.joined(separator: "\n\n")
     }
     return RemotePermission(
@@ -1032,7 +1051,9 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       allowActionID: allowAction?.id,
       denyActionID: denyAction?.id,
       allowLabel: allowAction?.label,
-      denyLabel: denyAction?.label
+      denyLabel: denyAction?.label,
+      input: permission.input,
+      questions: questions
     )
   }
 
