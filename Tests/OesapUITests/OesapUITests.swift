@@ -55,7 +55,7 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["No saved instances"].waitForExistence(timeout: 5))
 
     app.navigationBars.buttons.element(boundBy: 0).tap()
-    XCTAssertTrue(app.navigationBars["Oesap"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars["Agent Slinger"].waitForExistence(timeout: 5))
     XCTAssertFalse(app.buttons["setup-settings-button"].exists)
   }
 
@@ -438,7 +438,7 @@ final class OesapUITests: XCTestCase {
     app.buttons["session-info-done"].tap()
 
     app.navigationBars.buttons.firstMatch.tap()
-    XCTAssertTrue(app.navigationBars["Oesap demo"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars["Agent Slinger demo"].waitForExistence(timeout: 5))
     app.navigationBars.buttons.firstMatch.tap()
     XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
     openHostUsage(app)
@@ -820,7 +820,7 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(app.navigationBars["New thread"].waitForExistence(timeout: 5))
     XCTAssertTrue(
       app.staticTexts[
-        "This host can’t start threads from Oesap yet."
+        "This host can’t start threads from Agent Slinger yet."
       ].waitForExistence(timeout: 5))
     let composer = app.descendants(matching: .any)["chat-composer"]
     XCTAssertTrue(composer.waitForExistence(timeout: 5))
@@ -837,7 +837,7 @@ final class OesapUITests: XCTestCase {
         "--demo-server-id=ui-test-\(UUID().uuidString.lowercased())",
       ]
     app.launch()
-    XCTAssertTrue(app.navigationBars["Oesap"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars["Agent Slinger"].waitForExistence(timeout: 5))
     XCTAssertTrue(scrollUntilHittable(app.textFields["direct-endpoint"], in: app))
     return app
   }

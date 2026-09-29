@@ -1012,10 +1012,10 @@ enum RemoteServiceError: LocalizedError, Sendable {
       guard !isEmpty else { return [] }
       return [
         RemoteProject(
-          id: "demo-project", name: "Oesap demo", subtitle: "~/Projects/oesap",
+          id: "demo-project", name: "Agent Slinger demo", subtitle: "~/Projects/oesap",
           rootPath: "/demo/oesap"),
         RemoteProject(
-          id: "demo-tools-project", name: "Oesap tools", subtitle: "~/Projects/tools",
+          id: "demo-tools-project", name: "Agent Slinger tools", subtitle: "~/Projects/tools",
           rootPath: "/demo/tools"),
       ]
     }

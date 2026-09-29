@@ -1,6 +1,6 @@
-# Oesap
+# Agent Slinger
 
-Oesap is an iPhone, iPad, and Mac client for following and messaging coding agents
+Agent Slinger is an iPhone, iPad, and Mac client for following and messaging coding agents
 running on a Paseo instance. The first MVP supports connecting directly to a host or
 pasting a Paseo relay pairing link, browsing host folders to add projects,
 browsing projects and their agent threads, starting a project-configured agent
@@ -80,7 +80,7 @@ window because one model owns the active thread subscription. Hardware keyboards
 support **⌘N** for a new thread in the selected project, **⌘R** to refresh the
 workspace, and **⌘,** for Settings. The compact iPhone navigation is preserved.
 
-In Oesap, choose **Direct connection** and enter the Paseo host and port (for
+In Agent Slinger, choose **Direct connection** and enter the Paseo host and port (for
 example, `mac.local:6767`; leave off `ws://` or `wss://`) and password when
 required, or choose **Relay pairing** and paste the link provided by Paseo.
 For a private VPN host without TLS, use the VPN IP address when turning TLS
@@ -102,7 +102,7 @@ In a running thread, **Stop** requests cancellation. Sending while the agent
 is active offers **Steer** (ask it to use the follow-up in the current turn)
 or **Interrupt** (replace that turn). A host or provider may fall back from
 Steer to interrupting, so check the resulting timeline. If delivery cannot
-be confirmed, Oesap keeps the draft and original message identity for review.
+be confirmed, Agent Slinger keeps the draft and original message identity for review.
 Manual retry of that exact message is available only when the connected host
 advertises `agentRequestReceipts`; an unresolved in-flight receipt can still
 leave delivery uncertain.
@@ -120,7 +120,7 @@ details and the matching provider quota when the host reports that exact
 provider ID. **Usage** in the Projects connection menu shows quotas for host
 provider credentials, which are separate from a particular agent's usage.
 Quota values preserve the host's units and reporting states; missing values
-are not treated as zero. Paseo may return a cached quota report, so Oesap shows
+are not treated as zero. Paseo may return a cached quota report, so Agent Slinger shows
 the host's report time when available and does not promise a forced refresh.
 
 Use `just test` with an available iPhone simulator destination for the existing

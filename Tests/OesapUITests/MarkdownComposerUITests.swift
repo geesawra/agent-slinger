@@ -267,7 +267,7 @@ final class MarkdownComposerUITests: XCTestCase {
       app.launchArguments.append("--demo-agent-control")
     }
     app.launch()
-    XCTAssertTrue(app.navigationBars["Oesap"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars["Agent Slinger"].waitForExistence(timeout: 5))
     return app
   }
 

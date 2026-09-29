@@ -3,7 +3,7 @@ import UIKit
 
 struct ConnectionSetupView: View {
   @Bindable var model: OesapModel
-  var title = "Oesap"
+  var title = "Agent Slinger"
   var showsReconnectAction = true
   var onOpenSettings: (() -> Void)?
   var onConnected: (() -> Void)?

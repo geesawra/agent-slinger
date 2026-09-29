@@ -60,6 +60,7 @@ targets:
     info:
       path: Oesap-Info.plist
       properties:
+        CFBundleDisplayName: Agent Slinger
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
@@ -67,7 +68,7 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
-        NSLocalNetworkUsageDescription: Oesap connects to a Paseo daemon on your local network when you choose a direct host connection.
+        NSLocalNetworkUsageDescription: Agent Slinger connects to a Paseo daemon on your local network when you choose a direct host connection.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSExceptionDomains:

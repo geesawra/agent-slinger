@@ -805,7 +805,7 @@ private struct ThreadListView: View {
             "No agent threads",
             systemImage: "bubble.left.and.bubble.right",
             description: Text(
-              "This Paseo host can’t start threads from Oesap yet. Update Paseo on the host to enable new threads."
+              "This Paseo host can’t start threads from Agent Slinger yet. Update Paseo on the host to enable new threads."
             )
           )
           .accessibilityIdentifier("empty-threads-unsupported")
@@ -814,7 +814,7 @@ private struct ThreadListView: View {
           ContentUnavailableView {
             Label("No agent threads", systemImage: "bubble.left.and.bubble.right")
           } description: {
-            Text("Start a new thread in Oesap to begin working with an agent on this project.")
+            Text("Start a new thread in Agent Slinger to begin working with an agent on this project.")
           }
           .accessibilityIdentifier("empty-threads-supported")
           .listRowSeparator(.hidden)

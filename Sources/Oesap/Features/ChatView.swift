@@ -12,7 +12,7 @@ private enum AgentActionSheet: Identifiable {
   var title: String { "Check the previous send" }
 
   var message: String {
-    "This only clears Oesap’s local resend safeguard. It doesn’t cancel or remove the original message, and the host may still deliver it. Your draft stays here; sending it again could create a duplicate."
+    "This only clears Agent Slinger’s local resend safeguard. It doesn’t cancel or remove the original message, and the host may still deliver it. Your draft stays here; sending it again could create a duplicate."
   }
 
 }

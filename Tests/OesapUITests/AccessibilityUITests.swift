@@ -3,7 +3,7 @@ import XCTest
 final class AccessibilityUITests: XCTestCase {
   func testNativeAccessibilityAuditOnConnectionProjectsAndChat() throws {
     let app = launchDemo()
-    XCTAssertTrue(app.navigationBars["Oesap"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars["Agent Slinger"].waitForExistence(timeout: 5))
     fillEndpoint(app)
     let connectButton = app.buttons["connect-button"]
     XCTAssertTrue(scrollUntilHittable(connectButton, in: app, whenMissing: .earlier))

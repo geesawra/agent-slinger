@@ -95,7 +95,7 @@ struct NewChatView: View {
     } else if !model.canCreateThreads {
       Label {
         VStack(alignment: .leading, spacing: 4) {
-          Text("This host can’t start threads from Oesap yet.")
+          Text("This host can’t start threads from Agent Slinger yet.")
             .font(.subheadline.weight(.semibold))
           Text(
             "Update Paseo on the host to enable new threads. Your draft stays here while the app is open."
