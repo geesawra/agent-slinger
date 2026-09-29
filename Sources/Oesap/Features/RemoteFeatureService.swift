@@ -117,6 +117,22 @@ struct RemoteAgentOverviewGroup: Identifiable, Sendable, Equatable {
   var id: String { project.id }
 }
 
+struct RemoteGitChangedFile: Identifiable, Sendable, Equatable {
+  var path: String
+  var additions: Int
+  var deletions: Int
+  var status: String?
+
+  var id: String { path }
+}
+
+struct RemoteGitStatus: Sendable, Equatable {
+  var files: [RemoteGitChangedFile]
+  var additions: Int
+  var deletions: Int
+  var diffByPath: [String: String] = [:]
+}
+
 struct RemoteContextUsage: Sendable, Equatable {
   var usedTokens: Double?
   var maxTokens: Double?
@@ -431,6 +447,7 @@ protocol OesapRemoteService: Sendable {
   func connectionEvents() async -> AsyncStream<RemoteConnectionEvent>
   func projects() async throws -> [RemoteProject]
   func directoryEntries(cwd: String?) async throws -> [RemoteDirectoryEntry]
+  func gitStatus(cwd: String) async throws -> RemoteGitStatus
   func addProject(path: String) async throws -> RemoteProject
   func threads(projectID: String) async throws -> [RemoteThread]
   func archiveThread(agentID: String) async throws
@@ -454,6 +471,9 @@ protocol OesapRemoteService: Sendable {
 }
 
 extension OesapRemoteService {
+  func gitStatus(cwd: String) async throws -> RemoteGitStatus {
+    throw RemoteServiceError.unavailable("This host does not support repository changes.")
+  }
   func directoryEntries(cwd: String?) async throws -> [RemoteDirectoryEntry] {
     throw RemoteServiceError.unavailable("This host does not support directory browsing.")
   }
@@ -1255,6 +1275,18 @@ enum RemoteServiceError: LocalizedError, Sendable {
       )
       sentMessages[agentID, default: []].append(reply)
       continuations[agentID]?.yield(.message(reply, cursor: nil, isDelta: false))
+    }
+
+    func gitStatus(cwd: String) async throws -> RemoteGitStatus {
+      try ensureConnected()
+      let path = "Sources/Oesap/Features/ChatView.swift"
+      return RemoteGitStatus(
+        files: [RemoteGitChangedFile(path: path, additions: 2, deletions: 1, status: "ok")],
+        additions: 2, deletions: 1,
+        diffByPath: [
+          path:
+            "diff --git a/\(path) b/\(path)\n@@ -1,3 +1,4 @@\n import SwiftUI\n-old title\n+new title\n+another line\n"
+        ])
     }
 
     func readImage(cwd: String, path: String, maxBytes: Int) async throws -> Data {

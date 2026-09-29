@@ -1,6 +1,34 @@
 import XCTest
 
 final class OesapUITests: XCTestCase {
+  func testGitChangesStayVisibleBesideContextAndOpenFileDiff() {
+    let app = launchDemo()
+    connect(app)
+    app.buttons["project-demo-project"].tap()
+    app.buttons["thread-demo-agent-idle"].tap()
+
+    let git = app.buttons["git-diff-summary"]
+    let context = app.buttons["context-usage-button"]
+    XCTAssertTrue(git.waitForExistence(timeout: 5))
+    XCTAssertTrue(context.waitForExistence(timeout: 5))
+    XCTAssertTrue(git.isHittable, "Git changes should stay visible above the composer.")
+    XCTAssertLessThan(git.frame.maxX, context.frame.minX)
+    XCTAssertEqual(git.frame.height, context.frame.height, accuracy: 1)
+    XCTAssertTrue((git.value as? String)?.contains("2 additions, 1 deletions") == true)
+
+    git.tap()
+    XCTAssertTrue(app.navigationBars["Git changes"].waitForExistence(timeout: 5))
+    let file = app.buttons["git-diff-file-Sources/Oesap/Features/ChatView.swift"]
+    XCTAssertTrue(file.waitForExistence(timeout: 5))
+    file.tap()
+    XCTAssertTrue(app.scrollViews["git-diff-content"].waitForExistence(timeout: 5))
+    let wrap = app.buttons["git-diff-toggle-line-wrapping"]
+    XCTAssertTrue(wrap.waitForExistence(timeout: 5))
+    XCTAssertTrue(wrap.label.contains("Disable line wrapping"))
+    wrap.tap()
+    XCTAssertTrue(wrap.label.contains("Enable line wrapping"))
+  }
+
   func testSettingsAreAvailableAfterFirstConfiguredInstance() {
     let app = launchDemo()
 

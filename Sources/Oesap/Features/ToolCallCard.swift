@@ -417,52 +417,50 @@ private struct ToolTextBlock: View {
   }
 }
 
-private struct ToolDiffBlock: View {
+struct ToolDiffBlock: View {
   let content: String
   var wrapsLines = true
 
   var body: some View {
     Group {
       if wrapsLines {
-        diffLines(fixedWidth: false)
+        selectableDiff
+          .fixedSize(horizontal: false, vertical: true)
       } else {
         ScrollView(.horizontal) {
-          diffLines(fixedWidth: true)
+          selectableDiff
+            .fixedSize(horizontal: true, vertical: true)
         }
         .scrollIndicators(.hidden)
       }
     }
-    .padding(.vertical, 8)
-    .multilineTextAlignment(.leading)
+    .padding(10)
+    .frame(maxWidth: .infinity, alignment: .leading)
     .background(.background.opacity(0.78), in: RoundedRectangle(cornerRadius: 10))
   }
 
-  private func diffLines(fixedWidth: Bool) -> some View {
-    VStack(alignment: .leading, spacing: 1) {
-      ForEach(
-        Array(content.split(separator: "\n", omittingEmptySubsequences: false).enumerated()),
-        id: \.offset
-      ) { _, line in
-        Text(verbatim: String(line).isEmpty ? " " : String(line))
-          .font(.system(.caption, design: .monospaced))
-          .foregroundStyle(color(for: line))
-          .textSelection(.enabled)
-          .multilineTextAlignment(.leading)
-          .fixedSize(horizontal: fixedWidth, vertical: true)
-          .frame(maxWidth: fixedWidth ? nil : .infinity, alignment: .leading)
-          .padding(.horizontal, 10)
-          .padding(.vertical, 1)
-          .background(backgroundColor(for: line))
-      }
-    }
+  private var selectableDiff: some View {
+    Text(styledContent)
+      .font(.system(.caption, design: .monospaced))
+      .foregroundStyle(.primary)
+      .textSelection(.enabled)
+      .multilineTextAlignment(.leading)
   }
 
-  private func color(for _: Substring) -> Color { .primary }
-
-  private func backgroundColor(for line: Substring) -> Color {
-    if line.hasPrefix("+") { return .green.opacity(0.08) }
-    if line.hasPrefix("-") { return .red.opacity(0.08) }
-    return .clear
+  private var styledContent: AttributedString {
+    var result = AttributedString()
+    let lines = content.split(separator: "\n", omittingEmptySubsequences: false)
+    for (index, text) in lines.enumerated() {
+      var line = AttributedString(String(text))
+      if text.hasPrefix("+") {
+        line.backgroundColor = Color.green.opacity(0.08)
+      } else if text.hasPrefix("-") {
+        line.backgroundColor = Color.red.opacity(0.08)
+      }
+      result += line
+      if index < lines.count - 1 { result += AttributedString("\n") }
+    }
+    return result
   }
 }
 

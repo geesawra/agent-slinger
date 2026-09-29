@@ -47,13 +47,18 @@ struct ContextUsageIndicator: View {
   var body: some View {
     HStack(spacing: 6) {
       if let fraction {
-        Gauge(value: visualFraction(fraction), in: 0...1) {
-          EmptyView()
+        // The system accessory gauge fixes its stroke too thin at this compact size.
+        ZStack {
+          Circle()
+            .stroke(Color.accentColor.opacity(0.25), lineWidth: 3.5)
+          Circle()
+            .trim(from: 0, to: visualFraction(fraction))
+            .stroke(
+              Color.accentColor,
+              style: StrokeStyle(lineWidth: 3.5, lineCap: .round)
+            )
+            .rotationEffect(.degrees(-90))
         }
-        .gaugeStyle(.accessoryCircularCapacity)
-        .tint(Color.accentColor)
-        .frame(width: 58, height: 58)
-        .scaleEffect(22.0 / 58.0)
         .frame(width: 22, height: 22)
         .accessibilityHidden(true)
       } else if isLoading {

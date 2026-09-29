@@ -229,6 +229,74 @@ public actor PaseoProtocolClient: PaseoService {
     return try decodeProject(project)
   }
 
+  public func checkoutStatus(cwd: String) async throws -> PaseoCheckoutStatus {
+    try requireConnected()
+    guard !cwd.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose a workspace before checking git status.")
+    }
+    let payload = try await request(
+      type: "checkout_status_request",
+      fields: ["cwd": .string(cwd)],
+      responseType: "checkout_status_response",
+      operation: "git status", allowError: true, timeoutSeconds: 60)
+    guard payload["cwd"]?.stringValue == cwd,
+      let isGit = payload["isGit"]?.boolValue,
+      let isPaseoOwnedWorktree = payload["isPaseoOwnedWorktree"]?.boolValue,
+      let hasRemote = payload["hasRemote"]?.boolValue
+    else {
+      throw PaseoProtocolError.malformedMessage("git status response omitted required fields")
+    }
+    let aheadBehind: PaseoCheckoutAheadBehind?
+    if let value = payload["aheadBehind"], case .object = value {
+      guard let ahead = value["ahead"]?.intValue, ahead >= 0,
+        let behind = value["behind"]?.intValue, behind >= 0
+      else {
+        throw PaseoProtocolError.malformedMessage("git status had invalid ahead/behind counts")
+      }
+      aheadBehind = PaseoCheckoutAheadBehind(ahead: ahead, behind: behind)
+    } else {
+      aheadBehind = nil
+    }
+    if isGit && (payload["repoRoot"]?.stringValue == nil || payload["isDirty"]?.boolValue == nil) {
+      throw PaseoProtocolError.malformedMessage("git status omitted repository details")
+    }
+    return PaseoCheckoutStatus(
+      cwd: cwd, isGit: isGit, isPaseoOwnedWorktree: isPaseoOwnedWorktree,
+      repoRoot: payload["repoRoot"]?.stringValue,
+      currentBranch: payload["currentBranch"]?.stringValue,
+      isDirty: payload["isDirty"]?.boolValue,
+      baseRef: payload["baseRef"]?.stringValue,
+      aheadBehind: aheadBehind,
+      aheadOfOrigin: payload["aheadOfOrigin"]?.intValue,
+      behindOfOrigin: payload["behindOfOrigin"]?.intValue,
+      hasRemote: hasRemote, remoteURL: payload["remoteUrl"]?.stringValue,
+      upstreamRef: payload["upstreamRef"]?.stringValue,
+      error: try decodeCheckoutError(payload["error"]))
+  }
+
+  public func checkoutDiff(cwd: String) async throws -> PaseoCheckoutDiff {
+    try requireConnected()
+    guard !cwd.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose a workspace before checking changes.")
+    }
+    let payload = try await request(
+      type: "checkout.diff.get.request",
+      fields: [
+        "cwd": .string(cwd),
+        "compare": .object(["mode": .string("uncommitted")]),
+      ],
+      responseType: "checkout.diff.get.response",
+      operation: "git diff", allowError: true, timeoutSeconds: 60)
+    guard payload["cwd"]?.stringValue == cwd,
+      let rows = payload["files"]?.arrayValue
+    else { throw PaseoProtocolError.malformedMessage("git diff response omitted its files") }
+    return PaseoCheckoutDiff(
+      cwd: cwd,
+      files: try rows.map(decodeDiffFile),
+      diffTooLarge: payload["diffTooLarge"]?.boolValue ?? false,
+      error: try decodeCheckoutError(payload["error"]))
+  }
+
   public func supportsProviderUsage() async -> Bool {
     serverInfo?.features["providerUsageList"] == true
   }
@@ -1263,6 +1331,66 @@ public actor PaseoProtocolClient: PaseoService {
     }
     return PaseoProject(
       id: id, key: value["projectKey"]?.stringValue, name: name, rootPath: rootPath, kind: kind)
+  }
+
+  private func decodeCheckoutError(_ value: PaseoJSONValue?) throws -> PaseoCheckoutError? {
+    guard let value else { return nil }
+    if case .null = value { return nil }
+    guard let code = value["code"]?.stringValue,
+      let message = value["message"]?.stringValue
+    else { throw PaseoProtocolError.malformedMessage("checkout error omitted its code or message") }
+    return PaseoCheckoutError(code: code, message: message)
+  }
+
+  private func decodeDiffFile(_ value: PaseoJSONValue) throws -> PaseoDiffFile {
+    guard let path = value["path"]?.stringValue, !path.isEmpty,
+      let isNew = value["isNew"]?.boolValue,
+      let isDeleted = value["isDeleted"]?.boolValue,
+      let additions = value["additions"]?.intValue, additions >= 0,
+      let deletions = value["deletions"]?.intValue, deletions >= 0,
+      let rawHunks = value["hunks"]?.arrayValue
+    else { throw PaseoProtocolError.malformedMessage("git diff contained an invalid file") }
+    let status: PaseoDiffFile.Status?
+    if let rawStatus = value["status"]?.stringValue {
+      status = PaseoDiffFile.Status(rawValue: rawStatus)
+    } else {
+      status = nil
+    }
+    return PaseoDiffFile(
+      path: path, oldPath: value["oldPath"]?.stringValue,
+      isNew: isNew, isDeleted: isDeleted, additions: additions, deletions: deletions,
+      hunks: try rawHunks.map(decodeDiffHunk), status: status)
+  }
+
+  private func decodeDiffHunk(_ value: PaseoJSONValue) throws -> PaseoDiffHunk {
+    guard let oldStart = value["oldStart"]?.intValue, oldStart >= 0,
+      let oldCount = value["oldCount"]?.intValue, oldCount >= 0,
+      let newStart = value["newStart"]?.intValue, newStart >= 0,
+      let newCount = value["newCount"]?.intValue, newCount >= 0,
+      let rawLines = value["lines"]?.arrayValue
+    else { throw PaseoProtocolError.malformedMessage("git diff contained an invalid hunk") }
+    return PaseoDiffHunk(
+      oldStart: oldStart, oldCount: oldCount, newStart: newStart, newCount: newCount,
+      lines: try rawLines.map(decodeDiffLine))
+  }
+
+  private func decodeDiffLine(_ value: PaseoJSONValue) throws -> PaseoDiffLine {
+    guard let rawKind = value["type"]?.stringValue,
+      let kind = PaseoDiffLine.Kind(rawValue: rawKind),
+      let content = value["content"]?.stringValue
+    else { throw PaseoProtocolError.malformedMessage("git diff contained an invalid line") }
+    let tokens: [PaseoDiffToken]?
+    if let rawTokens = value["tokens"]?.arrayValue {
+      tokens = try rawTokens.map { token in
+        guard let text = token["text"]?.stringValue else {
+          throw PaseoProtocolError.malformedMessage("git diff contained an invalid token")
+        }
+        return PaseoDiffToken(text: text, style: token["style"]?.stringValue)
+      }
+    } else {
+      tokens = nil
+    }
+    return PaseoDiffLine(kind: kind, content: content, tokens: tokens)
   }
 
   private func decodeThread(_ value: PaseoJSONValue) throws -> PaseoThread {

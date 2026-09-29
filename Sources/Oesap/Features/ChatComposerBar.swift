@@ -13,6 +13,10 @@ struct ChatComposerBar: View {
   var contextUsage: RemoteContextUsage? = nil
   var isLoadingContextUsage = false
   var onShowContextUsage: (() -> Void)? = nil
+  var gitStatus: RemoteGitStatus? = nil
+  var isLoadingGitStatus = false
+  var gitStatusError: String? = nil
+  var onShowGitChanges: (() -> Void)? = nil
   var isAgentRunning = false
   var isStopPending = false
   var isStopEnabled = false
@@ -152,6 +156,7 @@ struct ChatComposerBar: View {
 
   private var accessoryRow: some View {
     HStack(spacing: 8) {
+      gitChangesControl
       Spacer(minLength: 0)
       contextUsageControl
     }
@@ -161,7 +166,7 @@ struct ChatComposerBar: View {
   }
 
   private var hasAgentStatusControls: Bool {
-    onShowContextUsage != nil
+    onShowContextUsage != nil || onShowGitChanges != nil
   }
 
   private var remainingImageCount: Int {
@@ -267,6 +272,40 @@ struct ChatComposerBar: View {
         }
       #endif
     }
+  }
+
+  @ViewBuilder
+  private var gitChangesControl: some View {
+    if let onShowGitChanges {
+      #if targetEnvironment(macCatalyst)
+        makeGitChangesButton(action: onShowGitChanges, style: .bordered)
+      #else
+        if #available(iOS 26.0, *) {
+          makeGitChangesButton(action: onShowGitChanges, style: .glass)
+        } else {
+          makeGitChangesButton(action: onShowGitChanges, style: .bordered)
+        }
+      #endif
+    }
+  }
+
+  private func makeGitChangesButton<Style: PrimitiveButtonStyle>(
+    action: @escaping () -> Void, style: Style
+  ) -> some View {
+    Button {
+      InteractionFeedback.selection()
+      action()
+    } label: {
+      GitChangesIndicator(
+        status: gitStatus, isLoading: isLoadingGitStatus, error: gitStatusError
+      )
+      .padding(.horizontal, 10)
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(style)
+    .tint(accessoryTint)
+    .accessibilityHint("Opens changed files and their diffs.")
+    .accessibilityIdentifier("git-diff-summary")
   }
 
   private func makeContextUsageButton<Style: PrimitiveButtonStyle>(

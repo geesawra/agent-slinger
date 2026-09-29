@@ -691,6 +691,46 @@ final class ProtocolClientTests: XCTestCase {
     await client.disconnect()
   }
 
+  func testCheckoutStatusAndDiffUseCorrelatedUncommittedRequests() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(client, transport: transport, features: "{}")
+
+    let statusTask = Task { try await client.checkoutStatus(cwd: "/fixture/worktree") }
+    let statusRequest = try await nextRequest(transport)
+    XCTAssertEqual(statusRequest.message["type"] as? String, "checkout_status_request")
+    XCTAssertEqual(statusRequest.message["cwd"] as? String, "/fixture/worktree")
+    await transport.push(
+      sessionFrame(
+        type: "checkout_status_response",
+        payload:
+          #"{"requestId":"\#(statusRequest.requestID)","cwd":"/fixture/worktree","isGit":true,"isPaseoOwnedWorktree":false,"repoRoot":"/fixture/worktree","currentBranch":"main","isDirty":true,"baseRef":null,"aheadBehind":null,"aheadOfOrigin":0,"behindOfOrigin":0,"hasRemote":false,"remoteUrl":null,"error":null}"#
+      ))
+    let status = try await statusTask.value
+    XCTAssertTrue(status.isGit)
+    XCTAssertEqual(status.repoRoot, "/fixture/worktree")
+
+    let diffTask = Task { try await client.checkoutDiff(cwd: "/fixture/worktree") }
+    let diffRequest = try await nextRequest(transport)
+    XCTAssertEqual(diffRequest.message["type"] as? String, "checkout.diff.get.request")
+    XCTAssertEqual(diffRequest.message["cwd"] as? String, "/fixture/worktree")
+    XCTAssertEqual(
+      (diffRequest.message["compare"] as? [String: Any])?["mode"] as? String, "uncommitted")
+    await transport.push(
+      sessionFrame(
+        type: "checkout.diff.get.response",
+        payload:
+          #"{"requestId":"\#(diffRequest.requestID)","cwd":"/fixture/worktree","files":[{"path":"Sources/Example.swift","oldPath":null,"isNew":false,"isDeleted":false,"additions":1,"deletions":1,"status":"ok","hunks":[{"oldStart":1,"oldCount":2,"newStart":1,"newCount":2,"lines":[{"type":"context","content":"context"},{"type":"remove","content":"old"},{"type":"add","content":"new","tokens":[{"text":"new","style":"insert"}]}]}]}],"error":null,"diffTooLarge":false}"#
+      ))
+    let diff = try await diffTask.value
+    XCTAssertEqual(diff.additions, 1)
+    XCTAssertEqual(diff.deletions, 1)
+    XCTAssertEqual(diff.files.first?.path, "Sources/Example.swift")
+    XCTAssertEqual(diff.files.first?.hunks.first?.lines.last?.kind, .add)
+    XCTAssertEqual(diff.files.first?.hunks.first?.lines.last?.tokens?.first?.text, "new")
+    await client.disconnect()
+  }
+
   private func connect(
     _ client: PaseoProtocolClient,
     transport: FixturePaseoTransport,

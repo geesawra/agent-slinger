@@ -3,6 +3,31 @@ import XCTest
 @testable import Oesap
 
 final class PaseoFeatureAdapterTests: XCTestCase {
+  func testGitSnapshotMapsCountsAndRendersFileDiff() async throws {
+    let adapter = PaseoRemoteServiceAdapter(client: AdapterTestClient())
+    let status = try await adapter.gitStatus(cwd: "/fixture/worktree")
+    XCTAssertEqual(status.additions, 1)
+    XCTAssertEqual(status.deletions, 1)
+    XCTAssertEqual(status.files.map(\.path), ["Sources/Example.swift"])
+    XCTAssertEqual(
+      status.diffByPath["Sources/Example.swift"],
+      "diff --git a/Sources/Example.swift b/Sources/Example.swift\n--- a/Sources/Example.swift\n+++ b/Sources/Example.swift\n@@ -1,1 +1,1 @@\n-old\n+new"
+    )
+  }
+
+  func testNonGitWorkspaceDoesNotRequestDiff() async throws {
+    let client = AdapterTestClient(isGit: false)
+    let adapter = PaseoRemoteServiceAdapter(client: client)
+    do {
+      _ = try await adapter.gitStatus(cwd: "/fixture/not-a-repo")
+      XCTFail("A non-Git workspace cannot have a repository diff")
+    } catch let error as RemoteServiceError {
+      XCTAssertEqual(error.localizedDescription, "This agent is not in a Git repository.")
+    }
+    let diffCalls = await client.checkoutDiffCallCount()
+    XCTAssertEqual(diffCalls, 0)
+  }
+
   func testAgentControlForwardsIntentAndMapsStopSnapshot() async throws {
     let client = AdapterTestClient()
     let adapter = PaseoRemoteServiceAdapter(client: client)
@@ -553,6 +578,8 @@ private actor AdapterTestClient: PaseoService {
   }
 
   private var sentIntent: SentIntent?
+  private let isGit: Bool
+  private var checkoutDiffCalls = 0
   private var continuation: AsyncThrowingStream<PaseoTimelineEvent, Error>.Continuation?
   private var threadPages: [PaseoPage<PaseoThread>] = []
   private var sourceTermination: AsyncStream<Void>?
@@ -561,6 +588,10 @@ private actor AdapterTestClient: PaseoService {
   private var tailCalls = 0
   private var historyGate: AdapterTestGate?
   private var gatedTailCall = Int.max
+
+  init(isGit: Bool = true) { self.isGit = isGit }
+
+  func checkoutDiffCallCount() -> Int { checkoutDiffCalls }
 
   func connect() async throws -> PaseoConnectionInfo {
     PaseoConnectionInfo(serverID: "test", features: [:])
@@ -571,6 +602,35 @@ private actor AdapterTestClient: PaseoService {
   }
 
   func listProjects() async throws -> [PaseoProject] { [] }
+
+  func checkoutStatus(cwd: String) async throws -> PaseoCheckoutStatus {
+    PaseoCheckoutStatus(
+      cwd: cwd, isGit: isGit, isPaseoOwnedWorktree: false,
+      repoRoot: isGit ? cwd : nil, currentBranch: isGit ? "main" : nil,
+      isDirty: isGit ? true : nil, baseRef: nil,
+      aheadBehind: nil, aheadOfOrigin: nil, behindOfOrigin: nil,
+      hasRemote: false, remoteURL: nil, upstreamRef: nil, error: nil)
+  }
+
+  func checkoutDiff(cwd: String) async throws -> PaseoCheckoutDiff {
+    checkoutDiffCalls += 1
+    return PaseoCheckoutDiff(
+      cwd: cwd,
+      files: [
+        PaseoDiffFile(
+          path: "Sources/Example.swift", isNew: false, isDeleted: false,
+          additions: 1, deletions: 1,
+          hunks: [
+            PaseoDiffHunk(
+              oldStart: 1, oldCount: 1, newStart: 1, newCount: 1,
+              lines: [
+                PaseoDiffLine(kind: .header, content: "@@ -1,1 +1,1 @@"),
+                PaseoDiffLine(kind: .remove, content: "old"),
+                PaseoDiffLine(kind: .add, content: "new"),
+              ])
+          ])
+      ], diffTooLarge: false, error: nil)
+  }
 
   func listThreads(projectID: String, page: PaseoPageRequest) async throws -> PaseoPage<PaseoThread>
   {

@@ -117,6 +117,170 @@ public struct PaseoDirectoryEntry: Sendable, Equatable, Identifiable {
   }
 }
 
+public struct PaseoCheckoutError: Sendable, Equatable {
+  public let code: String
+  public let message: String
+
+  public init(code: String, message: String) {
+    self.code = code
+    self.message = message
+  }
+}
+
+public struct PaseoCheckoutAheadBehind: Sendable, Equatable {
+  public let ahead: Int
+  public let behind: Int
+
+  public init(ahead: Int, behind: Int) {
+    self.ahead = ahead
+    self.behind = behind
+  }
+}
+
+public struct PaseoCheckoutStatus: Sendable, Equatable {
+  public let cwd: String
+  public let isGit: Bool
+  public let isPaseoOwnedWorktree: Bool
+  public let repoRoot: String?
+  public let currentBranch: String?
+  public let isDirty: Bool?
+  public let baseRef: String?
+  public let aheadBehind: PaseoCheckoutAheadBehind?
+  public let aheadOfOrigin: Int?
+  public let behindOfOrigin: Int?
+  public let hasRemote: Bool
+  public let remoteURL: String?
+  public let upstreamRef: String?
+  public let error: PaseoCheckoutError?
+
+  public init(
+    cwd: String, isGit: Bool, isPaseoOwnedWorktree: Bool, repoRoot: String?,
+    currentBranch: String?, isDirty: Bool?, baseRef: String?,
+    aheadBehind: PaseoCheckoutAheadBehind?, aheadOfOrigin: Int?, behindOfOrigin: Int?,
+    hasRemote: Bool, remoteURL: String?, upstreamRef: String?, error: PaseoCheckoutError?
+  ) {
+    self.cwd = cwd
+    self.isGit = isGit
+    self.isPaseoOwnedWorktree = isPaseoOwnedWorktree
+    self.repoRoot = repoRoot
+    self.currentBranch = currentBranch
+    self.isDirty = isDirty
+    self.baseRef = baseRef
+    self.aheadBehind = aheadBehind
+    self.aheadOfOrigin = aheadOfOrigin
+    self.behindOfOrigin = behindOfOrigin
+    self.hasRemote = hasRemote
+    self.remoteURL = remoteURL
+    self.upstreamRef = upstreamRef
+    self.error = error
+  }
+}
+
+public struct PaseoDiffToken: Sendable, Equatable {
+  public let text: String
+  public let style: String?
+
+  public init(text: String, style: String?) {
+    self.text = text
+    self.style = style
+  }
+}
+
+public struct PaseoDiffLine: Sendable, Equatable {
+  public enum Kind: String, Sendable, Equatable {
+    case add, remove, context, header
+  }
+
+  public let kind: Kind
+  public let content: String
+  public let tokens: [PaseoDiffToken]?
+
+  public init(kind: Kind, content: String, tokens: [PaseoDiffToken]? = nil) {
+    self.kind = kind
+    self.content = content
+    self.tokens = tokens
+  }
+}
+
+public struct PaseoDiffHunk: Sendable, Equatable {
+  public let oldStart: Int
+  public let oldCount: Int
+  public let newStart: Int
+  public let newCount: Int
+  public let lines: [PaseoDiffLine]
+
+  public init(
+    oldStart: Int, oldCount: Int, newStart: Int, newCount: Int, lines: [PaseoDiffLine]
+  ) {
+    self.oldStart = oldStart
+    self.oldCount = oldCount
+    self.newStart = newStart
+    self.newCount = newCount
+    self.lines = lines
+  }
+}
+
+public struct PaseoDiffFile: Sendable, Equatable, Identifiable {
+  public enum Status: String, Sendable, Equatable {
+    case ok
+    case tooLarge = "too_large"
+    case binary
+  }
+
+  public let path: String
+  public let oldPath: String?
+  public let isNew: Bool
+  public let isDeleted: Bool
+  public let additions: Int
+  public let deletions: Int
+  public let hunks: [PaseoDiffHunk]
+  /// Older daemons omit this field; nil means the legacy textual-diff shape.
+  public let status: Status?
+
+  public var id: String { path }
+
+  public init(
+    path: String, oldPath: String? = nil, isNew: Bool, isDeleted: Bool,
+    additions: Int, deletions: Int, hunks: [PaseoDiffHunk], status: Status? = nil
+  ) {
+    self.path = path
+    self.oldPath = oldPath
+    self.isNew = isNew
+    self.isDeleted = isDeleted
+    self.additions = additions
+    self.deletions = deletions
+    self.hunks = hunks
+    self.status = status
+  }
+}
+
+public struct PaseoCheckoutDiff: Sendable, Equatable {
+  public let cwd: String
+  public let files: [PaseoDiffFile]
+  public let diffTooLarge: Bool
+  public let error: PaseoCheckoutError?
+
+  public var additions: Int {
+    files.reduce(0) { total, file in
+      let (value, overflow) = total.addingReportingOverflow(file.additions)
+      return overflow ? Int.max : value
+    }
+  }
+  public var deletions: Int {
+    files.reduce(0) { total, file in
+      let (value, overflow) = total.addingReportingOverflow(file.deletions)
+      return overflow ? Int.max : value
+    }
+  }
+
+  public init(cwd: String, files: [PaseoDiffFile], diffTooLarge: Bool, error: PaseoCheckoutError?) {
+    self.cwd = cwd
+    self.files = files
+    self.diffTooLarge = diffTooLarge
+    self.error = error
+  }
+}
+
 public struct PaseoProviderModel: Sendable, Equatable {
   public let id: String
   public let label: String
@@ -607,6 +771,8 @@ public protocol PaseoService: Sendable {
   func listProjects() async throws -> [PaseoProject]
   func directoryEntries(cwd: String?) async throws -> [PaseoDirectoryEntry]
   func addProject(path: String) async throws -> PaseoProject
+  func checkoutStatus(cwd: String) async throws -> PaseoCheckoutStatus
+  func checkoutDiff(cwd: String) async throws -> PaseoCheckoutDiff
   func agentContextUsage(agentID: String) async throws -> PaseoAgentContextUsage
   func supportsProviderUsage() async -> Bool
   func supportsAgentRequestReceipts() async -> Bool
@@ -653,6 +819,12 @@ extension PaseoService {
   }
   public func addProject(path: String) async throws -> PaseoProject {
     throw PaseoProtocolError.unsupportedCapability("project registration")
+  }
+  public func checkoutStatus(cwd: String) async throws -> PaseoCheckoutStatus {
+    throw PaseoProtocolError.unsupportedCapability("git status")
+  }
+  public func checkoutDiff(cwd: String) async throws -> PaseoCheckoutDiff {
+    throw PaseoProtocolError.unsupportedCapability("git diff")
   }
   public func archiveAgent(agentID: String) async throws {
     throw PaseoProtocolError.unsupportedCapability("agent archive")

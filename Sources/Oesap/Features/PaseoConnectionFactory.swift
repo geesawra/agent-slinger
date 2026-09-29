@@ -371,6 +371,76 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     }
   }
 
+  func gitStatus(cwd: String) async throws -> RemoteGitStatus {
+    let checkout = try await client.checkoutStatus(cwd: cwd)
+    if let error = checkout.error {
+      throw RemoteServiceError.unavailable(error.message)
+    }
+    guard checkout.isGit else {
+      throw RemoteServiceError.unavailable("This agent is not in a Git repository.")
+    }
+    let snapshot = try await client.checkoutDiff(cwd: cwd)
+    if let error = snapshot.error {
+      throw RemoteServiceError.unavailable(error.message)
+    }
+    guard !snapshot.diffTooLarge else {
+      throw RemoteServiceError.unavailable("This repository diff is too large to display.")
+    }
+    let files = snapshot.files.map { file in
+      RemoteGitChangedFile(
+        path: file.path, additions: file.additions, deletions: file.deletions,
+        status: Self.gitFileStatus(file))
+    }
+    let diffs = snapshot.files.reduce(into: [String: String]()) { result, file in
+      result[file.path] = Self.unifiedDiff(for: file)
+    }
+    return RemoteGitStatus(
+      files: files, additions: snapshot.additions, deletions: snapshot.deletions,
+      diffByPath: diffs)
+  }
+
+  private static func gitFileStatus(_ file: PaseoDiffFile) -> String? {
+    switch file.status {
+    case .binary: return "Binary file"
+    case .tooLarge: return "Diff too large"
+    case .ok, nil:
+      if file.isNew { return "Added" }
+      if file.isDeleted { return "Deleted" }
+      if file.oldPath != nil && file.oldPath != file.path { return "Renamed" }
+      return nil
+    }
+  }
+
+  private static func unifiedDiff(for file: PaseoDiffFile) -> String {
+    let oldPath = file.oldPath ?? file.path
+    var lines = ["diff --git a/\(oldPath) b/\(file.path)"]
+    if file.isNew { lines.append("new file") }
+    if file.isDeleted { lines.append("deleted file") }
+    lines.append(file.isNew ? "--- /dev/null" : "--- a/\(oldPath)")
+    lines.append(file.isDeleted ? "+++ /dev/null" : "+++ b/\(file.path)")
+    for hunk in file.hunks {
+      if !hunk.lines.contains(where: { $0.kind == .header }) {
+        lines.append("@@ -\(hunk.oldStart),\(hunk.oldCount) +\(hunk.newStart),\(hunk.newCount) @@")
+      }
+      for line in hunk.lines {
+        switch line.kind {
+        case .add: lines.append("+" + line.content)
+        case .remove: lines.append("-" + line.content)
+        case .context: lines.append(" " + line.content)
+        case .header: lines.append(line.content)
+        }
+      }
+    }
+    if file.hunks.isEmpty {
+      switch file.status {
+      case .binary: lines.append("Binary file; text diff unavailable.")
+      case .tooLarge: lines.append("File diff is too large to display.")
+      case .ok, nil: lines.append("No text changes to display.")
+      }
+    }
+    return lines.joined(separator: "\n")
+  }
+
   func addProject(path: String) async throws -> RemoteProject {
     let project = try await client.addProject(path: path)
     return RemoteProject(

@@ -71,6 +71,11 @@ final class OesapModel {
   private(set) var agentOverviewError: String?
   private(set) var agentOverviewIsStale = false
   private(set) var agentOverviewUpdatedAt: Date?
+  private(set) var gitStatus: RemoteGitStatus?
+  private(set) var gitStatusError: String?
+  private(set) var loadingGitStatus = false
+  private(set) var gitDiffByPath: [String: String] = [:]
+  private(set) var gitDiffErrorByPath: [String: String] = [:]
   private(set) var providerUsageProviders: [RemoteProviderUsage] = []
   private(set) var providerUsageFetchedAt: Date?
   private(set) var providerUsageError: String?
@@ -138,6 +143,8 @@ final class OesapModel {
   @ObservationIgnored private var agentOverviewRefreshTask: Task<Void, Never>?
   @ObservationIgnored private var agentOverviewRefreshTaskID: UUID?
   @ObservationIgnored private var agentOverviewRefreshQueued = false
+  @ObservationIgnored private var gitRequestGeneration = 0
+  @ObservationIgnored private var cachedGitDiffByPath: [String: String] = [:]
   @ObservationIgnored private var providerUsageRefreshTask: Task<Void, Never>?
   @ObservationIgnored private var providerUsageRefreshTaskID: UUID?
   @ObservationIgnored private var providerUsageRefreshQueued = false
@@ -947,6 +954,7 @@ final class OesapModel {
   }
 
   func selectProject(_ id: String) async {
+    clearGitChanges()
     projectSelectionGeneration += 1
     threadSelectionGeneration += 1
     clearSessionDetails()
@@ -969,6 +977,7 @@ final class OesapModel {
   }
 
   func selectThread(_ id: String) {
+    clearGitChanges()
     clearSessionDetails()
     contextUsageRefreshTask?.cancel()
     contextUsageRefreshTask = nil
@@ -984,6 +993,74 @@ final class OesapModel {
     timelineHasOlder = false
     olderTimelineCursor = nil
     latestTimelineCursor = nil
+  }
+
+  func refreshGitStatus(threadID: String) async {
+    guard selectedThreadID == threadID else { return }
+    guard connectionState == .connected, let service else {
+      gitStatusError = "Reconnect to load repository changes."
+      return
+    }
+    guard let cwd = gitWorkingDirectory(for: threadID) else {
+      gitStatusError = "This agent has no working directory."
+      return
+    }
+    gitRequestGeneration += 1
+    let requestGeneration = gitRequestGeneration
+    let connectionGeneration = connectionGeneration
+    loadingGitStatus = true
+    gitStatusError = nil
+    gitStatus = nil
+    gitDiffByPath = [:]
+    cachedGitDiffByPath = [:]
+    gitDiffErrorByPath = [:]
+    do {
+      let status = try await service.gitStatus(cwd: cwd)
+      guard selectedThreadID == threadID,
+        self.connectionGeneration == connectionGeneration,
+        gitRequestGeneration == requestGeneration
+      else { return }
+      gitStatus = status
+      cachedGitDiffByPath = status.diffByPath
+      gitDiffByPath = [:]
+      gitDiffErrorByPath = [:]
+      loadingGitStatus = false
+    } catch {
+      guard selectedThreadID == threadID, self.connectionGeneration == connectionGeneration,
+        gitRequestGeneration == requestGeneration
+      else { return }
+      gitStatusError = error.localizedDescription
+      loadingGitStatus = false
+    }
+  }
+
+  func loadGitDiff(threadID: String, path: String) async {
+    guard selectedThreadID == threadID,
+      gitStatus?.files.contains(where: { $0.path == path }) == true,
+      connectionState == .connected
+    else { return }
+    gitDiffErrorByPath.removeValue(forKey: path)
+    if let diff = cachedGitDiffByPath[path] {
+      gitDiffByPath[path] = diff
+    } else {
+      gitDiffErrorByPath[path] = "This file’s diff is unavailable."
+    }
+  }
+
+  private func gitWorkingDirectory(for threadID: String) -> String? {
+    guard let thread = threads.first(where: { $0.id == threadID }) else { return nil }
+    if let cwd = thread.cwd, !cwd.isEmpty { return cwd }
+    return selectedProject?.rootPath
+  }
+
+  private func clearGitChanges() {
+    gitRequestGeneration += 1
+    gitStatus = nil
+    gitStatusError = nil
+    loadingGitStatus = false
+    gitDiffByPath = [:]
+    cachedGitDiffByPath = [:]
+    gitDiffErrorByPath = [:]
   }
 
   func refreshAgentOverview() async {
@@ -2446,6 +2523,7 @@ final class OesapModel {
 
   @discardableResult
   private func invalidateConnection() -> Int {
+    clearGitChanges()
     clearSessionDetails()
     // A settings request can still be awaiting a response from the old host.
     // Releasing its token lets the newly selected host accept settings changes;

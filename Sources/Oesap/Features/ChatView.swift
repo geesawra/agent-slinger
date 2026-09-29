@@ -79,6 +79,7 @@ struct ChatView: View {
   let threadID: String
   @State private var showsAgentSettings = false
   @State private var showsSessionInfo = false
+  @State private var showsGitChanges = false
   @State private var composerFocused = false
   @State private var isNearBottom = true
   @State private var isUserScrolling = false
@@ -445,6 +446,20 @@ struct ChatView: View {
       }
     }
     .safeAreaInset(edge: .bottom, spacing: 0) { composerBar }
+    .sheet(isPresented: $showsGitChanges) {
+      GitChangesListSheet(model: model, threadID: threadID)
+    }
+    .task(id: threadID) {
+      await model.refreshGitStatus(threadID: threadID)
+    }
+    .onChange(of: model.connectionState) { _, state in
+      guard state == .connected else { return }
+      Task { await model.refreshGitStatus(threadID: threadID) }
+    }
+    .onChange(of: thread?.state) { oldState, newState in
+      guard oldState == .running, newState != .running else { return }
+      Task { await model.refreshGitStatus(threadID: threadID) }
+    }
   }
 
   private var composerBar: some View {
@@ -470,6 +485,14 @@ struct ChatView: View {
         composerFocused = false
         showsAgentSettings = true
       },
+      gitStatus: model.gitStatus,
+      isLoadingGitStatus: model.loadingGitStatus,
+      gitStatusError: model.gitStatusError,
+      onShowGitChanges: model.gitStatus?.files.isEmpty == false
+        ? {
+          composerFocused = false
+          showsGitChanges = true
+        } : nil,
       isAgentRunning: thread?.state == .running,
       isStopPending: model.isStopRequestPending(threadID),
       isStopEnabled: model.agentControlAvailable(for: threadID)
