@@ -71,6 +71,9 @@ final class OesapModel {
   private(set) var agentOverviewError: String?
   private(set) var agentOverviewIsStale = false
   private(set) var agentOverviewUpdatedAt: Date?
+  private(set) var providerSubagentsByParent: [String: [RemoteProviderSubagent]] = [:]
+  private(set) var providerSubagentErrors: [String: String] = [:]
+  private(set) var loadingProviderSubagentParents: Set<String> = []
   private(set) var gitStatus: RemoteGitStatus?
   private(set) var gitStatusError: String?
   private(set) var loadingGitStatus = false
@@ -828,6 +831,7 @@ final class OesapModel {
       }
       if priorServerID == nil || priorServerID != serverID {
         clearAgentOverview()
+        clearProviderSubagents()
         clearProviderUsage()
         clearCachedContextUsage()
         clearAgentControlState()
@@ -880,6 +884,7 @@ final class OesapModel {
     pendingNewThreadResults.removeAll()
     clearAgentControlState()
     clearAgentOverview()
+    clearProviderSubagents()
     clearProviderUsage()
     connectionState = .disconnected
     projects = []
@@ -1274,6 +1279,47 @@ final class OesapModel {
         ? "Some projects couldn’t be refreshed. Their last available agents remain visible."
         : "Agents couldn’t be refreshed. Last available results remain visible."
     }
+  }
+
+  func refreshProviderSubagents(parentAgentID: String) async {
+    guard connectionState == .connected, let service, !parentAgentID.isEmpty else { return }
+    let generation = connectionGeneration
+    let supported = await service.supportsProviderSubagents()
+    guard connectionGeneration == generation, connectionState == .connected,
+      !Task.isCancelled
+    else { return }
+    guard supported else {
+      providerSubagentsByParent[parentAgentID] = []
+      providerSubagentErrors.removeValue(forKey: parentAgentID)
+      return
+    }
+    loadingProviderSubagentParents.insert(parentAgentID)
+    providerSubagentErrors.removeValue(forKey: parentAgentID)
+    defer {
+      if connectionGeneration == generation {
+        loadingProviderSubagentParents.remove(parentAgentID)
+      }
+    }
+    do {
+      let subagents = try await service.providerSubagents(parentAgentID: parentAgentID)
+      guard connectionGeneration == generation, connectionState == .connected,
+        !Task.isCancelled
+      else { return }
+      providerSubagentsByParent[parentAgentID] = subagents
+    } catch {
+      guard connectionGeneration == generation, !Task.isCancelled else { return }
+      providerSubagentErrors[parentAgentID] = error.localizedDescription
+    }
+  }
+
+  func loadProviderSubagentHistory(parentAgentID: String, subagentID: String) async throws
+    -> RemoteTimeline
+  {
+    guard connectionState == .connected, let service else {
+      throw RemoteServiceError.connectionLost("Reconnect to view this provider subagent.")
+    }
+    return try await service.providerSubagentHistory(
+      parentAgentID: parentAgentID, subagentID: subagentID)
   }
 
   @discardableResult
@@ -2677,6 +2723,7 @@ final class OesapModel {
     pendingNewThreadIntents.removeAll()
     pendingNewThreadResults.removeAll()
     clearAgentOverview()
+    clearProviderSubagents()
     clearProviderUsage()
     clearCachedContextUsage()
 
@@ -2725,6 +2772,12 @@ final class OesapModel {
     agentOverviewError = nil
     agentOverviewIsStale = false
     agentOverviewUpdatedAt = nil
+  }
+
+  private func clearProviderSubagents() {
+    providerSubagentsByParent = [:]
+    providerSubagentErrors = [:]
+    loadingProviderSubagentParents = []
   }
 
   private func clearProviderUsage() {

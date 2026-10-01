@@ -93,8 +93,11 @@ struct ChatView: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var thread: RemoteThread? { model.threads.first { $0.id == threadID } }
-  private var subagents: [RemoteThread] {
+  private var managedSubagents: [RemoteThread] {
     model.agentOverviewGroups.flatMap(\.threads).filter { $0.parentAgentID == threadID }
+  }
+  private var providerSubagents: [RemoteProviderSubagent] {
+    model.providerSubagentsByParent[threadID] ?? []
   }
   private var timelineRows: [ChatTimelineRow] {
     ChatTimelineRow.grouped(model.messages, hiding: model.bufferedAgentMessageIDs)
@@ -476,14 +479,21 @@ struct ChatView: View {
     }
     .task(id: threadID) {
       await model.refreshGitStatus(threadID: threadID)
+      await model.refreshProviderSubagents(parentAgentID: threadID)
     }
     .onChange(of: model.connectionState) { _, state in
       guard state == .connected else { return }
-      Task { await model.refreshGitStatus(threadID: threadID) }
+      Task {
+        await model.refreshGitStatus(threadID: threadID)
+        await model.refreshProviderSubagents(parentAgentID: threadID)
+      }
     }
     .onChange(of: thread?.state) { oldState, newState in
       guard oldState == .running, newState != .running else { return }
-      Task { await model.refreshGitStatus(threadID: threadID) }
+      Task {
+        await model.refreshGitStatus(threadID: threadID)
+        await model.refreshProviderSubagents(parentAgentID: threadID)
+      }
     }
   }
 
@@ -510,7 +520,7 @@ struct ChatView: View {
         composerFocused = false
         showsAgentSettings = true
       },
-      subagentCount: subagents.count,
+      subagentCount: managedSubagents.count + providerSubagents.count,
       onShowSubagents: {
         composerFocused = false
         showsSubagents = true

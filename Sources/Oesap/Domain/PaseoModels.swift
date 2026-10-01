@@ -517,6 +517,47 @@ public struct PaseoThread: Sendable, Equatable, Identifiable {
   }
 }
 
+public struct PaseoProviderSubagent: Sendable, Equatable, Identifiable {
+  public enum Status: String, Sendable, Equatable {
+    case running
+    case completed
+    case failed
+    case canceled
+  }
+
+  public let id: String
+  public let parentAgentID: String
+  public let parentSubagentID: String?
+  public let provider: String
+  public let title: String?
+  public let description: String?
+  public let status: Status
+  public let createdAt: String
+  public let updatedAt: String
+  public let toolCallID: String?
+  public let cwd: String?
+  public let subtitle: String?
+
+  public init(
+    id: String, parentAgentID: String, parentSubagentID: String? = nil, provider: String,
+    title: String?, description: String?, status: Status, createdAt: String, updatedAt: String,
+    toolCallID: String?, cwd: String? = nil, subtitle: String? = nil
+  ) {
+    self.id = id
+    self.parentAgentID = parentAgentID
+    self.parentSubagentID = parentSubagentID
+    self.provider = provider
+    self.title = title
+    self.description = description
+    self.status = status
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.toolCallID = toolCallID
+    self.cwd = cwd
+    self.subtitle = subtitle
+  }
+}
+
 public struct PaseoProviderUsageSnapshot: Sendable, Equatable {
   public let fetchedAt: String
   public let providers: [PaseoProviderUsage]
@@ -778,8 +819,12 @@ public protocol PaseoService: Sendable {
   func checkoutDiff(cwd: String) async throws -> PaseoCheckoutDiff
   func agentContextUsage(agentID: String) async throws -> PaseoAgentContextUsage
   func supportsProviderUsage() async -> Bool
+  func supportsProviderSubagents() async -> Bool
   func supportsAgentRequestReceipts() async -> Bool
   func listProviderUsage() async throws -> PaseoProviderUsageSnapshot
+  func listProviderSubagents(parentAgentID: String) async throws -> [PaseoProviderSubagent]
+  func providerSubagentHistory(parentAgentID: String, subagentID: String, limit: Int) async throws
+    -> PaseoTimelinePage
   func listProviders(cwd: String) async throws -> [PaseoProvider]
   func agentSettings(agentID: String) async throws -> PaseoAgentSettings
   func applyAgentSettings(
@@ -839,6 +884,7 @@ extension PaseoService {
     throw PaseoProtocolError.unsupportedCapability("agent context usage")
   }
   public func supportsProviderUsage() async -> Bool { false }
+  public func supportsProviderSubagents() async -> Bool { false }
   public func supportsAgentRequestReceipts() async -> Bool { false }
   public func send(
     agentID: String, text: String, messageID: String,
@@ -865,6 +911,15 @@ extension PaseoService {
   }
   public func listProviderUsage() async throws -> PaseoProviderUsageSnapshot {
     throw PaseoProtocolError.unsupportedCapability("provider usage")
+  }
+  public func listProviderSubagents(parentAgentID: String) async throws -> [PaseoProviderSubagent] {
+    throw PaseoProtocolError.unsupportedCapability("provider subagents")
+  }
+  public func providerSubagentHistory(parentAgentID: String, subagentID: String, limit: Int)
+    async throws
+    -> PaseoTimelinePage
+  {
+    throw PaseoProtocolError.unsupportedCapability("provider subagent timelines")
   }
   public func listProviders(cwd: String) async throws -> [PaseoProvider] {
     throw PaseoProtocolError.unsupportedCapability("provider discovery")

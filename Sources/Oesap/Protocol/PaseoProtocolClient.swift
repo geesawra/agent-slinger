@@ -91,6 +91,8 @@ public actor PaseoProtocolClient: PaseoService {
         "timeline_replacement_invalidation": .bool(true),
         "timeline_notifications": .bool(true),
         "project_updates": .bool(true),
+        "provider_subagents": .bool(true),
+        "projected_subagent_timeline": .bool(true),
       ]),
     ]
     let text = try encode(hello)
@@ -299,6 +301,10 @@ public actor PaseoProtocolClient: PaseoService {
 
   public func supportsProviderUsage() async -> Bool {
     serverInfo?.features["providerUsageList"] == true
+  }
+
+  public func supportsProviderSubagents() async -> Bool {
+    serverInfo?.features["providerSubagents"] == true
   }
 
   public func supportsAgentRequestReceipts() async -> Bool {
@@ -652,6 +658,54 @@ public actor PaseoProtocolClient: PaseoService {
     )
   }
 
+  public func listProviderSubagents(parentAgentID: String) async throws -> [PaseoProviderSubagent] {
+    try requireConnected()
+    guard !parentAgentID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose an agent before listing its subagents.")
+    }
+    try requireFeature("providerSubagents", as: "provider subagent listing")
+    let payload = try await request(
+      type: "agent.provider_subagents.list.request",
+      fields: ["parentAgentId": .string(parentAgentID)],
+      responseType: "agent.provider_subagents.list.response",
+      operation: "provider subagent listing"
+    )
+    guard payload["parentAgentId"]?.stringValue == parentAgentID,
+      let rawSubagents = payload["subagents"]?.arrayValue
+    else {
+      throw PaseoProtocolError.malformedMessage("provider subagent list omitted its rows")
+    }
+    if let error = payload["error"]?.stringValue, !error.isEmpty {
+      throw PaseoProtocolError.requestRejected(error)
+    }
+    return try rawSubagents.map { value in
+      guard let id = value["id"]?.stringValue, !id.isEmpty,
+        value["parentAgentId"]?.stringValue == parentAgentID,
+        let provider = value["provider"]?.stringValue,
+        let rawStatus = value["status"]?.stringValue,
+        let status = PaseoProviderSubagent.Status(rawValue: rawStatus),
+        let createdAt = value["createdAt"]?.stringValue,
+        let updatedAt = value["updatedAt"]?.stringValue
+      else {
+        throw PaseoProtocolError.malformedMessage("provider subagent descriptor was invalid")
+      }
+      return PaseoProviderSubagent(
+        id: id,
+        parentAgentID: parentAgentID,
+        parentSubagentID: value["parentSubagentId"]?.stringValue,
+        provider: provider,
+        title: value["title"]?.stringValue,
+        description: value["description"]?.stringValue,
+        status: status,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        toolCallID: value["toolCallId"]?.stringValue,
+        cwd: value["cwd"]?.stringValue,
+        subtitle: value["subtitle"]?.stringValue
+      )
+    }
+  }
+
   public func archiveAgent(agentID: String) async throws {
     try requireConnected()
     guard !agentID.isEmpty else {
@@ -753,6 +807,71 @@ public actor PaseoProtocolClient: PaseoService {
       entries: entries,
       startCursor: startCursor,
       endCursor: endCursor,
+      hasOlder: hasOlder,
+      hasNewer: hasNewer,
+      reset: reset,
+      staleCursor: staleCursor,
+      gap: gap
+    )
+  }
+
+  public func providerSubagentHistory(
+    parentAgentID: String, subagentID: String, limit: Int = 100
+  ) async throws -> PaseoTimelinePage {
+    try requireConnected()
+    guard !parentAgentID.isEmpty, !subagentID.isEmpty else {
+      throw PaseoProtocolError.requestRejected("Choose a provider subagent before opening it.")
+    }
+    try requireFeature("providerSubagents", as: "provider subagent timelines")
+    let payload = try await request(
+      type: "agent.provider_subagents.timeline.get.request",
+      fields: [
+        "parentAgentId": .string(parentAgentID),
+        "subagentId": .string(subagentID),
+        "direction": .string(PaseoTimelineDirection.tail.rawValue),
+        "limit": .number(Double(min(max(limit, 1), 200))),
+      ],
+      responseType: "agent.provider_subagents.timeline.get.response",
+      operation: "provider subagent timeline"
+    )
+    guard payload["parentAgentId"]?.stringValue == parentAgentID,
+      payload["subagentId"]?.stringValue == subagentID,
+      let epoch = payload["epoch"]?.stringValue, !epoch.isEmpty,
+      let rawRows = payload["rows"]?.arrayValue,
+      let hasOlder = payload["hasOlder"]?.boolValue,
+      let hasNewer = payload["hasNewer"]?.boolValue,
+      let reset = payload["reset"]?.boolValue,
+      let staleCursor = payload["staleCursor"]?.boolValue,
+      let gap = payload["gap"]?.boolValue
+    else {
+      throw PaseoProtocolError.malformedMessage("provider subagent timeline was incomplete")
+    }
+    let provider = payload["provider"]?.stringValue ?? "unknown"
+    if let error = payload["error"]?.stringValue, !error.isEmpty {
+      throw PaseoProtocolError.requestRejected(error)
+    }
+    let entries = try rawRows.map { row -> PaseoTimelineEntry in
+      guard let item = row["item"],
+        let timestamp = row["timestamp"]?.stringValue,
+        let sequence = row["seq"]?.intValue, sequence >= 0
+      else {
+        throw PaseoProtocolError.malformedMessage("provider subagent timeline row was invalid")
+      }
+      let start = row["seqStart"]?.intValue ?? sequence
+      let end = row["seqEnd"]?.intValue ?? sequence
+      guard start >= 0, end >= start else {
+        throw PaseoProtocolError.malformedMessage("provider subagent timeline sequence was invalid")
+      }
+      return PaseoTimelineEntry(
+        id: "\(epoch):\(start)-\(end)", provider: provider, item: item, turnID: nil,
+        timestamp: timestamp, startSequence: start, endSequence: end, collapsed: [])
+    }
+    return PaseoTimelinePage(
+      agentID: subagentID,
+      epoch: epoch,
+      entries: entries,
+      startCursor: try nullableCursor(payload["startCursor"] ?? .null),
+      endCursor: try nullableCursor(payload["endCursor"] ?? .null),
       hasOlder: hasOlder,
       hasNewer: hasNewer,
       reset: reset,

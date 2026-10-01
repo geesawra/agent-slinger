@@ -175,7 +175,7 @@ struct ChatComposerBar: View {
   @ViewBuilder
   private var subagentsControl: some View {
     if let onShowSubagents {
-      Button {
+      let button = Button {
         InteractionFeedback.selection()
         onShowSubagents()
       } label: {
@@ -184,11 +184,20 @@ struct ChatComposerBar: View {
           .frame(minWidth: 44, minHeight: 44)
           .contentShape(Rectangle())
       }
-      .buttonStyle(.bordered)
-      .tint(accessoryTint)
       .accessibilityLabel("Subagents, \(subagentCount)")
       .accessibilityHint("Shows this agent’s subagents and their status.")
       .accessibilityIdentifier("subagents-button")
+
+      if #available(iOS 26.0, *) {
+        button
+          .buttonStyle(.glass)
+          .buttonBorderShape(.capsule)
+          .tint(accessoryTint)
+      } else {
+        button
+          .buttonStyle(.bordered)
+          .tint(accessoryTint)
+      }
     }
   }
 

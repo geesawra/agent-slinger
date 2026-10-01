@@ -185,6 +185,10 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     connectedInfo?.features["providerUsageList"] == true
   }
 
+  func supportsProviderSubagents() async -> Bool {
+    connectedInfo?.features["providerSubagents"] == true
+  }
+
   func supportsAgentRequestReceipts() async -> Bool {
     await client.supportsAgentRequestReceipts()
   }
@@ -472,6 +476,22 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     return results
   }
 
+  func providerSubagents(parentAgentID: String) async throws -> [RemoteProviderSubagent] {
+    try await client.listProviderSubagents(parentAgentID: parentAgentID).map { subagent in
+      RemoteProviderSubagent(
+        id: subagent.id,
+        parentAgentID: subagent.parentAgentID,
+        parentSubagentID: subagent.parentSubagentID,
+        provider: subagent.provider,
+        title: subagent.title,
+        description: subagent.description,
+        status: RemoteProviderSubagent.Status(rawValue: subagent.status.rawValue) ?? .running,
+        cwd: subagent.cwd,
+        subtitle: subagent.subtitle
+      )
+    }
+  }
+
   func archiveThread(agentID: String) async throws {
     try await client.archiveAgent(agentID: agentID)
   }
@@ -520,6 +540,23 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
         RemoteTimelineCursor(epoch: $0.epoch, sequence: $0.sequence)
       },
       latestCursor: cursor == nil ? page.endCursor.map(Self.mapCursor) : nil
+    )
+  }
+
+  func providerSubagentHistory(parentAgentID: String, subagentID: String) async throws
+    -> RemoteTimeline
+  {
+    let page = try await client.providerSubagentHistory(
+      parentAgentID: parentAgentID, subagentID: subagentID, limit: 100)
+    let mapped = Self.mapMessages(page.entries)
+    return RemoteTimeline(
+      messages: mapped.messages,
+      historyMayBeIncomplete: page.gap || page.staleCursor || page.reset,
+      hasOlder: page.hasOlder,
+      olderCursor: page.startCursor.map {
+        RemoteTimelineCursor(epoch: $0.epoch, sequence: $0.sequence)
+      },
+      latestCursor: page.endCursor.map(Self.mapCursor)
     )
   }
 

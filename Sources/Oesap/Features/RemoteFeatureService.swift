@@ -280,6 +280,31 @@ struct RemoteThread: Identifiable, Sendable, Equatable {
   var parentAgentID: String? = nil
 }
 
+struct RemoteProviderSubagent: Identifiable, Sendable, Equatable {
+  enum Status: String, Sendable, Equatable {
+    case running
+    case completed
+    case failed
+    case canceled
+  }
+
+  var id: String
+  var parentAgentID: String
+  var parentSubagentID: String?
+  var provider: String
+  var title: String?
+  var description: String?
+  var status: Status
+  var cwd: String?
+  var subtitle: String?
+
+  var displayTitle: String {
+    let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let trimmed, !trimmed.isEmpty { return trimmed }
+    return "Untitled subagent"
+  }
+}
+
 enum RemoteActiveTurnBehavior: String, Sendable, Equatable {
   case interrupt
   case steer
@@ -452,7 +477,11 @@ protocol OesapRemoteService: Sendable {
   func serverID() async -> String?
   func supportsNewThreads() async -> Bool
   func supportsProviderUsage() async -> Bool
+  func supportsProviderSubagents() async -> Bool
   func providerUsage() async throws -> RemoteProviderUsageSnapshot
+  func providerSubagents(parentAgentID: String) async throws -> [RemoteProviderSubagent]
+  func providerSubagentHistory(parentAgentID: String, subagentID: String) async throws
+    -> RemoteTimeline
   func contextUsage(agentID: String) async throws -> RemoteContextUsage?
   func agentProviders(cwd: String) async throws -> [RemoteAgentProvider]
   func agentSettings(agentID: String) async throws -> RemoteAgentSettings
@@ -511,6 +540,15 @@ extension OesapRemoteService {
   func serverID() async -> String? { nil }
   func supportsNewThreads() async -> Bool { false }
   func supportsProviderUsage() async -> Bool { false }
+  func supportsProviderSubagents() async -> Bool { false }
+  func providerSubagents(parentAgentID: String) async throws -> [RemoteProviderSubagent] {
+    throw RemoteServiceError.unavailable("This host does not support provider subagents.")
+  }
+  func providerSubagentHistory(parentAgentID: String, subagentID: String) async throws
+    -> RemoteTimeline
+  {
+    throw RemoteServiceError.unavailable("This host does not support provider subagent timelines.")
+  }
   func providerUsage() async throws -> RemoteProviderUsageSnapshot {
     throw RemoteServiceError.unavailable("This host does not support provider usage.")
   }
