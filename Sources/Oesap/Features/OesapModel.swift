@@ -96,6 +96,7 @@ final class OesapModel {
   private(set) var timelineGeneration = 0
   private(set) var connectError: String?
   private(set) var workspaceError: String?
+  private(set) var workspaceNotice: String?
   private(set) var timelineError: String?
   private(set) var messageError: String?
   private(set) var permissionError: String?
@@ -903,6 +904,7 @@ final class OesapModel {
     olderTimelineCursor = nil
     latestTimelineCursor = nil
     workspaceError = nil
+    workspaceNotice = nil
     timelineError = nil
     messageError = nil
     permissionError = nil
@@ -954,6 +956,8 @@ final class OesapModel {
   }
 
   func selectProject(_ id: String) async {
+    guard projects.contains(where: { $0.id == id }) else { return }
+    workspaceNotice = nil
     clearGitChanges()
     projectSelectionGeneration += 1
     threadSelectionGeneration += 1
@@ -2101,9 +2105,17 @@ final class OesapModel {
     guard connectionGeneration == generation, let service else { return }
     loadingProjects = true
     workspaceError = nil
+    workspaceNotice = nil
     do {
       let loadedProjects = try await service.projects()
       guard connectionGeneration == generation, !Task.isCancelled else { return }
+      let requestedProjectID = preserveSelection ? selectedProjectID : nil
+      if let requestedProjectID,
+        !loadedProjects.contains(where: { $0.id == requestedProjectID })
+      {
+        workspaceNotice =
+          "The workspace you were viewing is no longer available on this host. It may have been archived."
+      }
       projects = loadedProjects
       loadingProjects = false
       await refreshPermissions(using: service, generation: generation)
@@ -2116,9 +2128,10 @@ final class OesapModel {
         threads = []
         replaceMessages([])
         permissions = []
+        UserDefaults.standard.removeObject(forKey: Self.selectedProjectKey)
+        UserDefaults.standard.removeObject(forKey: Self.selectedThreadKey)
         return
       }
-      let requestedProjectID = preserveSelection ? selectedProjectID : nil
       let nextProjectID =
         loadedProjects.contains { $0.id == requestedProjectID }
         ? requestedProjectID
@@ -2669,6 +2682,7 @@ final class OesapModel {
 
     projects = []
     threads = []
+    workspaceNotice = nil
     replaceMessages([])
     permissions = []
     loadingProjects = false

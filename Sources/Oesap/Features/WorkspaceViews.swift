@@ -101,6 +101,15 @@ struct WorkspaceRootView: View {
       if path.contains(.settings) { path = [.settings] } else { path.removeAll() }
     }
     .onChange(of: model.projects.map(\.id)) { _, projectIDs in
+      let archivedProjectIsInCompactPath = path.contains { route in
+        switch route {
+        case .project(let id), .newChat(let id), .agentConfiguration(let id):
+          !projectIDs.contains(id)
+        default:
+          false
+        }
+      }
+      if archivedProjectIsInCompactPath { path.removeAll() }
       guard let splitProjectID, !projectIDs.contains(splitProjectID) else { return }
       resetWorkspaceNavigation()
     }
@@ -462,6 +471,17 @@ private struct ProjectListView: View {
         ConnectionStatusRow(model: model)
       }
 
+      if let notice = model.workspaceNotice {
+        Section {
+          Label(notice, systemImage: "archivebox")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("workspace-unavailable-notice")
+        }
+        .listRowSeparator(.hidden)
+      }
+
       if let error = model.workspaceError, model.connectionState == .connected {
         Section {
           ConnectionErrorNotice(message: error, identifier: "workspace-error")
@@ -803,7 +823,15 @@ private struct ThreadListView: View {
         }
       }
 
-      if model.selectedProjectID != projectID || model.loadingThreads {
+      if !model.loadingProjects && !model.projects.contains(where: { $0.id == projectID }) {
+        ContentUnavailableView(
+          "Workspace unavailable",
+          systemImage: "archivebox",
+          description: Text(
+            "This workspace is no longer available on this host. It may have been archived."
+          )
+        )
+      } else if model.selectedProjectID != projectID || model.loadingThreads {
         Section {
           HStack(spacing: 12) {
             ProgressView()
@@ -904,9 +932,13 @@ private struct ThreadListView: View {
     }
     .refreshable { await model.refreshThreads(projectID: projectID) }
     .task(id: projectID) {
-      if model.selectedProjectID != projectID {
+      if model.projects.contains(where: { $0.id == projectID }),
+        model.selectedProjectID != projectID
+      {
         await model.selectProject(projectID)
-      } else if model.threads.isEmpty && !model.loadingThreads {
+      } else if model.projects.contains(where: { $0.id == projectID }),
+        model.threads.isEmpty && !model.loadingThreads
+      {
         await model.refreshThreads(projectID: projectID)
       }
     }
