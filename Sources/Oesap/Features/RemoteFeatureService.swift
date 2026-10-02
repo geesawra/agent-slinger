@@ -355,6 +355,29 @@ struct RemoteMessage: Identifiable, Sendable, Equatable {
   var compaction: RemoteCompaction? = nil
 }
 
+struct RemoteAgentTask: Identifiable, Sendable, Equatable {
+  enum Status: Sendable, Equatable {
+    case pending
+    case inProgress
+    case completed
+  }
+
+  var id: String
+  var text: String
+  var activeForm: String?
+  var status: Status
+
+  var displayText: String {
+    if status == .inProgress,
+      let activeForm = activeForm?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !activeForm.isEmpty
+    {
+      return activeForm
+    }
+    return text
+  }
+}
+
 struct RemoteCompaction: Sendable, Equatable {
   enum Status: String, Sendable, Equatable {
     case loading
@@ -418,6 +441,7 @@ struct RemoteTimeline: Sendable, Equatable {
   var hasOlder: Bool = false
   var olderCursor: RemoteTimelineCursor?
   var latestCursor: RemoteTimelineCursor?
+  var tasks: [RemoteAgentTask]? = nil
 }
 
 struct RemoteTimelineCursor: Sendable, Equatable {
@@ -460,6 +484,7 @@ struct RemoteQuestionOption: Identifiable, Sendable, Equatable {
 
 enum RemoteTimelineUpdate: Sendable {
   case message(RemoteMessage, cursor: RemoteTimelineCursor?, isDelta: Bool)
+  case tasks([RemoteAgentTask], cursor: RemoteTimelineCursor?)
   case historyChanged
   case threadState(RemoteThread.State, requiresAttention: Bool, reason: String?)
   case contextUsage(RemoteContextUsage)

@@ -453,7 +453,7 @@ struct SubagentConversationView: View {
         case .historyChanged:
           messages = try await model.subagentHistory(agent.id).messages
           proxy.scrollTo("subagent-bottom", anchor: .bottom)
-        case .threadState, .contextUsage, .contextUsageNeedsRefresh,
+        case .threadState, .contextUsage, .contextUsageNeedsRefresh, .tasks,
           .permissionRequested, .permissionResolved:
           break
         }

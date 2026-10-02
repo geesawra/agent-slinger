@@ -10,6 +10,7 @@ struct ChatComposerBar: View {
   var send: (String, [RemoteDraftImage]) -> Void
   var interrupt: ((String, [RemoteDraftImage]) -> Void)? = nil
   var clearError: () -> Void
+  var agentTasks: [RemoteAgentTask] = []
   var contextUsage: RemoteContextUsage? = nil
   var isLoadingContextUsage = false
   var onShowContextUsage: (() -> Void)? = nil
@@ -30,6 +31,7 @@ struct ChatComposerBar: View {
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var showsExpandedComposer = false
+  @State private var showsAgentTasks = false
   @State private var pendingExpandedStop = false
   @State private var showsCompactExpandControl = false
   @State private var expandedShouldRestoreFocus = false
@@ -161,6 +163,7 @@ struct ChatComposerBar: View {
       gitChangesControl
       Spacer(minLength: 0)
       subagentsControl
+      agentTasksControl
       contextUsageControl
     }
     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -170,6 +173,7 @@ struct ChatComposerBar: View {
 
   private var hasAgentStatusControls: Bool {
     onShowContextUsage != nil || onShowGitChanges != nil || onShowSubagents != nil
+      || !agentTasks.isEmpty
   }
 
   @ViewBuilder
@@ -303,6 +307,44 @@ struct ChatComposerBar: View {
           makeContextUsageButton(action: onShowContextUsage, style: .bordered)
         }
       #endif
+    }
+  }
+
+  @ViewBuilder
+  private var agentTasksControl: some View {
+    if !agentTasks.isEmpty {
+      #if targetEnvironment(macCatalyst)
+        makeAgentTasksButton(style: .bordered)
+      #else
+        if #available(iOS 26.0, *) {
+          makeAgentTasksButton(style: .glass)
+        } else {
+          makeAgentTasksButton(style: .bordered)
+        }
+      #endif
+    }
+  }
+
+  private func makeAgentTasksButton<Style: PrimitiveButtonStyle>(style: Style) -> some View {
+    let completedCount = agentTasks.filter { $0.status == .completed }.count
+    return Button {
+      InteractionFeedback.selection()
+      focus.wrappedValue = false
+      showsAgentTasks = true
+    } label: {
+      Label("\(completedCount)/\(agentTasks.count)", systemImage: "checklist")
+        .font(.subheadline.weight(.semibold).monospacedDigit())
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(style)
+    .tint(accessoryTint)
+    .accessibilityLabel("Agent tasks, \(completedCount) of \(agentTasks.count) complete")
+    .accessibilityHint("Shows the agent’s current tasks and their status.")
+    .accessibilityIdentifier("agent-tasks-button")
+    .popover(isPresented: $showsAgentTasks, attachmentAnchor: .rect(.bounds), arrowEdge: .bottom) {
+      AgentTasksPopover(tasks: agentTasks)
+        .presentationCompactAdaptation(.popover)
     }
   }
 
@@ -592,6 +634,90 @@ struct ChatComposerBar: View {
         focus.wrappedValue = true
       }
     }
+  }
+}
+
+private struct AgentTasksPopover: View {
+  let tasks: [RemoteAgentTask]
+
+  private var completedCount: Int {
+    tasks.filter { $0.status == .completed }.count
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      VStack(alignment: .leading, spacing: 3) {
+        Text("Tasks")
+          .font(.headline)
+        Text("\(completedCount) of \(tasks.count) complete")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      Divider()
+
+      ScrollView {
+        VStack(alignment: .leading, spacing: 12) {
+          ForEach(tasks) { task in
+            AgentTaskRow(task: task)
+          }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .frame(maxHeight: 300)
+    }
+    .padding(16)
+    .frame(width: 300, alignment: .leading)
+    .accessibilityIdentifier("agent-tasks-popover")
+  }
+}
+
+private struct AgentTaskRow: View {
+  let task: RemoteAgentTask
+
+  private var stateTitle: String {
+    switch task.status {
+    case .pending: "Pending"
+    case .inProgress: "In progress"
+    case .completed: "Completed"
+    }
+  }
+
+  private var symbol: String {
+    switch task.status {
+    case .pending: "circle"
+    case .inProgress: "arrow.triangle.2.circlepath"
+    case .completed: "checkmark.circle.fill"
+    }
+  }
+
+  private var tint: Color {
+    switch task.status {
+    case .pending: .secondary
+    case .inProgress: .accentColor
+    case .completed: .green
+    }
+  }
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 9) {
+      Image(systemName: symbol)
+        .font(.body)
+        .foregroundStyle(tint)
+        .frame(width: 18)
+        .padding(.top, 1)
+
+      VStack(alignment: .leading, spacing: 3) {
+        Text(verbatim: task.displayText)
+          .font(.subheadline)
+          .foregroundStyle(.primary)
+          .fixedSize(horizontal: false, vertical: true)
+        Text(stateTitle)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .accessibilityElement(children: .combine)
   }
 }
 

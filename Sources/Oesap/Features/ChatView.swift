@@ -514,6 +514,7 @@ struct ChatView: View {
       send: submitThreadMessage,
       interrupt: interruptThreadMessage,
       clearError: {},
+      agentTasks: model.agentTasks(for: threadID),
       contextUsage: model.contextUsage(for: threadID),
       isLoadingContextUsage: model.loadingContextUsage,
       onShowContextUsage: {
@@ -1031,7 +1032,6 @@ private struct AgentActivityIndicator: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(12)
-    .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     .accessibilityElement(children: .combine)
   }
 }

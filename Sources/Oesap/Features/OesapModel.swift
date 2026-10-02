@@ -74,6 +74,7 @@ final class OesapModel {
   private(set) var providerSubagentsByParent: [String: [RemoteProviderSubagent]] = [:]
   private(set) var providerSubagentErrors: [String: String] = [:]
   private(set) var loadingProviderSubagentParents: Set<String> = []
+  private(set) var agentTasksByThread: [String: [RemoteAgentTask]] = [:]
   private(set) var gitStatus: RemoteGitStatus?
   private(set) var gitStatusError: String?
   private(set) var loadingGitStatus = false
@@ -187,6 +188,10 @@ final class OesapModel {
 
   func contextUsage(for threadID: String) -> RemoteContextUsage? {
     threads.first(where: { $0.id == threadID })?.contextUsage
+  }
+
+  func agentTasks(for threadID: String) -> [RemoteAgentTask] {
+    agentTasksByThread[threadID] ?? []
   }
 
   func providerUsage(for providerID: String) -> RemoteProviderUsage? {
@@ -832,6 +837,7 @@ final class OesapModel {
       if priorServerID == nil || priorServerID != serverID {
         clearAgentOverview()
         clearProviderSubagents()
+        clearAgentTasks()
         clearProviderUsage()
         clearCachedContextUsage()
         clearAgentControlState()
@@ -885,6 +891,7 @@ final class OesapModel {
     clearAgentControlState()
     clearAgentOverview()
     clearProviderSubagents()
+    clearAgentTasks()
     clearProviderUsage()
     connectionState = .disconnected
     projects = []
@@ -1405,7 +1412,8 @@ final class OesapModel {
       historyMayBeIncomplete: timeline.historyMayBeIncomplete,
       hasOlder: timeline.hasOlder,
       olderCursor: timeline.olderCursor,
-      latestCursor: timeline.latestCursor)
+      latestCursor: timeline.latestCursor,
+      tasks: timeline.tasks)
   }
 
   func subagentEvents(_ agentID: String) async throws
@@ -1968,6 +1976,7 @@ final class OesapModel {
           selectionGeneration: selectionGeneration)
       else { return }
       replaceMessages(history.messages.map { imageOverlay($0, threadID: threadID) })
+      setAgentTasks(history.tasks, threadID: threadID)
       historyMayBeIncomplete = history.historyMayBeIncomplete
       timelineHasOlder = history.hasOlder
       olderTimelineCursor = history.olderCursor
@@ -1989,6 +1998,19 @@ final class OesapModel {
         switch update {
         case .message(let message, let cursor, let isDelta):
           appendMessage(message, cursor: cursor, isDelta: isDelta)
+        case .tasks(let tasks, let cursor):
+          setAgentTasks(tasks, threadID: threadID)
+          if let cursor {
+            if let latestTimelineCursor {
+              if latestTimelineCursor.epoch == cursor.epoch,
+                cursor.sequence >= latestTimelineCursor.sequence
+              {
+                self.latestTimelineCursor = cursor
+              }
+            } else {
+              latestTimelineCursor = cursor
+            }
+          }
         case .historyChanged:
           await refreshThreadsForSelectedProject(using: service, generation: generation)
           await refreshPermissions(using: service, generation: generation)
@@ -2004,6 +2026,7 @@ final class OesapModel {
               selectionGeneration: selectionGeneration)
           else { return }
           replaceMessages(refreshedHistory.messages.map { imageOverlay($0, threadID: threadID) })
+          setAgentTasks(refreshedHistory.tasks, threadID: threadID)
           historyMayBeIncomplete = refreshedHistory.historyMayBeIncomplete
           timelineHasOlder = refreshedHistory.hasOlder
           olderTimelineCursor = refreshedHistory.olderCursor
@@ -2724,6 +2747,7 @@ final class OesapModel {
     pendingNewThreadResults.removeAll()
     clearAgentOverview()
     clearProviderSubagents()
+    clearAgentTasks()
     clearProviderUsage()
     clearCachedContextUsage()
 
@@ -2778,6 +2802,18 @@ final class OesapModel {
     providerSubagentsByParent = [:]
     providerSubagentErrors = [:]
     loadingProviderSubagentParents = []
+  }
+
+  private func setAgentTasks(_ tasks: [RemoteAgentTask]?, threadID: String) {
+    guard let tasks, !tasks.isEmpty else {
+      agentTasksByThread.removeValue(forKey: threadID)
+      return
+    }
+    agentTasksByThread[threadID] = tasks
+  }
+
+  private func clearAgentTasks() {
+    agentTasksByThread = [:]
   }
 
   private func clearProviderUsage() {

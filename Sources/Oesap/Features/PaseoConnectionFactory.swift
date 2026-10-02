@@ -539,7 +539,8 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       olderCursor: page.startCursor.map {
         RemoteTimelineCursor(epoch: $0.epoch, sequence: $0.sequence)
       },
-      latestCursor: cursor == nil ? page.endCursor.map(Self.mapCursor) : nil
+      latestCursor: cursor == nil ? page.endCursor.map(Self.mapCursor) : nil,
+      tasks: mapped.tasks
     )
   }
 
@@ -556,7 +557,8 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       olderCursor: page.startCursor.map {
         RemoteTimelineCursor(epoch: $0.epoch, sequence: $0.sequence)
       },
-      latestCursor: page.endCursor.map(Self.mapCursor)
+      latestCursor: page.endCursor.map(Self.mapCursor),
+      tasks: mapped.tasks
     )
   }
 
@@ -775,6 +777,9 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       let type = value["type"]?.stringValue
       if type == "timeline", let item = value["item"] {
         let fallbackID = "live:\(epoch ?? "epoch"):\(sequence ?? 0)"
+        if let tasks = Self.mapTasks(item) {
+          return [.tasks(tasks, cursor: cursor.map(Self.mapCursor))]
+        }
         if item["type"]?.stringValue == "assistant_message",
           let messageID = item["messageId"]?.stringValue,
           let text = item["text"]?.stringValue
@@ -936,14 +941,20 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
   private struct MappedMessages {
     let messages: [RemoteMessage]
     let toolSnapshots: [String: [String: PaseoJSONValue]]
+    let tasks: [RemoteAgentTask]?
   }
 
   private static func mapMessages(_ entries: [PaseoTimelineEntry]) -> MappedMessages {
     var messages: [RemoteMessage] = []
     var toolSnapshots: [String: [String: PaseoJSONValue]] = [:]
     var toolSequences: [String: Int] = [:]
+    var tasks: [RemoteAgentTask]?
     for entry in entries {
       var item = entry.item
+      if let latestTasks = mapTasks(item) {
+        tasks = latestTasks
+        continue
+      }
       if item["type"]?.stringValue == "tool_call", let object = item.objectValue,
         let call = RemoteToolCallMapper.map(object, turnID: entry.turnID)
       {
@@ -979,7 +990,30 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
         messages.append(message)
       }
     }
-    return MappedMessages(messages: messages, toolSnapshots: toolSnapshots)
+    return MappedMessages(messages: messages, toolSnapshots: toolSnapshots, tasks: tasks)
+  }
+
+  private static func mapTasks(_ item: PaseoJSONValue) -> [RemoteAgentTask]? {
+    guard item["type"]?.stringValue == "todo",
+      let rawItems = item["items"], case .array(let items) = rawItems
+    else {
+      return nil
+    }
+    return items.enumerated().compactMap { index, value in
+      guard let text = value["text"]?.stringValue else { return nil }
+      let status: RemoteAgentTask.Status
+      switch value["status"]?.stringValue {
+      case "in_progress": status = .inProgress
+      case "completed": status = .completed
+      case "pending": status = .pending
+      default: status = value["completed"] == .bool(true) ? .completed : .pending
+      }
+      return RemoteAgentTask(
+        id: value["id"]?.stringValue ?? "task-\(index)",
+        text: text,
+        activeForm: value["activeForm"]?.stringValue,
+        status: status)
+    }
   }
 
   private static func mapTimelineItem(
@@ -1026,8 +1060,7 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
         id: id, author: .agent, text: object["text"]?.stringValue ?? "Plan updated.",
         timestamp: date)
     case "todo":
-      return RemoteMessage(
-        id: id, author: .system, text: "Agent checklist updated.", timestamp: date)
+      return nil
     case "compaction":
       let status: RemoteCompaction.Status =
         object["status"]?.stringValue == "loading" ? .loading : .completed
