@@ -366,7 +366,7 @@ final class OesapUITests: XCTestCase {
     let healthyAgent = failureApp.buttons["overview-agent-demo-agent-running"]
     XCTAssertTrue(healthyAgent.waitForExistence(timeout: 5))
     XCTAssertTrue(failureApp.staticTexts["Some project states are unavailable"].exists)
-    XCTAssertTrue(failureApp.buttons["retry-agent-overview"].exists)
+    XCTAssertFalse(failureApp.buttons["retry-agent-overview"].exists)
     XCTAssertFalse(
       failureApp.staticTexts["No active agents"].exists,
       "A partial project failure must stay visible instead of looking like an empty overview."
@@ -597,7 +597,7 @@ final class OesapUITests: XCTestCase {
       failureApp.staticTexts["Provider usage unavailable"].waitForExistence(timeout: 5))
     XCTAssertTrue(
       staticText(containing: "The demo host could not load provider usage.", in: failureApp).exists)
-    XCTAssertTrue(failureApp.buttons["retry-provider-usage"].exists)
+    XCTAssertFalse(failureApp.buttons["retry-provider-usage"].exists)
     attachScreenshot(named: "Provider usage refresh failure")
   }
 

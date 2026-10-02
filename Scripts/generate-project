@@ -4,6 +4,19 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+force_generation=0
+if [[ "${1:-}" == "--force" && $# == 1 ]]; then
+    force_generation=1
+elif [[ $# -gt 0 ]]; then
+    printf 'Usage: %s [--force]\n' "${BASH_SOURCE[0]}" >&2
+    exit 2
+fi
+
+if [[ -d Oesap.xcodeproj && "$force_generation" == 0 ]]; then
+    printf 'Oesap.xcodeproj already exists; skipping generation. Run `just regenerate` to replace it.\n'
+    exit 0
+fi
+
 required_version="2.46.0"
 if ! command -v xcodegen >/dev/null 2>&1; then
     printf 'XcodeGen %s is required. Install it before generating the project.\n' "$required_version" >&2

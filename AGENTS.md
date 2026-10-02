@@ -3,7 +3,8 @@
 ## Mac Catalyst
 
 - The Mac app is the shared `Oesap` target. Edit `project.yml` for target or
-  signing configuration; `Scripts/generate-project` regenerates `Oesap.xcodeproj`.
+  signing configuration; `Scripts/generate-project` skips an existing
+  `Oesap.xcodeproj`. Use `just regenerate` after changing the project spec.
   The architecture decision is in `docs/adr/0011-mac-catalyst-ipad-and-chat-performance.md`.
 - Platform-specific SwiftUI code uses `#if targetEnvironment(macCatalyst)`.
   `WorkspaceRootView` in `Sources/Oesap/Features/WorkspaceViews.swift` owns the

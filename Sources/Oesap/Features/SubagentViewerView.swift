@@ -40,8 +40,8 @@ struct SubagentViewerSheet: View {
             ?? (model.agentOverviewGroups.isEmpty ? model.agentOverviewError : nil)
         {
           ContentUnavailableView(
-            "Subagents unavailable", systemImage: "person.2.slash", description: Text(error))
-          Button("Retry") { refreshSubagents() }
+            "Subagents unavailable", systemImage: "person.2.slash",
+            description: Text("\(error)\nPull down to refresh to try again."))
         } else if managedSubagents.isEmpty && providerSubagents.isEmpty {
           ContentUnavailableView(
             "No subagents", systemImage: "person.2",
@@ -57,7 +57,9 @@ struct SubagentViewerSheet: View {
               Label(error, systemImage: "exclamationmark.triangle.fill")
                 .font(.footnote)
                 .foregroundStyle(.orange)
-              Button("Retry provider subagents") { refreshSubagents() }
+              Text("Pull down to refresh.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
           }
           ForEach(managedSubagents) { agent in
@@ -101,19 +103,6 @@ struct SubagentViewerSheet: View {
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
           Button("Done") { dismiss() }
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-          Button {
-            refreshSubagents()
-          } label: {
-            if loadingSubagents {
-              ProgressView()
-            } else {
-              Image(systemName: "arrow.clockwise")
-            }
-          }
-          .disabled(loadingSubagents)
-          .accessibilityLabel("Refresh subagents")
         }
       }
       .task { await refreshAllSubagents() }

@@ -195,28 +195,6 @@ struct UsageListContent: View {
       }
     }
     .refreshable { await refreshUsage() }
-    .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        Button {
-          Task { await refreshUsage() }
-        } label: {
-          if model.loadingProviderUsage || model.loadingContextUsage {
-            ProgressView()
-          } else {
-            Image(systemName: "arrow.clockwise")
-          }
-        }
-        .disabled(
-          model.loadingProviderUsage || model.loadingContextUsage
-            || model.connectionState != .connected
-        )
-        .accessibilityLabel("Refresh usage")
-        .accessibilityHint(
-          "Asks the host for its usage report; the host may return cached results."
-        )
-        .accessibilityIdentifier("refresh-provider-usage")
-      }
-    }
     .task { await refreshUsage() }
   }
 
@@ -363,9 +341,10 @@ struct UsageListContent: View {
           .font(.footnote)
           .foregroundStyle(Color.primary.opacity(0.75))
         }
-        Spacer(minLength: 4)
-        retryButton
       }
+      Text("Pull down to refresh.")
+        .font(.footnote)
+        .foregroundStyle(Color.primary.opacity(0.75))
     }
   }
 
@@ -381,14 +360,12 @@ struct UsageListContent: View {
         )
         .listRowSeparator(.hidden)
       } else if let error = contextThread == nil ? model.providerUsageError : contextError {
-        VStack(alignment: .leading, spacing: 10) {
-          ContentUnavailableView(
-            "Provider usage unavailable",
-            systemImage: "exclamationmark.triangle",
-            description: Text(verbatim: error).foregroundStyle(Color.primary.opacity(0.75))
-          )
-          retryButton
-        }
+        ContentUnavailableView(
+          "Provider usage unavailable",
+          systemImage: "exclamationmark.triangle",
+          description: Text(verbatim: "\(error)\nPull down to refresh to try again.")
+            .foregroundStyle(Color.primary.opacity(0.75))
+        )
         .listRowSeparator(.hidden)
       } else {
         ContentUnavailableView(
@@ -399,13 +376,6 @@ struct UsageListContent: View {
         .listRowSeparator(.hidden)
       }
     }
-  }
-
-  private var retryButton: some View {
-    Button("Retry") { Task { await refreshUsage() } }
-      .font(.subheadline.weight(.medium))
-      .disabled(model.loadingProviderUsage || model.loadingContextUsage)
-      .accessibilityIdentifier("retry-provider-usage")
   }
 
   private var contextError: String? {

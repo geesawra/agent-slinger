@@ -8,14 +8,17 @@ thread, and viewing and sending timeline messages.
 
 ## Run
 
-Generate the Xcode project with the pinned XcodeGen version, then build or run
-the `Oesap` scheme on an iPhone or iPad simulator (iOS/iPadOS 17+):
+Ensure the Xcode project exists with the pinned XcodeGen version, then build or
+run the `Oesap` scheme on an iPhone or iPad simulator (iOS/iPadOS 17+):
 
 ```sh
 just generate
 just simulator-destinations
 OESAP_SIMULATOR_UDID=<available-simulator-udid> just simulator
 ```
+
+Build commands skip project generation when `Oesap.xcodeproj` already exists.
+After changing `project.yml`, run `just regenerate` to replace it.
 
 For a Mac build (macOS 14+), use the same `Oesap` scheme with **My Mac (Mac
 Catalyst)**. Catalyst reuses the iPad app’s SwiftUI interface, UIKit text editor,

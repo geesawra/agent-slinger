@@ -4,7 +4,6 @@ struct AgentOverviewView: View {
   @Bindable var model: OesapModel
   var onOpenThread: (String) -> Void
 
-  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @State private var filter = AgentOverviewFilter.active
   @State private var navigationError: String?
 
@@ -109,28 +108,11 @@ struct AgentOverviewView: View {
           } icon: {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
           }
-          Button("Refresh overview") { Task { await model.refreshAgentOverview() } }
         }
       }
     }
     .navigationTitle("Agents")
     .navigationBarTitleDisplayMode(.inline)
-    .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        Button {
-          Task { await model.refreshAgentOverview() }
-        } label: {
-          if model.loadingAgentOverview {
-            ProgressView()
-          } else {
-            Image(systemName: "arrow.clockwise")
-          }
-        }
-        .disabled(model.loadingAgentOverview)
-        .accessibilityLabel("Refresh agents")
-        .accessibilityIdentifier("refresh-agent-overview")
-      }
-    }
     .refreshable { await model.refreshAgentOverview() }
     .onAppear { Task { await model.refreshAgentOverview() } }
     .onChange(of: model.timelineGeneration) { _, _ in
@@ -171,18 +153,7 @@ struct AgentOverviewView: View {
 
   private var refreshStatus: some View {
     Section {
-      if dynamicTypeSize.isAccessibilitySize {
-        VStack(alignment: .leading, spacing: 8) {
-          refreshStatusDetails
-          retryAgentOverviewButton(expanded: true)
-        }
-      } else {
-        HStack(alignment: .top, spacing: 10) {
-          refreshStatusDetails
-          Spacer(minLength: 4)
-          retryAgentOverviewButton(expanded: false)
-        }
-      }
+      refreshStatusDetails
     }
   }
 
@@ -204,24 +175,14 @@ struct AgentOverviewView: View {
     }
   }
 
-  private func retryAgentOverviewButton(expanded: Bool) -> some View {
-    Button {
-      Task { await model.refreshAgentOverview() }
-    } label: {
-      Text("Retry")
-        .frame(minWidth: 44, maxWidth: expanded ? .infinity : nil, minHeight: 44)
-        .contentShape(Rectangle())
-    }
-    .font(.subheadline.weight(.medium))
-    .disabled(model.loadingAgentOverview)
-    .accessibilityIdentifier("retry-agent-overview")
-  }
-
   private var refreshStatusDescription: String {
     if hasProjectErrors {
-      return "Showing last-known rows; counts include loaded project results."
+      return "Showing last-known rows; counts include loaded project results. Pull down to refresh."
     }
-    return model.agentOverviewError ?? "Pull to refresh to load current agent status."
+    if let error = model.agentOverviewError {
+      return "\(error) Pull down to refresh to try again."
+    }
+    return "Pull to refresh to load current agent status."
   }
 
   private var offlineStatus: some View {
@@ -262,7 +223,8 @@ struct AgentOverviewView: View {
 
   private func open(_ thread: RemoteThread, in group: RemoteAgentOverviewGroup) {
     guard model.openAgent(projectID: group.project.id, threadID: thread.id) else {
-      navigationError = "This agent is no longer available in the overview. Refresh and try again."
+      navigationError =
+        "This agent is no longer available in the overview. Pull down to refresh and try again."
       return
     }
     navigationError = nil

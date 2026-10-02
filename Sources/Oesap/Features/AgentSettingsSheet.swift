@@ -126,11 +126,9 @@ struct AgentSettingsSheet: View {
         }
         .accessibilityIdentifier("session-settings-error")
         if settings == nil && model.connectionState == .connected {
-          Button("Retry") {
-            Task { await model.refreshSessionDetails(threadID: threadID) }
-          }
-          .disabled(model.sessionDetailsLoading)
-          .accessibilityIdentifier("retry-session-settings")
+          Text("Pull down to refresh to try again.")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
         }
       }
       if let notice = model.sessionDetailsNotice {

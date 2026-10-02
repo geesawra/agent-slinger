@@ -69,13 +69,11 @@ struct WorkspaceRootView: View {
         canCreateThread: hasWorkspace && model.selectedProjectID != nil
           && (!usesSplitNavigation || splitProjectID == model.selectedProjectID)
           && model.connectionState == .connected,
-        canRefreshWorkspace: hasWorkspace && model.connectionState == .connected,
         canOpenSettings: !model.loadingSavedConnections,
         newThread: {
           guard let id = model.selectedProjectID else { return }
           open(.newChat(id))
         },
-        refresh: { Task { await model.refreshWorkspace() } },
         settings: { open(.settings) }
       )
     )
@@ -387,10 +385,8 @@ extension OesapRoute: Identifiable {
 
 struct WorkspaceActions {
   var canCreateThread: Bool
-  var canRefreshWorkspace: Bool
   var canOpenSettings: Bool
   var newThread: () -> Void
-  var refresh: () -> Void
   var settings: () -> Void
 }
 
@@ -418,11 +414,6 @@ struct WorkspaceCommands: Commands {
       Button("Settings…") { actions?.settings() }
         .keyboardShortcut(",")
         .disabled(actions?.canOpenSettings != true)
-    }
-    CommandGroup(after: .toolbar) {
-      Button("Refresh Workspace") { actions?.refresh() }
-        .keyboardShortcut("r")
-        .disabled(actions?.canRefreshWorkspace != true)
     }
     SidebarCommands()
   }

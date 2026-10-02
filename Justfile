@@ -12,9 +12,13 @@ mac_destination := "platform=macOS,variant=Mac Catalyst"
 
 default: check
 
-# Regenerate the Xcode project from the checked-in XcodeGen specification.
+# Generate the Xcode project from the checked-in XcodeGen specification if missing.
 generate:
     ./Scripts/generate-project
+
+# Replace the existing Xcode project after changing project.yml.
+regenerate:
+    ./Scripts/generate-project --force
 
 # Run Swift Format's strict source linter over app and test code.
 lint:

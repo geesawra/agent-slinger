@@ -32,7 +32,7 @@ development baseline, not an approved public release version.
   `project.yml`, and bind the generated `CFBundleShortVersionString` and
   `CFBundleVersion` values to those settings.
 - Keep `project.yml` as the configuration source of truth and regenerate the
-  project and generated `Oesap-Info.plist` with `just generate`.
+  project and generated `Oesap-Info.plist` with `just regenerate`.
 - Focus the MVP accessibility pass on larger touch targets and clear labels
   for compact controls, readable adaptive message colors, layouts that reflow
   at accessibility text sizes, and wording that accurately describes

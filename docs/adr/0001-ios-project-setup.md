@@ -14,8 +14,9 @@ generating the Xcode project from the command line.
 
 - Use XcodeGen 2.46.0 and keep `project.yml` as the project configuration
   source of truth.
-- Generate `Oesap.xcodeproj` with `Scripts/generate-project`; do not commit or
-  edit the generated project directly.
+- Generate `Oesap.xcodeproj` with `Scripts/generate-project`; it skips an
+  existing project unless passed `--force`. Do not commit or edit the generated
+  project directly.
 - Target iPhone only. Do not add iPad, Mac, or Mac Catalyst targets.
 - Carry over Hydraulophone's iOS 17.0 deployment target as the initial Oesap
   baseline.

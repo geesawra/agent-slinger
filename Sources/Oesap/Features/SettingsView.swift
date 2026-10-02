@@ -108,17 +108,9 @@ struct SettingsView: View {
             .disabled(model.connectionState.isBusy || isSelecting)
             .accessibilityIdentifier("retry-active-instance")
           } else {
-            Button {
-              Task { await refreshInstances() }
-            } label: {
-              HStack {
-                Label("Refresh saved instances", systemImage: "arrow.clockwise")
-                Spacer()
-                if isRefreshing { ProgressView() }
-              }
-            }
-            .disabled(isRefreshing)
-            .accessibilityIdentifier("refresh-saved-instances")
+            Text("Pull down to refresh saved instances.")
+              .font(.footnote)
+              .foregroundStyle(.secondary)
           }
         }
       }

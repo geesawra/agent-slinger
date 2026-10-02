@@ -274,7 +274,12 @@ struct ChatView: View {
             if let trace = latestThinkingTrace {
               ThinkingTraceView(
                 message: trace,
-                isUpdating: model.connectionState == .connected && thread?.state == .running
+                isUpdating: model.connectionState == .connected && thread?.state == .running,
+                threadID: threadID,
+                timelineGeneration: model.timelineGeneration,
+                loadRemoteImage: { source, imageThreadID in
+                  try await model.loadRemoteImage(source: source, threadID: imageThreadID)
+                }
               )
               .id(trace.id)
               .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1083,8 +1088,16 @@ private struct CompactionCard: View {
 private struct ThinkingTraceView: View {
   let message: RemoteMessage
   let isUpdating: Bool
+  let threadID: String
+  let timelineGeneration: Int
+  let loadRemoteImage: (String, String) async throws -> Data
 
+  @Environment(\.colorScheme) private var colorScheme
   @State private var isExpanded = false
+
+  private var backgroundColor: Color {
+    colorScheme == .dark ? Color.gray.opacity(0.22) : Color.gray.opacity(0.10)
+  }
 
   var body: some View {
     Group {
@@ -1110,11 +1123,14 @@ private struct ThinkingTraceView: View {
         .accessibilityElement(children: .combine)
       } else {
         DisclosureGroup(isExpanded: $isExpanded) {
-          Text(verbatim: message.text)
-            .font(.body)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, 4)
+          MessageMarkdownView(
+            source: message.text,
+            cacheKey: "\(threadID)-\(timelineGeneration)-thinking-\(message.id)",
+            threadID: threadID,
+            loadRemoteImage: loadRemoteImage
+          )
+          .id("\(threadID)-\(timelineGeneration)-thinking-\(message.id)")
+          .padding(.top, 4)
         } label: {
           HStack(spacing: 8) {
             Image(systemName: "brain")
@@ -1132,7 +1148,10 @@ private struct ThinkingTraceView: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(12)
-    .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .background(
+      backgroundColor,
+      in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+    )
     .textSelection(.enabled)
   }
 }
