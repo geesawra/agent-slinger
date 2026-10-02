@@ -32,7 +32,7 @@ final class AccessibilityUITests: XCTestCase {
     let context = app.buttons["context-usage-button"]
     XCTAssertTrue(context.waitForExistence(timeout: 5))
     XCTAssertEqual(context.value as? String, "32% used")
-    XCTAssertTrue(context.isHittable, "Context usage should remain in the composer accessory row.")
+    XCTAssertTrue(context.isHittable, "Context usage should remain in the top toolbar.")
     attachScreenshot(named: "Accessibility audit — chat", app: app)
     try app.performAccessibilityAudit(
       for: [
@@ -87,7 +87,7 @@ final class AccessibilityUITests: XCTestCase {
     let context = app.buttons["context-usage-button"]
     XCTAssertTrue(context.waitForExistence(timeout: 5))
     XCTAssertEqual(context.value as? String, "32% used")
-    XCTAssertTrue(context.isHittable, "Context usage should remain above the composer at AX5.")
+    XCTAssertTrue(context.isHittable, "Context usage should remain in the top toolbar at AX5.")
     assertMinimumTapTarget(context, named: "Context usage")
 
     let composer = app.descendants(matching: .any)["chat-composer"]
@@ -121,7 +121,7 @@ final class AccessibilityUITests: XCTestCase {
     XCTAssertTrue(stop.waitForExistence(timeout: 5))
     XCTAssertTrue(context.waitForExistence(timeout: 5))
     XCTAssertTrue(stop.isHittable, "Stop should occupy the composer action button at AX5.")
-    XCTAssertTrue(context.isHittable, "Context should stay in the composer accessory row at AX5.")
+    XCTAssertTrue(context.isHittable, "Context should stay in the top toolbar at AX5.")
     assertMinimumTapTarget(stop, named: "Stop agent")
     assertMinimumTapTarget(context, named: "Context usage")
     attachScreenshot(named: "AX5 dark Stop control", app: app)

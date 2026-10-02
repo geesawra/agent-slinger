@@ -119,14 +119,14 @@ final class MarkdownComposerUITests: XCTestCase {
     assertInsideAppBounds(context, named: "Context", app: app)
     assertInsideAppBounds(stop, named: "Stop", app: app)
     XCTAssertLessThanOrEqual(context.frame.maxY, accessory.frame.maxY)
-    attachScreenshot(named: "AX5 Context and Stop composer action", app: app)
+    attachScreenshot(named: "AX5 Context toolbar and Stop composer action", app: app)
 
     composer.tap()
     composer.typeText("Steer this follow-up")
     XCTAssertFalse(stop.exists)
     XCTAssertTrue(send.waitForExistence(timeout: 5))
     assertInsideAppBounds(send, named: "Send", app: app)
-    attachScreenshot(named: "AX5 Context and Send composer action", app: app)
+    attachScreenshot(named: "AX5 Context toolbar and Send composer action", app: app)
   }
 
   func testCompactExpandAppearsAfterMoreThanTwoVisualLines() {

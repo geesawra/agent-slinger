@@ -77,7 +77,6 @@ private enum ChatTimelineRow: Identifiable {
 struct ChatView: View {
   @Bindable var model: OesapModel
   let threadID: String
-  @State private var showsAgentSettings = false
   @State private var showsSessionInfo = false
   @State private var showsGitChanges = false
   @State private var showsSubagents = false
@@ -409,15 +408,16 @@ struct ChatView: View {
               composerFocused = false
               showsSessionInfo = true
             } label: {
-              Image(systemName: "info.circle")
+              ContextUsageIndicator(
+                usage: model.contextUsage(for: threadID),
+                isLoading: model.loadingContextUsage,
+                showsDisclosureIndicator: false
+              )
+              .frame(width: 32, height: 32)
             }
-            .accessibilityLabel("Session info")
             .accessibilityHint("Shows the session status, details, and usage.")
-            .accessibilityIdentifier("session-info-button")
+            .accessibilityIdentifier("context-usage-button")
           }
-        }
-        .sheet(isPresented: $showsAgentSettings) {
-          AgentSettingsSheet(model: model, threadID: threadID)
         }
         .sheet(isPresented: $showsSessionInfo) {
           SessionInfoSheet(model: model, threadID: threadID)
@@ -520,12 +520,6 @@ struct ChatView: View {
       interrupt: interruptThreadMessage,
       clearError: {},
       agentTasks: model.agentTasks(for: threadID),
-      contextUsage: model.contextUsage(for: threadID),
-      isLoadingContextUsage: model.loadingContextUsage,
-      onShowContextUsage: {
-        composerFocused = false
-        showsAgentSettings = true
-      },
       subagentCount: managedSubagents.count + providerSubagents.count,
       onShowSubagents: {
         composerFocused = false

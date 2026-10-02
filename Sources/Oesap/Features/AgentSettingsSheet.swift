@@ -1,11 +1,7 @@
 import SwiftUI
 
-struct AgentSettingsSheet: View {
+struct SessionSettingsSection: View {
   @Bindable var model: OesapModel
-  let threadID: String
-
-  @Environment(\.dismiss) private var dismiss
-  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   private var settings: RemoteAgentSettings? { model.sessionSettings }
 
@@ -22,41 +18,7 @@ struct AgentSettingsSheet: View {
   }
 
   var body: some View {
-    NavigationStack {
-      List {
-        settingsSection
-      }
-      .refreshable { await model.refreshSessionDetails(threadID: threadID) }
-      .navigationTitle("Agent settings")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .topBarLeading) {
-          Button("Done") { dismiss() }
-            .disabled(model.sessionDetailsApplying)
-            .accessibilityIdentifier("agent-settings-done")
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-          Button {
-            Task {
-              if await model.applySessionSettings(threadID: threadID) { dismiss() }
-            }
-          } label: {
-            if model.sessionDetailsApplying {
-              ProgressView()
-                .accessibilityLabel("Applying settings")
-            } else {
-              Text("Apply")
-            }
-          }
-          .disabled(!model.canApplySessionSettings)
-          .accessibilityIdentifier("apply-session-settings")
-        }
-      }
-    }
-    .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.medium])
-    .presentationDragIndicator(.hidden)
-    .interactiveDismissDisabled(model.sessionDetailsApplying)
-    .task(id: threadID) { await model.openSessionDetails(threadID: threadID) }
+    settingsSection
   }
 
   @ViewBuilder

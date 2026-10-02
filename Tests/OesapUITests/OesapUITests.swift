@@ -1,7 +1,7 @@
 import XCTest
 
 final class OesapUITests: XCTestCase {
-  func testGitChangesStayVisibleBesideContextAndOpenFileDiff() {
+  func testGitChangesAndContextRemainReachableAndOpenFileDiff() {
     let app = launchDemo()
     connect(app)
     app.buttons["project-demo-project"].tap()
@@ -12,8 +12,7 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(git.waitForExistence(timeout: 5))
     XCTAssertTrue(context.waitForExistence(timeout: 5))
     XCTAssertTrue(git.isHittable, "Git changes should stay visible above the composer.")
-    XCTAssertLessThan(git.frame.maxX, context.frame.minX)
-    XCTAssertEqual(git.frame.height, context.frame.height, accuracy: 1)
+    XCTAssertTrue(context.isHittable, "Context usage should remain in the top toolbar.")
     XCTAssertTrue((git.value as? String)?.contains("2 additions, 1 deletions") == true)
 
     git.tap()
@@ -216,7 +215,7 @@ final class OesapUITests: XCTestCase {
     attachScreenshot(named: "Light context and Send action with keyboard")
     XCTAssertEqual(composer.value as? String, "Continue the active turn")
 
-    let info = app.buttons["session-info-button"]
+    let info = app.buttons["context-usage-button"]
     XCTAssertTrue(info.isHittable)
     info.tap()
     XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
@@ -392,7 +391,7 @@ final class OesapUITests: XCTestCase {
 
     let contextButton = app.buttons["context-usage-button"]
     XCTAssertTrue(contextButton.waitForExistence(timeout: 5))
-    XCTAssertTrue(contextButton.isHittable, "Context belongs to the persistent composer accessory.")
+    XCTAssertTrue(contextButton.isHittable, "Context usage should remain in the top toolbar.")
     XCTAssertTrue(contextButton.label.contains("Last reported context usage"))
     let contextValue = (contextButton.value as? String) ?? ""
     let contextAccessibility = "\(contextButton.label) \(contextValue)"
@@ -401,7 +400,7 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(timeline.waitForExistence(timeout: 5))
     for _ in 0..<5 { timeline.swipeDown() }
     attachScreenshot(named: "Agent chat without status header")
-    let infoButton = app.buttons["session-info-button"]
+    let infoButton = app.buttons["context-usage-button"]
     XCTAssertTrue(infoButton.waitForExistence(timeout: 5))
     infoButton.tap()
     XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
@@ -462,7 +461,7 @@ final class OesapUITests: XCTestCase {
     attachScreenshot(named: "Host provider unavailable and error statuses")
   }
 
-  func testAgentSettingsApplyModelEffortAndPermissionsThroughContextButton() {
+  func testSessionInfoAppliesModelEffortAndPermissionsInline() {
     continueAfterFailure = false
     let app = launchDemo()
     connect(app)
@@ -471,9 +470,10 @@ final class OesapUITests: XCTestCase {
 
     let context = app.buttons["context-usage-button"]
     XCTAssertTrue(context.waitForExistence(timeout: 5))
-    assertMinimumTapTarget(context, named: "Context and settings")
+    assertMinimumTapTarget(context, named: "Context usage and session info")
     context.tap()
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
+    XCTAssertFalse(app.navigationBars["Agent settings"].exists)
     XCTAssertFalse(app.descendants(matching: .any)["session-context-gauge"].exists)
     XCTAssertFalse(app.descendants(matching: .any)["session-usage-details-link"].exists)
 
@@ -508,29 +508,21 @@ final class OesapUITests: XCTestCase {
     fullAccess.tap()
     XCTAssertTrue(scrollUntilHittable(apply, in: app))
     apply.tap()
-    XCTAssertTrue(waitUntilHittable(context), "Successful Apply should close Agent settings.")
-    attachScreenshot(named: "Agent model and effort applied")
+    XCTAssertTrue(app.navigationBars["Session info"].exists)
+    XCTAssertFalse(app.navigationBars["Agent settings"].exists)
+    XCTAssertTrue(modelPicker.label.contains("GPT-6 Astra"))
+    XCTAssertTrue(effortPicker.label.contains("Max"))
+    XCTAssertTrue(permissionsPicker.label.contains("Full Access"))
+    XCTAssertFalse(apply.isEnabled)
+    attachScreenshot(named: "Agent model and effort applied in Session info")
 
-    context.tap()
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
-    let reopenedModel = app.descendants(matching: .any)["session-model-picker"]
-    let reopenedEffort = app.descendants(matching: .any)["session-effort-picker"]
-    let reopenedPermissions = app.descendants(matching: .any)["session-permissions-picker"]
-    XCTAssertTrue(reopenedModel.waitForExistence(timeout: 5))
-    XCTAssertTrue(reopenedModel.label.contains("GPT-6 Astra"))
-    XCTAssertTrue(reopenedEffort.label.contains("Max"))
-    XCTAssertTrue(reopenedPermissions.label.contains("Full Access"))
-    XCTAssertFalse(app.buttons["apply-session-settings"].isEnabled)
-
-    XCTAssertTrue(scrollUntilHittable(reopenedEffort, in: app))
-    reopenedEffort.tap()
+    XCTAssertTrue(scrollUntilHittable(effortPicker, in: app))
+    effortPicker.tap()
     let high = app.buttons["High"]
     XCTAssertTrue(high.waitForExistence(timeout: 5))
     high.tap()
-    app.buttons["apply-session-settings"].tap()
-    XCTAssertTrue(waitUntilHittable(context), "Successful Apply should close Agent settings.")
-    context.tap()
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    apply.tap()
+    XCTAssertTrue(app.navigationBars["Session info"].exists)
     XCTAssertTrue(
       app.descendants(matching: .any)["session-model-picker"].label.contains("GPT-6 Astra"))
     XCTAssertTrue(app.descendants(matching: .any)["session-effort-picker"].label.contains("High"))
@@ -538,20 +530,15 @@ final class OesapUITests: XCTestCase {
       app.descendants(matching: .any)["session-permissions-picker"].label.contains("Full Access"))
   }
 
-  func testSessionInfoOpensPermissionSettings() {
+  func testSessionInfoEditsPermissionsInline() {
     continueAfterFailure = false
     let app = launchDemo()
     connect(app)
     app.buttons["project-demo-project"].tap()
     app.buttons["thread-demo-agent-running"].tap()
 
-    app.buttons["session-info-button"].tap()
+    app.buttons["context-usage-button"].tap()
     XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
-    let settingsButton = app.buttons["session-info-settings-button"]
-    XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
-    settingsButton.tap()
-
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
     let permissionsPicker = app.descendants(matching: .any)["session-permissions-picker"]
     XCTAssertTrue(permissionsPicker.waitForExistence(timeout: 5))
     XCTAssertTrue(scrollUntilHittable(permissionsPicker, in: app))
@@ -563,9 +550,8 @@ final class OesapUITests: XCTestCase {
     fullAccess.tap()
     app.buttons["apply-session-settings"].tap()
 
-    XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
-    settingsButton.tap()
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars["Session info"].exists)
+    XCTAssertFalse(app.navigationBars["Agent settings"].exists)
     XCTAssertTrue(
       app.descendants(matching: .any)["session-permissions-picker"].label.contains("Full Access"))
   }
@@ -614,10 +600,10 @@ final class OesapUITests: XCTestCase {
 
     let contextButton = app.buttons["context-usage-button"]
     XCTAssertTrue(contextButton.waitForExistence(timeout: 5))
-    XCTAssertTrue(contextButton.isHittable, "Context should remain in the accessory row at AX5.")
+    XCTAssertTrue(contextButton.isHittable, "Context should remain in the top toolbar at AX5.")
     assertMinimumTapTarget(contextButton, named: "Context usage")
     attachScreenshot(named: "Chat at accessibility text size")
-    let infoButton = app.buttons["session-info-button"]
+    let infoButton = app.buttons["context-usage-button"]
     XCTAssertTrue(infoButton.waitForExistence(timeout: 5))
     infoButton.tap()
     XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
@@ -632,10 +618,11 @@ final class OesapUITests: XCTestCase {
     attachScreenshot(named: "Session info and usage at accessibility text size")
     app.buttons["session-info-done"].tap()
     contextButton.tap()
-    XCTAssertTrue(app.navigationBars["Agent settings"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.buttons["agent-settings-done"].isHittable)
-    XCTAssertFalse(app.descendants(matching: .any)["session-context-gauge"].exists)
-    attachScreenshot(named: "Agent settings at accessibility text size")
+    XCTAssertTrue(app.navigationBars["Session info"].waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      app.descendants(matching: .any)["session-model-picker"].waitForExistence(timeout: 5))
+    XCTAssertFalse(app.navigationBars["Agent settings"].exists)
+    attachScreenshot(named: "Inline session settings at accessibility text size")
   }
 
   func testFailedSendKeepsTheDraftForRetry() {

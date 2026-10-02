@@ -15,34 +15,44 @@ struct SessionInfoSheet: View {
   let threadID: String
 
   @Environment(\.dismiss) private var dismiss
-  @State private var showsAgentSettings = false
 
   var body: some View {
     NavigationStack {
-      UsageListContent(
-        model: model, contextThreadID: threadID, includesSessionInformation: true,
-        onOpenSessionSettings: { showsAgentSettings = true }
-      )
-      .navigationTitle("Session info")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
-          Button("Done") { dismiss() }
-            .accessibilityIdentifier("session-info-done")
+      UsageListContent(model: model, contextThreadID: threadID, includesSessionInformation: true)
+        .navigationTitle("Session info")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+          ToolbarItem(placement: .cancellationAction) {
+            Button("Done") { dismiss() }
+              .disabled(model.sessionDetailsApplying)
+              .accessibilityIdentifier("session-info-done")
+          }
+          ToolbarItem(placement: .confirmationAction) {
+            Button {
+              Task { await model.applySessionSettings(threadID: threadID) }
+            } label: {
+              if model.sessionDetailsApplying {
+                ProgressView()
+                  .accessibilityLabel("Applying settings")
+              } else {
+                Text("Apply")
+              }
+            }
+            .disabled(!model.canApplySessionSettings)
+            .accessibilityIdentifier("apply-session-settings")
+          }
         }
-      }
     }
     .presentationDetents([.large])
     .presentationDragIndicator(.hidden)
-    .sheet(isPresented: $showsAgentSettings) {
-      AgentSettingsSheet(model: model, threadID: threadID)
-    }
+    .interactiveDismissDisabled(model.sessionDetailsApplying)
   }
 }
 
 struct ContextUsageIndicator: View {
   let usage: RemoteContextUsage?
   var isLoading = false
+  var showsDisclosureIndicator = true
 
   private var fraction: Double? {
     guard let fraction = usage?.fractionUsed, fraction.isFinite else { return nil }
@@ -79,9 +89,9 @@ struct ContextUsageIndicator: View {
           .frame(width: 22, height: 22)
           .accessibilityHidden(true)
       }
-      disclosureIndicator
+      if showsDisclosureIndicator { disclosureIndicator }
     }
-    .frame(minHeight: 44, alignment: .leading)
+    .frame(minHeight: showsDisclosureIndicator ? 44 : 0, alignment: .leading)
     .contentShape(Rectangle())
     .accessibilityElement(children: .ignore)
     .accessibilityLabel("Last reported context usage")
@@ -133,7 +143,6 @@ struct UsageListContent: View {
   @Bindable var model: OesapModel
   let contextThreadID: String?
   var includesSessionInformation = false
-  var onOpenSessionSettings: (() -> Void)? = nil
 
   private var contextThread: RemoteThread? {
     guard let contextThreadID else { return nil }
@@ -151,6 +160,7 @@ struct UsageListContent: View {
       if let contextThread {
         if includesSessionInformation {
           sessionInformationSection(thread: contextThread)
+          SessionSettingsSection(model: model)
         }
         contextSection(thread: contextThread)
       }
@@ -195,7 +205,15 @@ struct UsageListContent: View {
       }
     }
     .refreshable { await refreshUsage() }
-    .task { await refreshUsage() }
+    .task(id: contextThreadID) {
+      if includesSessionInformation, let contextThreadID {
+        async let providerUsage: Void = model.refreshProviderUsage()
+        await model.openSessionDetails(threadID: contextThreadID)
+        await providerUsage
+      } else {
+        await refreshUsage()
+      }
+    }
   }
 
   private func sessionInformationSection(thread: RemoteThread) -> some View {
@@ -215,20 +233,6 @@ struct UsageListContent: View {
       }
       UsageValueRow(label: "Provider", value: thread.provider ?? "Not reported", font: .body)
       UsageValueRow(label: "Model", value: thread.model ?? "Not reported", font: .body)
-      if let onOpenSessionSettings {
-        Button(action: onOpenSessionSettings) {
-          HStack {
-            Label("Model and permissions", systemImage: "slider.horizontal.3")
-            Spacer()
-            Image(systemName: "chevron.right")
-              .font(.caption.weight(.semibold))
-              .foregroundStyle(.secondary)
-              .accessibilityHidden(true)
-          }
-          .contentShape(Rectangle())
-        }
-        .accessibilityIdentifier("session-info-settings-button")
-      }
     }
   }
 
@@ -241,7 +245,14 @@ struct UsageListContent: View {
 
   private func refreshUsage() async {
     if contextThreadID != nil {
-      await model.refreshUsageForSelectedThread()
+      async let usage: Void = model.refreshUsageForSelectedThread()
+      if includesSessionInformation, let contextThreadID {
+        async let session: Void = model.refreshSessionDetails(threadID: contextThreadID)
+        await usage
+        await session
+      } else {
+        await usage
+      }
     } else {
       await model.refreshProviderUsage()
     }
