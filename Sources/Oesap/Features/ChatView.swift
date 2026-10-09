@@ -98,6 +98,9 @@ struct ChatView: View {
   private var providerSubagents: [RemoteProviderSubagent] {
     model.providerSubagentsByParent[threadID] ?? []
   }
+  private var pendingPermission: RemotePermission? {
+    model.permissions.first { $0.agentID == threadID }
+  }
   private var timelineRows: [ChatTimelineRow] {
     ChatTimelineRow.grouped(model.messages, hiding: model.bufferedAgentMessageIDs)
   }
@@ -166,29 +169,14 @@ struct ChatView: View {
               )
             }
 
-            if let permission = model.permissions.first(where: { $0.agentID == threadID }) {
-              if let questions = permission.questions {
-                AgentQuestionCard(
-                  permission: permission,
-                  questions: questions,
-                  isResponding: model.answeringPermissionID == permission.id,
-                  onSubmit: { answers in
-                    Task { await model.answerQuestion(permission, answers: answers) }
-                  },
-                  onDismiss: {
-                    Task { await model.answerQuestion(permission, answers: nil) }
-                  }
-                )
-                .id(permission.id)
-              } else {
-                PermissionCard(
-                  permission: permission,
-                  isResponding: model.answeringPermissionID == permission.id,
-                  onChoose: { allow in
-                    actionConfirmation = .permission(permission, allow: allow)
-                  }
-                )
-              }
+            if let permission = pendingPermission, permission.questions == nil {
+              PermissionCard(
+                permission: permission,
+                isResponding: model.answeringPermissionID == permission.id,
+                onChoose: { allow in
+                  actionConfirmation = .permission(permission, allow: allow)
+                }
+              )
             }
 
             if let error = model.permissionError {
@@ -286,6 +274,21 @@ struct ChatView: View {
               AgentActivityIndicator(message: activity)
                 .id("agent-activity-\(threadID)")
                 .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            if let permission = pendingPermission, let questions = permission.questions {
+              AgentQuestionCard(
+                permission: permission,
+                questions: questions,
+                isResponding: model.answeringPermissionID == permission.id,
+                onSubmit: { answers in
+                  Task { await model.answerQuestion(permission, answers: answers) }
+                },
+                onDismiss: {
+                  Task { await model.answerQuestion(permission, answers: nil) }
+                }
+              )
+              .id(permission.id)
             }
 
             Color.clear
@@ -388,6 +391,7 @@ struct ChatView: View {
             followLatestIfNeeded(proxy)
           }
         }
+        .onChange(of: pendingPermission) { _, _ in followLatestIfNeeded(proxy) }
         .onChange(of: latestThinkingTrace) { _, _ in followLatestIfNeeded(proxy) }
         .onChange(of: agentActivityMessage) { _, _ in followLatestIfNeeded(proxy) }
         .onChange(of: model.bufferedAgentMessageIDs) { _, _ in followLatestIfNeeded(proxy) }
