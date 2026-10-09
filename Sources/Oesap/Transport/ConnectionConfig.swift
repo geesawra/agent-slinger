@@ -52,7 +52,7 @@ struct ConnectionFailure: Equatable, Sendable {
   enum Phase: String, Sendable { case connect, relayHandshake, send, receive }
   enum Reason: String, Sendable {
     case dns, refused, cannotConnect, offline, tls, appTransportSecurity, timeout, authentication
-    case httpUpgrade, connectionLost, closed, unknown
+    case httpUpgrade, invalidUpgrade, connectionLost, closed, unknown
   }
 
   struct ErrorCode: Equatable, Sendable {
@@ -96,7 +96,7 @@ struct ConnectionFailure: Equatable, Sendable {
     httpStatus = metadata.httpStatus.flatMap { (100...599).contains($0) ? $0 : nil }
     webSocketCloseCode = metadata.closeCode.flatMap { (1000...4999).contains($0) ? $0 : nil }
     reason = Self.classify(
-      error: error, causes: causes, httpStatus: httpStatus,
+      error: error, phase: phase, causes: causes, httpStatus: httpStatus,
       closeCode: webSocketCloseCode)
   }
 
@@ -111,6 +111,7 @@ struct ConnectionFailure: Equatable, Sendable {
     case .timeout: "The connection timed out."
     case .authentication: "The host rejected authentication."
     case .httpUpgrade: "The server did not accept the WebSocket connection."
+    case .invalidUpgrade: "The server returned HTTP 101, but its WebSocket handshake was invalid."
     case .connectionLost: "The network connection was interrupted."
     case .closed: "The WebSocket connection closed."
     case .unknown: "The connection failed, but the system did not provide a recognized cause."
@@ -133,7 +134,7 @@ struct ConnectionFailure: Equatable, Sendable {
         ? "Check that the paired daemon is online and the pairing link is current, then retry."
         : "Check that the host is reachable and Paseo is running, then retry."
     case .authentication: "Check the password or pairing link before reconnecting."
-    case .httpUpgrade:
+    case .httpUpgrade, .invalidUpgrade:
       "Check the host and port and any proxy’s WebSocket configuration."
     case .connectionLost, .closed:
       "Reconnect. If it happens again, check the network and the Paseo host’s logs."
@@ -151,13 +152,22 @@ struct ConnectionFailure: Equatable, Sendable {
     return parts.joined(separator: " · ")
   }
 
-  private static func classify(error: Error, causes: [ErrorCode], httpStatus: Int?, closeCode: Int?)
+  private static func classify(
+    error: Error, phase: Phase, causes: [ErrorCode], httpStatus: Int?, closeCode: Int?
+  )
     -> Reason
   {
     if closeCode == 4401 || httpStatus == 401 || httpStatus == 403 { return .authentication }
     if (error as? PaseoConnectionError) == .timedOut { return .timeout }
     if (error as? PaseoConnectionError) == .authenticationFailed { return .authentication }
     if let httpStatus, httpStatus != 101 { return .httpUpgrade }
+    if phase == .connect, httpStatus == 101,
+      causes.contains(where: {
+        $0.domain == NSURLErrorDomain && $0.code == NSURLErrorBadServerResponse
+      })
+    {
+      return .invalidUpgrade
+    }
     if causes.contains(where: { $0.domain == NSPOSIXErrorDomain && $0.code == Int(ECONNREFUSED) }) {
       return .refused
     }

@@ -6,7 +6,7 @@ protocol PaseoSocket: AnyObject {
   var closeCode: Int { get }
   var failureMetadata: PaseoSocketFailureMetadata { get }
   func start()
-  func ping(_ completion: @escaping (Error?) -> Void)
+  func waitForOpen(_ completion: @escaping (Error?) -> Void)
   func send(_ message: URLSessionWebSocketTask.Message) async throws
   func receive() async throws -> URLSessionWebSocketTask.Message
   func cancel()
@@ -50,8 +50,8 @@ final class URLSessionPaseoSocket: PaseoSocket {
     return metadata
   }
   func start() { task.resume() }
-  func ping(_ completion: @escaping (Error?) -> Void) {
-    task.sendPing(pongReceiveHandler: completion)
+  func waitForOpen(_ completion: @escaping (Error?) -> Void) {
+    observer.waitForOpen(completion)
   }
   func send(_ message: URLSessionWebSocketTask.Message) async throws {
     try await task.send(message)
@@ -71,6 +71,37 @@ final class PaseoSocketObserver: NSObject, URLSessionWebSocketDelegate, @uncheck
   private static let logger = Logger(subsystem: "com.oesap.app", category: "connection")
   private let lock = NSLock()
   private var metadata = PaseoSocketFailureMetadata()
+  private var openingResult: Result<Void, Error>?
+  private var openingCompletion: ((Error?) -> Void)?
+
+  func waitForOpen(_ completion: @escaping (Error?) -> Void) {
+    lock.lock()
+    if let openingResult {
+      lock.unlock()
+      completion(openingResult.failure)
+    } else {
+      openingCompletion = completion
+      lock.unlock()
+    }
+  }
+
+  private func finishOpening(_ result: Result<Void, Error>) {
+    let result = result.mapError { error -> Error in
+      (error as? PaseoConnectionError)
+        ?? PaseoConnectionError.transportFailure(
+          ConnectionFailure(error: error, phase: .connect, metadata: snapshot))
+    }
+    lock.lock()
+    guard openingResult == nil else {
+      lock.unlock()
+      return
+    }
+    openingResult = result
+    let completion = openingCompletion
+    openingCompletion = nil
+    lock.unlock()
+    completion?(result.failure)
+  }
 
   var snapshot: PaseoSocketFailureMetadata {
     lock.lock()
@@ -82,6 +113,16 @@ final class PaseoSocketObserver: NSObject, URLSessionWebSocketDelegate, @uncheck
     lock.lock()
     metadata.wasCancelled = true
     lock.unlock()
+    finishOpening(.failure(PaseoConnectionError.cancelled))
+  }
+
+  func urlSession(
+    _ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+    didOpenWithProtocol protocol: String?
+  ) {
+    // URLSession validates the upgrade headers before emitting this callback.
+    // HTTP 101 alone is insufficient, and opening does not require a pong.
+    finishOpening(.success(()))
   }
 
   func urlSession(
@@ -91,12 +132,14 @@ final class PaseoSocketObserver: NSObject, URLSessionWebSocketDelegate, @uncheck
     record(
       httpStatus: (webSocketTask.response as? HTTPURLResponse)?.statusCode,
       closeCode: closeCode.rawValue, error: nil)
+    finishOpening(.failure(PaseoConnectionError.disconnected))
   }
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     record(
       httpStatus: (task.response as? HTTPURLResponse)?.statusCode,
       closeCode: (task as? URLSessionWebSocketTask)?.closeCode.rawValue, error: error)
+    finishOpening(.failure(error ?? PaseoConnectionError.disconnected))
   }
 
   func record(httpStatus: Int?, closeCode: Int?, error: Error?) {
@@ -112,5 +155,12 @@ final class PaseoSocketObserver: NSObject, URLSessionWebSocketDelegate, @uncheck
     Self.logger.error(
       "Socket completion: http=\(captured.httpStatus ?? 0) close=\(captured.closeCode ?? 0) codes=\(safeCodes, privacy: .public)"
     )
+  }
+}
+
+extension Result where Success == Void, Failure == Error {
+  fileprivate var failure: Error? {
+    if case .failure(let error) = self { return error }
+    return nil
   }
 }

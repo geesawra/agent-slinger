@@ -39,7 +39,7 @@ actor PaseoTransport {
     if socket != nil { return }
     let attemptID = UUID()
     generation = attemptID
-    let attempt = Task { try await establish() }
+    let attempt = Task { try await establish(attemptID: attemptID) }
     connecting = attempt
     do {
       try await withTaskCancellationHandler {
@@ -47,6 +47,8 @@ actor PaseoTransport {
       } onCancel: {
         attempt.cancel()
       }
+      try Task.checkCancellation()
+      guard generation == attemptID else { throw PaseoConnectionError.cancelled }
       if generation == attemptID { connecting = nil }
     } catch {
       let mapped =
@@ -138,8 +140,9 @@ actor PaseoTransport {
     binaryCiphertext = false
   }
 
-  private func establish() async throws {
+  private func establish(attemptID: UUID) async throws {
     try Task.checkCancellation()
+    guard generation == attemptID else { throw PaseoConnectionError.cancelled }
     let socket = try socketFactory(config)
     self.socket = socket
     Self.logger.info(
@@ -149,6 +152,7 @@ actor PaseoTransport {
       throw Self.map(error, socket: socket, phase: .connect)
     }
     try Task.checkCancellation()
+    guard generation == attemptID else { throw PaseoConnectionError.cancelled }
     Self.logger.info("Connection phase completed: connect")
 
     if config.mode == .relay {
@@ -157,8 +161,9 @@ actor PaseoTransport {
       }
       let crypto = try PaseoRelayCrypto(daemonPublicKeyBase64: daemonKey)
       Self.logger.info("Connection phase started: relayHandshake")
+      let negotiatedBinaryCiphertext: Bool
       do {
-        try await withTaskCancellationHandler {
+        negotiatedBinaryCiphertext = try await withTaskCancellationHandler {
           try await handshake(socket, crypto: crypto)
         } onCancel: {
           socket.cancel()
@@ -167,7 +172,9 @@ actor PaseoTransport {
         throw Self.map(error, socket: socket, phase: .relayHandshake)
       }
       try Task.checkCancellation()
+      guard generation == attemptID else { throw PaseoConnectionError.cancelled }
       self.crypto = crypto
+      binaryCiphertext = negotiatedBinaryCiphertext
       Self.logger.info("Connection phase completed: relayHandshake")
     }
   }
@@ -186,7 +193,7 @@ actor PaseoTransport {
       try await withCheckedThrowingContinuation {
         (continuation: CheckedContinuation<Void, Error>) in
         gate.install(continuation)
-        socket.ping { error in
+        socket.waitForOpen { error in
           if let error { gate.finish(.failure(error)) } else { gate.finish(.success(())) }
         }
       }
@@ -196,7 +203,7 @@ actor PaseoTransport {
     }
   }
 
-  private func handshake(_ socket: any PaseoSocket, crypto: PaseoRelayCrypto) async throws {
+  private func handshake(_ socket: any PaseoSocket, crypto: PaseoRelayCrypto) async throws -> Bool {
     let hello =
       "{\"type\":\"e2ee_hello\",\"key\":\"\(crypto.publicKeyBase64)\",\"capabilities\":{\"binaryCiphertext\":true}}"
     try await socket.send(.string(hello))
@@ -228,8 +235,7 @@ actor PaseoTransport {
           let ready = try? JSONDecoder().decode(RelayReady.self, from: data),
           ready.type == "e2ee_ready"
         else { continue }
-        binaryCiphertext = ready.capabilities?.binaryCiphertext == true
-        return
+        return ready.capabilities?.binaryCiphertext == true
       }
     } catch {
       if deadline.expired { throw PaseoConnectionError.timedOut }

@@ -1402,6 +1402,134 @@ final class FeatureStateTests: XCTestCase {
     XCTAssertEqual(model.instanceError, detail)
   }
 
+  func testReturningToSelectedProjectAndThreadPreservesCachedTimelineAndSubscription() async {
+    let service = FakeRemoteService()
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    model.selectThread("thread-A")
+    model.startTimelineObservation(threadID: "thread-A")
+    let loaded = await eventually { !model.messages.isEmpty && !model.loadingHistory }
+    XCTAssertTrue(loaded)
+    let messages = model.messages
+    let revision = model.timelineStructureRevision
+    model.setDraft("Keep this draft", for: "thread-A")
+
+    await model.selectProject("A")
+    model.selectThread("thread-A")
+    model.startTimelineObservation(threadID: "thread-A")
+
+    XCTAssertEqual(model.messages, messages)
+    XCTAssertEqual(model.timelineStructureRevision, revision)
+    XCTAssertEqual(model.draft(for: "thread-A"), "Keep this draft")
+    let subscriptions = await service.subscriptionCount()
+    XCTAssertEqual(subscriptions, 1)
+    await model.disconnect()
+  }
+
+  func testForegroundKeepsHealthyConnectionAndCachedTimeline() async {
+    let service = FakeRemoteService()
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    await model.start()
+    model.selectThread("thread-A")
+    model.startTimelineObservation(threadID: "thread-A")
+    let loaded = await eventually { !model.messages.isEmpty }
+    XCTAssertTrue(loaded)
+    let messages = model.messages
+    let revision = model.timelineStructureRevision
+
+    model.appDidEnterBackground()
+    await model.appDidBecomeActive()
+
+    XCTAssertEqual(model.connectionState, .connected)
+    XCTAssertEqual(model.messages, messages)
+    XCTAssertEqual(model.timelineStructureRevision, revision)
+    let closed = await service.isClosed()
+    XCTAssertFalse(closed)
+    let subscriptions = await service.subscriptionCount()
+    XCTAssertEqual(subscriptions, 1)
+    await model.disconnect()
+  }
+
+  func testForegroundRecoversFailedSessionAndRestoresStoreOwnedTimeline() async {
+    let first = FakeRemoteService()
+    let second = FakeRemoteService(historyText: "Recovered")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [first], reconnectServices: [second]))
+    await model.connect(.empty)
+    await model.start()
+    model.selectThread("thread-A")
+    model.startTimelineObservation(threadID: "thread-A")
+    let loaded = await eventually { !model.messages.isEmpty }
+    XCTAssertTrue(loaded)
+    model.setDraft("Keep this draft", for: "thread-A")
+
+    await first.emitDisconnect("Session expired")
+    let disconnected = await eventually { model.connectionState == .disconnected }
+    XCTAssertTrue(disconnected)
+
+    model.appDidEnterBackground()
+    await model.appDidBecomeActive()
+
+    XCTAssertEqual(model.connectionState, .connected)
+    let restored = await eventually { model.messages.first?.text == "Recovered" }
+    XCTAssertTrue(restored)
+    XCTAssertEqual(model.draft(for: "thread-A"), "Keep this draft")
+    let subscriptions = await second.subscriptionCount()
+    XCTAssertEqual(subscriptions, 1)
+    await model.disconnect()
+  }
+
+  func testConcurrentForegroundChecksShareExistingSessionProbe() async {
+    let gate = TestGate()
+    let service = FakeRemoteService(projectGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    await model.start()
+    model.appDidEnterBackground()
+    let first = Task { await model.appDidBecomeActive() }
+    await gate.waitUntilEntered()
+    await model.appDidBecomeActive()
+    await gate.open()
+    await first.value
+    let calls = await service.projectCallCount()
+    XCTAssertEqual(calls, 2)
+    XCTAssertEqual(model.connectionState, .connected)
+    await model.disconnect()
+  }
+
+  func testConcurrentWorkspaceRefreshesShareOneRequest() async {
+    let gate = TestGate()
+    let service = FakeRemoteService(projectGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.connect(.empty)
+    let cachedProjects = model.projects
+    let first = Task { await model.refreshWorkspace() }
+    await gate.waitUntilEntered()
+    let second = Task { await model.refreshWorkspace() }
+    await Task.yield()
+    XCTAssertEqual(model.projects, cachedProjects)
+    await gate.open()
+    await first.value
+    await second.value
+    let calls = await service.projectCallCount()
+    XCTAssertEqual(calls, 2)
+    await model.disconnect()
+  }
+
+  func testAuthenticationFailureDoesNotRetry() async {
+    let factory = FakeConnectionFactory(
+      connectServices: [], connectError: .authentication("Rejected"))
+    let model = OesapModel(connectionFactory: factory)
+    await model.connect(.empty)
+    XCTAssertEqual(model.connectionState, .disconnected)
+    XCTAssertEqual(model.connectError, "Rejected")
+    let attempts = await factory.connectionAttemptCount()
+    XCTAssertEqual(attempts, 1)
+    XCTAssertNil(model.connectionRetryDetails)
+  }
+
   func testReconnectFailureKeepsDiagnosticsInWorkspaceAndPreservesDraft() async {
     let detail =
       "TLS verification failed. Check the host certificate. [connect; NSURLErrorDomain:-1202]"
@@ -1759,6 +1887,9 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
   private var instanceServices: [String: FakeRemoteService]
   private var generation = 0
   private var connectCount = 0
+  private var connectionAttempts = 0
+
+  func connectionAttemptCount() -> Int { connectionAttempts }
 
   init(
     connectServices: [FakeRemoteService], reconnectServices: [FakeRemoteService] = [],
@@ -1819,6 +1950,7 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
   }
 
   func connect(_ connection: RemoteConnection) async throws -> any OesapRemoteService {
+    connectionAttempts += 1
     generation += 1
     let attempt = generation
     if let connectError { throw connectError }

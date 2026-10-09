@@ -329,6 +329,11 @@ struct ChatView: View {
             viewportHeight: viewport.size.height,
             hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
         )
+        .onAppear {
+          // Cached history does not change when this view returns. Reapply the
+          // anchor after layout so lazy rows materialize without a scroll gesture.
+          if !model.messages.isEmpty { followLatestIfNeeded(proxy) }
+        }
         .onChange(of: model.timelineStructureRevision) { _, _ in
           let standaloneToolCallIDs = Set(
             timelineRows.compactMap { row -> String? in
@@ -445,15 +450,11 @@ struct ChatView: View {
           .presentationDetents([.large])
         }
         .task(id: "\(threadID)-\(model.timelineGeneration)") {
-          Task { await model.markThreadRead(threadID, reportsFailure: false) }
-          await model.watchTimeline(threadID: threadID)
+          await observeTimeline()
         }
         .alert(
           actionConfirmation?.title ?? "Agent action",
-          isPresented: Binding(
-            get: { actionConfirmation != nil },
-            set: { if !$0 { actionConfirmation = nil } }
-          ),
+          isPresented: presentsActionConfirmation,
           presenting: actionConfirmation
         ) { action in
           switch action {
@@ -504,6 +505,18 @@ struct ChatView: View {
         await model.refreshProviderSubagents(parentAgentID: threadID)
       }
     }
+  }
+
+  private func observeTimeline() async {
+    model.startTimelineObservation(threadID: threadID)
+    Task { await model.markThreadRead(threadID, reportsFailure: false) }
+  }
+
+  private var presentsActionConfirmation: Binding<Bool> {
+    Binding(
+      get: { actionConfirmation != nil },
+      set: { if !$0 { actionConfirmation = nil } }
+    )
   }
 
   private var composerBar: some View {
@@ -857,11 +870,14 @@ private struct ConnectionBanner: View {
     HStack(alignment: .top, spacing: 10) {
       Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
       VStack(alignment: .leading, spacing: 4) {
-        Text("Live connection paused").font(.subheadline.weight(.semibold))
+        Text(
+          model.connectionState.isBusy ? model.connectionProgressTitle : "Live connection paused"
+        )
+        .font(.subheadline.weight(.semibold))
         Text("Your draft stays here while the app is open. Reconnect to restore the timeline.")
           .font(.footnote)
           .foregroundStyle(Color.primary.opacity(0.75))
-        if let reason = model.connectError {
+        if let reason = model.connectError ?? model.connectionRetryDetails {
           DisclosureGroup("Connection details") {
             ConnectionErrorNotice(message: reason, identifier: "chat-connection-error")
               .font(.footnote)

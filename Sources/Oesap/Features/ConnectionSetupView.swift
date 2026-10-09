@@ -86,15 +86,15 @@ struct ConnectionSetupView: View {
             .lineLimit(2...5)
             .focused($focusedField, equals: .pairingLink)
             .accessibilityIdentifier("pairing-link")
+        } header: {
+          Text("Relay pairing").foregroundStyle(Color.primary.opacity(0.75))
+        } footer: {
           Text("Create a relay pairing link in Paseo, then paste it here.")
             .font(.footnote)
             .foregroundStyle(Color.primary.opacity(0.75))
           Text("Give this connection a name such as Home Studio.")
             .font(.footnote)
             .foregroundStyle(Color.primary.opacity(0.75))
-        } header: {
-          Text("Relay pairing").foregroundStyle(Color.primary.opacity(0.75))
-        } footer: {
           Text("Traffic is relayed and encrypted end-to-end to the paired host.")
             .foregroundStyle(Color.primary.opacity(0.75))
         }
@@ -122,6 +122,13 @@ struct ConnectionSetupView: View {
         }
       }
 
+      if let details = model.connectionRetryDetails {
+        Section {
+          Text(model.connectionProgressTitle).font(.headline)
+          ConnectionErrorNotice(message: details, identifier: "connection-retry-details")
+        }
+      }
+
       Section {
         Button {
           focusedField = nil
@@ -134,7 +141,7 @@ struct ConnectionSetupView: View {
             Spacer()
             if model.connectionState.isBusy && connectingTask != nil {
               ProgressView().padding(.trailing, 8)
-              Text("Connecting…")
+              Text(model.connectionProgressTitle)
             } else {
               Text("Connect")
             }
@@ -142,7 +149,7 @@ struct ConnectionSetupView: View {
           }
           .fontWeight(.semibold)
         }
-        .disabled(!hasConnectionInput)
+        .disabled(!hasConnectionInput || model.connectionState.isBusy)
         .tint(Color.primary)
         .accessibilityIdentifier("connect-button")
 
@@ -164,12 +171,12 @@ struct ConnectionSetupView: View {
       }
     }
     .navigationTitle(title)
-    .navigationBarTitleDisplayMode(model.connectionState.isBusy ? .inline : .large)
+    .navigationBarTitleDisplayMode(.large)
     .toolbar {
       ToolbarItem(placement: PlatformToolbarPlacements.connectionProgress) {
         if model.connectionState.isBusy {
           ConnectionProgressIndicator(
-            title: model.connectionState == .reconnecting ? "Reconnecting…" : "Connecting…")
+            title: model.connectionProgressTitle)
         }
       }
       if let onOpenSettings, !model.savedInstances.isEmpty {

@@ -121,7 +121,7 @@ struct SettingsView: View {
       ToolbarItem(placement: .principal) {
         if model.connectionState.isBusy {
           ConnectionProgressIndicator(
-            title: model.connectionState == .reconnecting ? "Reconnecting…" : "Connecting…")
+            title: model.connectionProgressTitle)
         }
       }
     }

@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Network
 import XCTest
 
 @testable import Oesap
@@ -77,7 +79,7 @@ final class TransportTests: XCTestCase {
 
   func testFailedUpgradeRetainsHTTPStatusAndDoesNotGuessASocketClose() async throws {
     let config = try PaseoConnectionConfig.direct(endpoint: "fixture.invalid:6767", useTLS: true)
-    let socket = FakeSocket(pingError: URLError(.badServerResponse), httpStatus: 403)
+    let socket = FakeSocket(openError: URLError(.badServerResponse), httpStatus: 403)
     let transport = PaseoTransport(config: config, socketFactory: { _ in socket })
     do {
       try await transport.connect()
@@ -146,6 +148,107 @@ final class TransportTests: XCTestCase {
       XCTAssertTrue(failure.diagnosticDescription.contains("HTTP \(status)"))
       XCTAssertFalse(failure.recoverySuggestion.contains("password"))
     }
+  }
+
+  func testHTTP101DistinguishesInvalidHandshakeFromLaterSocketClosure() {
+    let rejected = ConnectionFailure(
+      error: URLError(.badServerResponse), phase: .connect,
+      metadata: .init(httpStatus: 101))
+    XCTAssertEqual(rejected.reason, .invalidUpgrade)
+    XCTAssertTrue(rejected.summary.contains("handshake was invalid"))
+
+    let closed = ConnectionFailure(
+      error: URLError(.badServerResponse), phase: .receive,
+      metadata: .init(httpStatus: 101))
+    XCTAssertEqual(closed.reason, .closed)
+    XCTAssertFalse(closed.summary.contains("did not accept"))
+    let interrupted = ConnectionFailure(
+      error: URLError(.networkConnectionLost), phase: .receive,
+      metadata: .init(httpStatus: 101))
+    XCTAssertEqual(interrupted.reason, .connectionLost)
+  }
+
+  func testRealHTTP101OpensWithoutWaitingForPong() async throws {
+    #if targetEnvironment(macCatalyst)
+      throw XCTSkip(
+        "Loopback server tests run on iOS Simulator; Catalyst has only network client access.")
+    #endif
+    let server = try LoopbackWebSocketServer(validUpgrade: true)
+    defer { server.stop() }
+    let listening = expectation(description: "Loopback server listening")
+    server.start { listening.fulfill() }
+    await fulfillment(of: [listening], timeout: 3)
+    let port = try XCTUnwrap(server.port)
+    let config = try PaseoConnectionConfig.direct(endpoint: "127.0.0.1:\(port)", useTLS: false)
+    let transport = PaseoTransport(config: config, connectTimeout: .seconds(2))
+    // This fixture sends only a valid HTTP upgrade; it never responds to pings.
+    try await transport.connect()
+    await transport.close()
+  }
+
+  func testRealHTTP101WithInvalidAcceptHeaderDoesNotOpen() async throws {
+    #if targetEnvironment(macCatalyst)
+      throw XCTSkip(
+        "Loopback server tests run on iOS Simulator; Catalyst has only network client access.")
+    #endif
+    let server = try LoopbackWebSocketServer(validUpgrade: false)
+    defer { server.stop() }
+    let listening = expectation(description: "Loopback server listening")
+    server.start { listening.fulfill() }
+    await fulfillment(of: [listening], timeout: 3)
+    let port = try XCTUnwrap(server.port)
+    let config = try PaseoConnectionConfig.direct(endpoint: "127.0.0.1:\(port)", useTLS: false)
+    let transport = PaseoTransport(config: config, connectTimeout: .seconds(2))
+    do {
+      try await transport.connect()
+      XCTFail("An HTTP 101 status without valid upgrade headers must fail")
+    } catch {
+      let failure = try XCTUnwrap((error as? PaseoConnectionError)?.connectionFailure)
+      XCTAssertEqual(failure.httpStatus, 101)
+      XCTAssertEqual(failure.reason, .invalidUpgrade)
+    }
+    await transport.close()
+  }
+
+  func testSocketOpeningHandlesDelegateBeforeWaiterAndCancellation() {
+    let session = URLSession(configuration: .ephemeral)
+    defer { session.invalidateAndCancel() }
+    let task = session.webSocketTask(with: URL(string: "ws://localhost:6767/ws")!)
+    let opened = PaseoSocketObserver()
+    opened.urlSession(session, webSocketTask: task, didOpenWithProtocol: nil)
+    let ready = expectation(description: "Validated upgrade opens without a ping")
+    opened.waitForOpen { error in
+      XCTAssertNil(error)
+      ready.fulfill()
+    }
+    opened.markCancelled()
+
+    let cancelled = PaseoSocketObserver()
+    cancelled.markCancelled()
+    let stopped = expectation(description: "Cancellation before registration is delivered")
+    cancelled.waitForOpen { error in
+      XCTAssertEqual(error as? PaseoConnectionError, .cancelled)
+      stopped.fulfill()
+    }
+    wait(for: [ready, stopped], timeout: 1)
+  }
+
+  func testSocketOpeningDeliversRejectedUpgradeAndCompletesOnlyOnce() {
+    let session = URLSession(configuration: .ephemeral)
+    defer { session.invalidateAndCancel() }
+    let task = session.webSocketTask(with: URL(string: "ws://localhost:6767/ws")!)
+    let observer = PaseoSocketObserver()
+    let failed = expectation(description: "Task completion wakes opening waiter")
+    observer.waitForOpen { error in
+      XCTAssertEqual(
+        (error as? PaseoConnectionError)?.connectionFailure?.causes,
+        [.init(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse)])
+      failed.fulfill()
+    }
+    observer.urlSession(session, task: task, didCompleteWithError: URLError(.badServerResponse))
+    observer.urlSession(session, webSocketTask: task, didOpenWithProtocol: nil)
+    observer.markCancelled()
+    wait(for: [failed], timeout: 1)
   }
 
   func testSocketCompletionCapturesSafeMetadataWithoutCloseReasonOrURL() {
@@ -308,7 +411,7 @@ final class TransportTests: XCTestCase {
 
   func testConnectTimeoutAndCallerCancellation() async throws {
     let config = try PaseoConnectionConfig.direct(endpoint: "localhost:6767", useTLS: false)
-    let stuck = FakeSocket(holdPing: true, recordCancelledCause: true)
+    let stuck = FakeSocket(holdOpen: true, recordCancelledCause: true)
     let timed = PaseoTransport(
       config: config, connectTimeout: .milliseconds(30),
       socketFactory: { _ in stuck })
@@ -320,7 +423,7 @@ final class TransportTests: XCTestCase {
     }
     XCTAssertTrue(stuck.cancelled)
 
-    let cancelledSocket = FakeSocket(holdPing: true)
+    let cancelledSocket = FakeSocket(holdOpen: true)
     let cancelledTransport = PaseoTransport(
       config: config, connectTimeout: .seconds(2),
       socketFactory: { _ in cancelledSocket })
@@ -362,6 +465,80 @@ final class TransportTests: XCTestCase {
 
 private struct TestHello: Decodable { let key: String }
 
+/// A real WebSocket upgrade on loopback, deliberately without a frame/pong pump.
+private final class LoopbackWebSocketServer: @unchecked Sendable {
+  private let listener: NWListener
+  private let queue = DispatchQueue(label: "oesap.tests.websocket")
+  private let validUpgrade: Bool
+  private var connections: [NWConnection] = []
+
+  init(validUpgrade: Bool) throws {
+    self.validUpgrade = validUpgrade
+    let parameters = NWParameters.tcp
+    parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+    listener = try NWListener(using: parameters)
+  }
+
+  var port: NWEndpoint.Port? { listener.port }
+
+  func start(onReady: @escaping @Sendable () -> Void) {
+    listener.stateUpdateHandler = { state in
+      if case .ready = state { onReady() }
+    }
+    listener.newConnectionHandler = { [weak self] connection in
+      guard let self else {
+        connection.cancel()
+        return
+      }
+      self.connections.append(connection)
+      connection.start(queue: self.queue)
+      self.receiveUpgrade(connection, bytes: Data())
+    }
+    listener.start(queue: queue)
+  }
+
+  func stop() {
+    queue.sync {
+      listener.cancel()
+      for connection in connections { connection.cancel() }
+      connections.removeAll()
+    }
+  }
+
+  private func receiveUpgrade(_ connection: NWConnection, bytes: Data) {
+    connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) {
+      [weak self] data, _, complete, error in
+      guard let self, error == nil, !complete else { return }
+      var bytes = bytes
+      if let data { bytes.append(data) }
+      guard bytes.count <= 16_384 else {
+        connection.cancel()
+        return
+      }
+      guard let request = String(data: bytes, encoding: .utf8), request.contains("\r\n\r\n") else {
+        self.receiveUpgrade(connection, bytes: bytes)
+        return
+      }
+      guard
+        let header = request.components(separatedBy: "\r\n").first(where: {
+          $0.lowercased().hasPrefix("sec-websocket-key:")
+        }), let separator = header.firstIndex(of: ":")
+      else {
+        connection.cancel()
+        return
+      }
+      let key = header[header.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+      let digest = Insecure.SHA1.hash(
+        data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))
+      let accept = self.validUpgrade ? Data(digest).base64EncodedString() : "invalid"
+      let response =
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+        + "Connection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"
+      connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in })
+    }
+  }
+}
+
 private final class RelayPeer: @unchecked Sendable {
   let secret: [UInt8]
   var crypto: PaseoRelayCrypto?
@@ -384,23 +561,23 @@ private final class FakeSocket: PaseoSocket, @unchecked Sendable {
   private var queued: [Result<URLSessionWebSocketTask.Message, Error>] = []
   private var pending: CheckedContinuation<URLSessionWebSocketTask.Message, Error>?
   private var sentFrames: [URLSessionWebSocketTask.Message] = []
-  private var pingCompletion: ((Error?) -> Void)?
+  private var openCompletion: ((Error?) -> Void)?
   private var wasCancelled = false
   private var code = 0
-  private let holdPing: Bool
-  private let pingError: Error?
+  private let holdOpen: Bool
+  private let openError: Error?
   private let sendError: Error?
   private let httpStatus: Int?
   private let recordCancelledCause: Bool
   var onSend: ((URLSessionWebSocketTask.Message) -> Void)?
 
   init(
-    holdPing: Bool = false, pingError: Error? = nil, sendError: Error? = nil,
+    holdOpen: Bool = false, openError: Error? = nil, sendError: Error? = nil,
     httpStatus: Int? = nil,
     recordCancelledCause: Bool = false
   ) {
-    self.holdPing = holdPing
-    self.pingError = pingError
+    self.holdOpen = holdOpen
+    self.openError = openError
     self.sendError = sendError
     self.httpStatus = httpStatus
     self.recordCancelledCause = recordCancelledCause
@@ -428,13 +605,13 @@ private final class FakeSocket: PaseoSocket, @unchecked Sendable {
     return sentFrames
   }
   func start() {}
-  func ping(_ completion: @escaping (Error?) -> Void) {
-    if holdPing {
+  func waitForOpen(_ completion: @escaping (Error?) -> Void) {
+    if holdOpen {
       lock.lock()
-      pingCompletion = completion
+      openCompletion = completion
       lock.unlock()
     } else {
-      completion(pingError)
+      completion(openError)
     }
   }
   func send(_ message: URLSessionWebSocketTask.Message) async throws {
@@ -479,10 +656,10 @@ private final class FakeSocket: PaseoSocket, @unchecked Sendable {
     wasCancelled = true
     let continuation = pending
     pending = nil
-    let pingCompletion = self.pingCompletion
-    self.pingCompletion = nil
+    let openCompletion = self.openCompletion
+    self.openCompletion = nil
     lock.unlock()
-    pingCompletion?(PaseoConnectionError.disconnected)
+    openCompletion?(PaseoConnectionError.disconnected)
     continuation?.resume(throwing: PaseoConnectionError.disconnected)
   }
   private func finish(_ item: Result<URLSessionWebSocketTask.Message, Error>) {

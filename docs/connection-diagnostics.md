@@ -17,6 +17,27 @@ a particular failure; reproduce it with the updated app to obtain evidence.
 HTTP 101 is the successful WebSocket protocol upgrade. A later socket failure
 after that response is reported as a WebSocket closure (or by a more specific
 transport cause), not as a rejected HTTP upgrade.
+The status alone does not validate the upgrade headers: a rejected acceptance
+header is reported as an invalid handshake even if the response status is 101.
+Transport opening waits for URLSession's validated WebSocket-open delegate
+callback, without requiring an extra ping/pong exchange.
+
+## Shared connection and cached workspace
+
+`OesapApp` creates one application-scoped observable `OesapModel` and injects it
+into every screen. The model owns the active connection, cached workspace, and
+selected timeline subscription. Navigating away from a chat no longer cancels
+that subscription. Returning to the selected project or thread preserves its
+history and draft, and reapplies the chat's latest-message anchor after layout.
+Overlapping workspace and thread refreshes share their in-flight requests;
+populated lists remain visible while refreshed data arrives. Switching hosts
+still clears host-specific state and rejects late responses from the old host.
+
+Foreground activation checks the existing session before reconnecting. A healthy
+session keeps its subscriptions and cached data. A failed session reconnects and
+restores the selected timeline. Connection progress includes retry delays and
+attempt counts. Credentials, TLS, endpoint, and protocol errors stop immediately;
+only transient failures use the bounded retry policy.
 
 Transport diagnostics omit passwords, pairing links and secrets, full URLs,
 query strings, workspace paths, remote message bodies, and raw system error
@@ -100,6 +121,26 @@ logs, and `just simulator-logs-recent` reads the last 15 minutes for that select
 simulator. No physical-device installation is needed for these checks.
 
 ## Validation
+
+The October 9 connection/refresh follow-up passed the signed Catalyst build and
+194 Catalyst unit tests (two loopback-server tests are skipped on Catalyst, whose
+app sandbox grants only network client access). All 21 transport tests passed on
+iPhone Simulator, including real valid HTTP 101/no-pong and invalid-accept-header
+handshakes. A simulator UI regression passed three leave-and-return chat visits
+without scrolling and preserved the draft. Mac UI tests were deferred at the
+user's request.
+
+Three existing unit tests were excluded from the final Catalyst run after their
+failures reproduced against the baseline model: large-timeline delta text,
+snapshot/delta merging, and accessibility font line measurement. This connection
+change does not resolve those baseline failures. Evidence is in
+`.build/connection-refresh-unit-final.log`,
+`.build/connection-refresh-baseline.log`,
+`.build/connection-refresh-websocket-simulator.log`,
+`.build/connection-refresh-chat-return-ui.log`, and
+`.build/connection-refresh-mac-build.log`.
+
+Earlier diagnostic work:
 
 - The full unit suite passed 177 tests. The final focused transport run passed
   15 tests, including two additional regressions: 179 distinct unit tests across

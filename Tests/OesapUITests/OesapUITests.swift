@@ -1,6 +1,35 @@
 import XCTest
 
 final class OesapUITests: XCTestCase {
+  func testReturningToChatShowsCachedMessagesWithoutScrolling() {
+    let app = launchDemo()
+    defer { app.terminate() }
+    connect(app)
+    app.buttons["project-demo-project"].tap()
+    let thread = app.buttons["thread-demo-agent-idle"]
+    XCTAssertTrue(thread.waitForExistence(timeout: 5))
+    thread.tap()
+    let message = app.descendants(matching: .any).matching(identifier: "message-demo-welcome-user")
+      .firstMatch
+    XCTAssertTrue(message.waitForExistence(timeout: 5))
+    let composer = app.descendants(matching: .any).matching(identifier: "chat-composer").firstMatch
+    XCTAssertTrue(composer.waitForExistence(timeout: 5))
+    composer.tap()
+    composer.typeText("Preserve this draft on return")
+    app.navigationBars.buttons.element(boundBy: 0).tap()
+    XCTAssertTrue(thread.waitForExistence(timeout: 5))
+
+    for _ in 0..<3 {
+      thread.tap()
+      let visible = XCTNSPredicateExpectation(
+        predicate: NSPredicate(format: "exists == true AND isHittable == true"), object: message)
+      XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed)
+      XCTAssertEqual(composer.value as? String, "Preserve this draft on return")
+      app.navigationBars.buttons.element(boundBy: 0).tap()
+      XCTAssertTrue(thread.waitForExistence(timeout: 5))
+    }
+  }
+
   func testGitChangesAndContextRemainReachableAndOpenFileDiff() {
     let app = launchDemo()
     connect(app)

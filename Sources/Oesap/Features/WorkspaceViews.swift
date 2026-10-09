@@ -238,7 +238,7 @@ struct WorkspaceRootView: View {
         ConnectionProgressIndicator(
           title: model.loadingSavedConnections
             ? "Loading…"
-            : model.connectionState == .reconnecting ? "Reconnecting…" : "Connecting…")
+            : model.connectionProgressTitle)
       }
     }
     ToolbarItem(placement: .topBarTrailing) {
@@ -455,7 +455,7 @@ private struct ProjectListView: View {
         Section {
           HStack(spacing: 12) {
             ProgressView()
-            Text("Connecting to saved host…").foregroundStyle(.secondary)
+            Text(model.connectionProgressTitle).foregroundStyle(.secondary)
           }
         }
       } else if model.connectionState != .connected && model.connectionState != .reconnecting {
@@ -483,7 +483,7 @@ private struct ProjectListView: View {
 
       if model.loadingSavedConnections || model.connectionState == .connecting {
         EmptyView()
-      } else if model.loadingProjects {
+      } else if model.loadingProjects && model.projects.isEmpty {
         Section {
           HStack(spacing: 12) {
             ProgressView()
@@ -524,7 +524,7 @@ private struct ProjectListView: View {
     }
     .overlay(alignment: .top) {
       if model.connectionState == .reconnecting {
-        ProgressView("Reconnecting…")
+        ProgressView(model.connectionProgressTitle)
           .padding(.horizontal, 16)
           .padding(.vertical, 10)
           .background(.regularMaterial, in: Capsule())
@@ -532,7 +532,7 @@ private struct ProjectListView: View {
       }
     }
     .navigationTitle("Projects")
-    .navigationBarTitleDisplayMode(model.connectionState.isBusy ? .inline : .large)
+    .navigationBarTitleDisplayMode(.large)
     .refreshable { await model.refreshWorkspace() }
     #if !targetEnvironment(macCatalyst)
       .toolbar {
@@ -822,7 +822,9 @@ private struct ThreadListView: View {
             "This workspace is no longer available on this host. It may have been archived."
           )
         )
-      } else if model.selectedProjectID != projectID || model.loadingThreads {
+      } else if model.selectedProjectID != projectID
+        || (model.loadingThreads && model.threads.isEmpty)
+      {
         Section {
           HStack(spacing: 12) {
             ProgressView()
@@ -851,7 +853,8 @@ private struct ThreadListView: View {
           ContentUnavailableView {
             Label("No agent threads", systemImage: "bubble.left.and.bubble.right")
           } description: {
-            Text("Start a new thread in Agent Slinger to begin working with an agent on this project.")
+            Text(
+              "Start a new thread in Agent Slinger to begin working with an agent on this project.")
           }
           .accessibilityIdentifier("empty-threads-supported")
           .listRowSeparator(.hidden)
@@ -1059,11 +1062,14 @@ private struct ConnectionStatusRow: View {
   var body: some View {
     Section {
       HStack(alignment: .top, spacing: 12) {
-        Image(systemName: "wifi.exclamationmark")
+        Image(systemName: model.connectionState.isBusy ? "arrow.clockwise" : "wifi.exclamationmark")
           .foregroundStyle(.orange)
           .padding(.top, 2)
         VStack(alignment: .leading, spacing: 5) {
-          Text("Host connection lost").font(.headline)
+          Text(
+            model.connectionState.isBusy ? model.connectionProgressTitle : "Host connection lost"
+          )
+          .font(.headline)
           Text(
             "Your open timeline and unsent drafts stay here while this app is open. Reconnect to restore live updates."
           )

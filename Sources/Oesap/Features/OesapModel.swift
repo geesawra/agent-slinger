@@ -22,6 +22,8 @@ private func withConnectionAttemptTimeout<T: Sendable>(
 @MainActor
 @Observable
 final class OesapModel {
+  // One application-scoped observable store, injected into every screen by
+  // OesapApp. Connection and refresh tasks outlive individual SwiftUI views.
   private static let connectionAttemptTimeout: Duration = .seconds(30)
   private static let maximumConnectionRetries = 3
   private static let initialConnectionBackoffSeconds = 1
@@ -99,6 +101,8 @@ final class OesapModel {
   private(set) var answeringPermissionID: String?
   private(set) var timelineGeneration = 0
   private(set) var connectError: String?
+  private(set) var connectionProgressTitle = "Connecting…"
+  private(set) var connectionRetryDetails: String?
   private(set) var workspaceError: String?
   private(set) var workspaceNotice: String?
   private(set) var timelineError: String?
@@ -139,6 +143,15 @@ final class OesapModel {
   @ObservationIgnored private var shouldReconnectAfterBackground = false
   @ObservationIgnored private var appIsInBackground = false
   @ObservationIgnored private var foregroundReconnectScheduled = false
+  @ObservationIgnored private var checkingForegroundConnection = false
+  @ObservationIgnored private var timelineObservationTask: Task<Void, Never>?
+  @ObservationIgnored private var timelineObservationID: UUID?
+  @ObservationIgnored private var timelineObservationThreadID: String?
+  @ObservationIgnored private var workspaceRefreshTask: Task<Void, Never>?
+  @ObservationIgnored private var workspaceRefreshID: UUID?
+  @ObservationIgnored private var threadRefreshTask: Task<Void, Never>?
+  @ObservationIgnored private var threadRefreshID: UUID?
+  @ObservationIgnored private var threadRefreshKey: String?
   @ObservationIgnored private var savedInstancesRefreshGeneration = 0
   @ObservationIgnored private var olderTimelineCursor: RemoteTimelineCursor?
   @ObservationIgnored private var latestTimelineCursor: RemoteTimelineCursor?
@@ -542,6 +555,33 @@ final class OesapModel {
       return
     }
     guard !connectionState.isBusy else { return }
+    guard !checkingForegroundConnection else { return }
+    checkingForegroundConnection = true
+    defer { checkingForegroundConnection = false }
+    if connectionState == .connected, let service {
+      let generation = connectionGeneration
+      do {
+        // Validate the existing session without changing visible cached data.
+        _ = try await withConnectionAttemptTimeout(.seconds(5)) {
+          try await service.projects()
+        }
+        guard connectionGeneration == generation, !appIsInBackground else { return }
+        shouldReconnectAfterBackground = false
+        return
+      } catch {
+        guard !Task.isCancelled, !appIsInBackground else { return }
+        if connectionGeneration != generation {
+          // The connection observer may have reported the failed probe first.
+          guard connectionState == .disconnected else { return }
+        } else if !Self.isConnectionFailure(error)
+          && (error as? PaseoConnectionError) != .timedOut
+          && !Self.isRequestTimeout(error)
+        {
+          shouldReconnectAfterBackground = false
+          return
+        }
+      }
+    }
     shouldReconnectAfterBackground = false
     await reconnect()
   }
@@ -562,8 +602,7 @@ final class OesapModel {
         self.shouldReconnectAfterBackground = false
         return
       }
-      self.shouldReconnectAfterBackground = false
-      await self.reconnect()
+      await self.appDidBecomeActive()
     }
   }
 
@@ -590,6 +629,7 @@ final class OesapModel {
   }
 
   func connect(_ connection: RemoteConnection) async {
+    guard !connectionState.isBusy else { return }
     defer { scheduleForegroundReconnectIfNeeded() }
     let previousService = service
     let preserveInitialSelection =
@@ -790,6 +830,7 @@ final class OesapModel {
     guard !connectionState.isBusy else { return }
     defer { scheduleForegroundReconnectIfNeeded() }
     let priorServerID = agentControlServerID ?? connectedServerID
+    let observedThreadID = timelineObservationThreadID
     prepareAgentActionsForConnectionChange()
     let generation = invalidateConnection()
     service = nil
@@ -852,6 +893,11 @@ final class OesapModel {
       timelineGeneration += 1
       startObservingConnection(connectedService, generation: generation)
       await reloadWorkspace(preserveSelection: true, generation: generation)
+      if connectionGeneration == generation, observedThreadID == selectedThreadID,
+        let observedThreadID
+      {
+        startTimelineObservation(threadID: observedThreadID)
+      }
       if connectionGeneration == generation { _ = startProviderUsageRefresh() }
       if connectionGeneration == generation { await refreshSavedInstances() }
       if connectionGeneration == generation, Task.isCancelled {
@@ -880,6 +926,7 @@ final class OesapModel {
 
   func disconnect() async {
     let generation = invalidateConnection()
+    timelineObservationThreadID = nil
     let previousService = service
     service = nil
     connectedServerID = nil
@@ -945,9 +992,17 @@ final class OesapModel {
     operation: @escaping @Sendable () async throws -> any OesapRemoteService
   ) async throws -> any OesapRemoteService {
     var retries = 0
+    connectionRetryDetails = nil
+    defer {
+      if connectionGeneration == expectedGeneration { connectionRetryDetails = nil }
+    }
     while true {
       try Task.checkCancellation()
       guard connectionGeneration == expectedGeneration else { throw CancellationError() }
+      let action = connectionState == .reconnecting ? "Reconnecting" : "Connecting"
+      connectionProgressTitle =
+        retries == 0
+        ? "\(action)…" : "\(action)… Attempt \(retries + 1) of \(Self.maximumConnectionRetries + 1)"
       do {
         return try await withConnectionAttemptTimeout(
           Self.connectionAttemptTimeout, operation: operation)
@@ -958,17 +1013,56 @@ final class OesapModel {
         {
           throw error
         }
-        guard retries < Self.maximumConnectionRetries else { throw error }
+        guard Self.shouldRetryConnection(error), retries < Self.maximumConnectionRetries else {
+          throw error
+        }
         let exponentialDelay = Self.initialConnectionBackoffSeconds << retries
         let delay = min(exponentialDelay, Self.maximumConnectionBackoffSeconds)
+        connectionProgressTitle = "Retrying in \(delay)s…"
+        connectionRetryDetails = error.localizedDescription
         try await Task.sleep(for: .seconds(delay))
         retries += 1
       }
     }
   }
 
+  private static func isRequestTimeout(_ error: Error) -> Bool {
+    if case .requestTimedOut = error as? PaseoProtocolError { return true }
+    return false
+  }
+
+  private static func shouldRetryConnection(_ error: Error) -> Bool {
+    if let error = error as? PaseoConnectionError {
+      switch error {
+      case .timedOut, .disconnected: return true
+      case .transportFailure(let failure):
+        switch failure.reason {
+        case .dns, .refused, .cannotConnect, .offline, .timeout, .connectionLost, .closed:
+          return true
+        case .httpUpgrade:
+          return failure.httpStatus == 429 || (failure.httpStatus ?? 0) >= 500
+        default: return false
+        }
+      default: return false
+      }
+    }
+    if let error = error as? RemoteServiceError {
+      if case .connectionLost = error { return true }
+      return false
+    }
+    if let error = error as? PaseoProtocolError {
+      switch error {
+      case .notConnected, .disconnected, .requestTimedOut: return true
+      default: return false
+      }
+    }
+    return false
+  }
+
   func selectProject(_ id: String) async {
     guard projects.contains(where: { $0.id == id }) else { return }
+    guard selectedProjectID != id else { return }
+    stopTimelineObservation()
     workspaceNotice = nil
     clearGitChanges()
     projectSelectionGeneration += 1
@@ -993,6 +1087,8 @@ final class OesapModel {
   }
 
   func selectThread(_ id: String) {
+    guard selectedThreadID != id else { return }
+    stopTimelineObservation()
     clearGitChanges()
     clearSessionDetails()
     contextUsageRefreshTask?.cancel()
@@ -1949,6 +2045,31 @@ final class OesapModel {
     }
   }
 
+  func startTimelineObservation(threadID: String) {
+    guard connectionState == .connected, selectedThreadID == threadID else { return }
+    if timelineObservationThreadID == threadID, timelineObservationTask != nil { return }
+    stopTimelineObservation()
+    let id = UUID()
+    timelineObservationID = id
+    timelineObservationThreadID = threadID
+    timelineObservationTask = Task { [weak self] in
+      guard let self else { return }
+      await self.watchTimeline(threadID: threadID)
+      if self.timelineObservationID == id {
+        self.timelineObservationTask = nil
+        self.timelineObservationID = nil
+      }
+    }
+  }
+
+  private func stopTimelineObservation(resetSelection: Bool = true) {
+    timelineObservationTask?.cancel()
+    timelineObservationTask = nil
+    timelineObservationID = nil
+    if resetSelection { timelineObservationThreadID = nil }
+    loadingHistory = false
+  }
+
   func watchTimeline(threadID: String) async {
     guard let service, connectionState == .connected else {
       timelineError = "Connect to a host to load this timeline."
@@ -1957,10 +2078,15 @@ final class OesapModel {
     let generation = connectionGeneration
     let selectionGeneration = threadSelectionGeneration
     loadingHistory = true
+    defer {
+      if connectionGeneration == generation, threadSelectionGeneration == selectionGeneration {
+        loadingHistory = false
+      }
+    }
     timelineError = nil
     permissionError = nil
     do {
-      // This view owns only its timeline subscription. Subscribe before loading
+      // The store owns the selected timeline subscription. Subscribe before loading
       // the authoritative snapshot so updates arriving during history loading
       // remain buffered; the app-level connection observer owns host liveness.
       let updates = try await service.events(agentID: threadID)
@@ -2082,6 +2208,9 @@ final class OesapModel {
       loadingHistory = false
       timelineError =
         "The timeline connection ended. Reconnect to restore this history and its live updates. \(error.localizedDescription)"
+      if Self.isConnectionFailure(error) {
+        await markConnectionLost(generation: generation, reason: error.localizedDescription)
+      }
     }
     if isCurrentTimeline(
       threadID: threadID, generation: generation,
@@ -2171,6 +2300,25 @@ final class OesapModel {
   }
 
   private func reloadWorkspace(preserveSelection: Bool, generation: Int) async {
+    guard connectionGeneration == generation else { return }
+    if let workspaceRefreshTask {
+      await workspaceRefreshTask.value
+      return
+    }
+    let id = UUID()
+    workspaceRefreshID = id
+    let task = Task {
+      await performWorkspaceRefresh(preserveSelection: preserveSelection, generation: generation)
+    }
+    workspaceRefreshTask = task
+    await task.value
+    if workspaceRefreshID == id {
+      workspaceRefreshTask = nil
+      workspaceRefreshID = nil
+    }
+  }
+
+  private func performWorkspaceRefresh(preserveSelection: Bool, generation: Int) async {
     guard connectionGeneration == generation, let service else { return }
     loadingProjects = true
     workspaceError = nil
@@ -2248,6 +2396,33 @@ final class OesapModel {
   private func loadThreads(
     projectID: String, generation: Int,
     selectionGeneration: Int, reconcileStopWait: Bool = false
+  ) async {
+    guard connectionGeneration == generation else { return }
+    let key = "\(generation):\(selectionGeneration):\(projectID):\(reconcileStopWait)"
+    if threadRefreshKey == key, let threadRefreshTask {
+      await threadRefreshTask.value
+      return
+    }
+    let id = UUID()
+    threadRefreshID = id
+    threadRefreshKey = key
+    let task = Task {
+      await performThreadRefresh(
+        projectID: projectID, generation: generation,
+        selectionGeneration: selectionGeneration, reconcileStopWait: reconcileStopWait)
+    }
+    threadRefreshTask = task
+    await task.value
+    if threadRefreshID == id {
+      threadRefreshTask = nil
+      threadRefreshID = nil
+      threadRefreshKey = nil
+    }
+  }
+
+  private func performThreadRefresh(
+    projectID: String, generation: Int,
+    selectionGeneration: Int, reconcileStopWait: Bool
   ) async {
     guard connectionGeneration == generation,
       projectSelectionGeneration == selectionGeneration,
@@ -2678,6 +2853,15 @@ final class OesapModel {
 
   @discardableResult
   private func invalidateConnection() -> Int {
+    connectionRetryDetails = nil
+    stopTimelineObservation(resetSelection: false)
+    workspaceRefreshTask?.cancel()
+    workspaceRefreshTask = nil
+    workspaceRefreshID = nil
+    threadRefreshTask?.cancel()
+    threadRefreshTask = nil
+    threadRefreshID = nil
+    threadRefreshKey = nil
     clearGitChanges()
     clearSessionDetails()
     // A settings request can still be awaiting a response from the old host.
@@ -2734,6 +2918,7 @@ final class OesapModel {
   }
 
   private func clearWorkspaceForInstanceChange(preserveSelection: Bool = false) {
+    timelineObservationThreadID = nil
     connectedServerID = nil
     agentControlServerID = nil
     canCreateThreads = false
