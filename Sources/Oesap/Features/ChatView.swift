@@ -81,9 +81,7 @@ struct ChatView: View {
   @State private var showsGitChanges = false
   @State private var showsSubagents = false
   @State private var composerFocused = false
-  @State private var isNearBottom = true
-  @State private var isUserScrolling = false
-  @State private var jumpToLatestRequested = false
+  @State private var readerIntent = TimelineReaderIntent()
   @State private var expandedToolCallIDs: Set<String> = []
   @State private var collapsedRunningToolCallIDs: Set<String> = []
   @State private var expandedToolGroupIDs: Set<String> = []
@@ -100,6 +98,9 @@ struct ChatView: View {
   }
   private var pendingPermission: RemotePermission? {
     model.permissions.first { $0.agentID == threadID }
+  }
+  private var hasExpandedToolCall: Bool {
+    !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty
   }
   private var timelineRows: [ChatTimelineRow] {
     ChatTimelineRow.grouped(model.messages, hiding: model.bufferedAgentMessageIDs)
@@ -324,8 +325,7 @@ struct ChatView: View {
         .scrollDismissesKeyboard(.interactively)
         .modifier(
           TimelineScrollTracking(
-            isNearBottom: $isNearBottom, isUserScrolling: $isUserScrolling,
-            jumpToLatestRequested: $jumpToLatestRequested,
+            readerIntent: $readerIntent,
             viewportHeight: viewport.size.height,
             hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
         )
@@ -365,9 +365,7 @@ struct ChatView: View {
           expandedToolCallIDs.removeAll()
           collapsedRunningToolCallIDs.removeAll()
           expandedToolGroupIDs.removeAll()
-          isNearBottom = true
-          isUserScrolling = false
-          jumpToLatestRequested = false
+          readerIntent = TimelineReaderIntent()
         }
         .onChange(of: thread?.requiresAttention) { _, requiresAttention in
           guard requiresAttention == true else { return }
@@ -390,7 +388,7 @@ struct ChatView: View {
           if oldValue == nil {
             // Initial history has no prior reading position, including on the
             // iOS 17 baseline without separate scroll-anchor roles.
-            isNearBottom = true
+            readerIntent.followLatest = true
             proxy.scrollTo("timeline-bottom", anchor: .bottom)
           } else {
             followLatestIfNeeded(proxy)
@@ -405,8 +403,7 @@ struct ChatView: View {
         }
         .modifier(
           TimelineJumpControls(
-            isNearBottom: $isNearBottom, isUserScrolling: $isUserScrolling,
-            jumpToLatestRequested: $jumpToLatestRequested, proxy: proxy,
+            readerIntent: $readerIntent, proxy: proxy,
             hasMessages: !model.messages.isEmpty, reduceMotion: reduceMotion)
         )
         .navigationTitle(thread?.title ?? "Agent thread")
@@ -633,15 +630,14 @@ struct ChatView: View {
   private func followLatestIfNeeded(_ proxy: ScrollViewProxy) {
     guard
       TimelineScrollFollowPolicy.shouldFollowUpdates(
-        isNearBottom: isNearBottom, isUserScrolling: isUserScrolling,
-        hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
+        readerIntent, hasExpandedToolCall: hasExpandedToolCall)
     else { return }
     Task { @MainActor in
+      // The layout pass can change the reader's intent; re-check before moving.
       await Task.yield()
       guard
         TimelineScrollFollowPolicy.shouldFollowUpdates(
-          isNearBottom: isNearBottom, isUserScrolling: isUserScrolling,
-          hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
+          readerIntent, hasExpandedToolCall: hasExpandedToolCall)
       else { return }
       proxy.scrollTo("timeline-bottom", anchor: .bottom)
     }
@@ -687,27 +683,25 @@ struct ChatView: View {
 }
 
 private struct TimelineJumpControls: ViewModifier {
-  @Binding var isNearBottom: Bool
-  @Binding var isUserScrolling: Bool
-  @Binding var jumpToLatestRequested: Bool
+  @Binding var readerIntent: TimelineReaderIntent
   let proxy: ScrollViewProxy
   let hasMessages: Bool
   let reduceMotion: Bool
 
+  /// The jump is offered only while the reader is idle. A tap during a kinetic
+  /// scroll is answered by a position that the same gesture then moves back,
+  /// so the request is not taken at all rather than silently swallowed.
+  private var offersJump: Bool {
+    hasMessages && !readerIntent.followLatest && !readerIntent.gestureInFlight
+  }
+
   func body(content: Content) -> some View {
     content
-      .onChange(of: isUserScrolling) { _, scrolling in
-        if !scrolling && jumpToLatestRequested { jumpToLatest() }
-      }
-      .onChange(of: isNearBottom) { _, nearBottom in
-        if nearBottom && !isUserScrolling { jumpToLatestRequested = false }
-      }
       .overlay(alignment: .bottomTrailing) {
-        if !isNearBottom && hasMessages {
+        if offersJump {
           Button {
             InteractionFeedback.selection()
-            jumpToLatestRequested = true
-            jumpToLatest()
+            proxy.scrollTo("timeline-bottom", anchor: .bottom)
           } label: {
             Label("Latest", systemImage: "arrow.down")
               .font(.callout.weight(.medium))
@@ -722,17 +716,7 @@ private struct TimelineJumpControls: ViewModifier {
           .transition(.opacity.combined(with: .scale(scale: 0.92)))
         }
       }
-      .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isNearBottom)
-  }
-
-  private func jumpToLatest() {
-    proxy.scrollTo("timeline-bottom", anchor: .bottom)
-    Task { @MainActor in
-      await Task.yield()
-      guard jumpToLatestRequested && !isUserScrolling else { return }
-      proxy.scrollTo("timeline-bottom", anchor: .bottom)
-      if isNearBottom { jumpToLatestRequested = false }
-    }
+      .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: offersJump)
   }
 }
 
@@ -1211,9 +1195,7 @@ private struct TimelinePerformanceProgress: ViewModifier {
 /// Tracks the user's scroll intent separately from Markdown layout changes.
 /// Content growing below a pinned viewport must not switch off auto-follow.
 private struct TimelineScrollTracking: ViewModifier {
-  @Binding var isNearBottom: Bool
-  @Binding var isUserScrolling: Bool
-  @Binding var jumpToLatestRequested: Bool
+  @Binding var readerIntent: TimelineReaderIntent
   let viewportHeight: CGFloat
   let hasExpandedToolCall: Bool
   @State private var previousContentFrame: CGRect?
@@ -1228,8 +1210,7 @@ private struct TimelineScrollTracking: ViewModifier {
 
   private var sizeChangeAnchor: UnitPoint {
     TimelineScrollFollowPolicy.shouldFollowUpdates(
-      isNearBottom: isNearBottom, isUserScrolling: isUserScrolling,
-      hasExpandedToolCall: hasExpandedToolCall) ? .bottom : .top
+      readerIntent, hasExpandedToolCall: hasExpandedToolCall) ? .bottom : .top
   }
 
   @ViewBuilder
@@ -1239,14 +1220,13 @@ private struct TimelineScrollTracking: ViewModifier {
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .defaultScrollAnchor(sizeChangeAnchor, for: .sizeChanges)
         .onScrollPhaseChange { _, phase, context in
-          if phase == .tracking || phase == .interacting {
-            jumpToLatestRequested = false
-          }
-          let wasUserScrolling = isUserScrolling
-          isUserScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
-          if isUserScrolling || wasUserScrolling {
+          let wasScrolling = readerIntent.gestureInFlight
+          readerIntent.gestureInFlight =
+            phase == .tracking || phase == .interacting || phase == .decelerating
+          if readerIntent.gestureInFlight || wasScrolling {
             let geometry = context.geometry
-            isNearBottom = geometry.visibleRect.maxY >= geometry.contentSize.height - 72
+            readerIntent.followLatest =
+              geometry.visibleRect.maxY >= geometry.contentSize.height - 72
           }
         }
         .onScrollGeometryChange(for: Metrics.self) { geometry in
@@ -1255,8 +1235,8 @@ private struct TimelineScrollTracking: ViewModifier {
             contentHeight: geometry.contentSize.height,
             viewportHeight: geometry.visibleRect.height)
         } action: { old, new in
-          isNearBottom = TimelineScrollFollowPolicy.updatedFollowIntent(
-            wasFollowing: isNearBottom, isUserScrolling: isUserScrolling,
+          readerIntent.followLatest = TimelineScrollFollowPolicy.updatedFollowIntent(
+            readerIntent,
             contentSizeChanged: old.contentHeight != new.contentHeight,
             viewportSizeChanged: old.viewportHeight != new.viewportHeight,
             isNearBottom: new.isNearBottom)
@@ -1268,8 +1248,7 @@ private struct TimelineScrollTracking: ViewModifier {
           DragGesture(minimumDistance: 2)
             .onChanged { _ in
               scrollSettleTask?.cancel()
-              jumpToLatestRequested = false
-              isUserScrolling = true
+              readerIntent.gestureInFlight = true
             }
             .onEnded { _ in
               scheduleScrollSettle()
@@ -1277,7 +1256,7 @@ private struct TimelineScrollTracking: ViewModifier {
         )
         .onPreferenceChange(ScrollContentFrameKey.self) { frame in
           guard let frame else { return }
-          if isUserScrolling, let previousContentFrame,
+          if readerIntent.gestureInFlight, let previousContentFrame,
             abs(frame.minY - previousContentFrame.minY) > 0.5
           {
             scheduleScrollSettle()
@@ -1285,10 +1264,10 @@ private struct TimelineScrollTracking: ViewModifier {
           let decision = TimelineScrollFollowPolicy.evaluate(
             previousFrame: previousContentFrame, frame: frame,
             viewportHeight: viewportHeight, previousViewportHeight: previousViewportHeight,
-            wasFollowing: isNearBottom)
+            wasFollowing: readerIntent.followLatest)
           previousContentFrame = frame
           previousViewportHeight = viewportHeight
-          isNearBottom = decision.isNearBottom
+          readerIntent.followLatest = decision.isNearBottom
         }
         .onDisappear { scrollSettleTask?.cancel() }
     }
@@ -1300,8 +1279,25 @@ private struct TimelineScrollTracking: ViewModifier {
       // iOS 17 has no scroll phase callback. Wait until the scroll offset
       // stops changing, including after a fast swipe starts decelerating.
       try? await Task.sleep(for: .milliseconds(180))
-      if !Task.isCancelled { isUserScrolling = false }
+      if !Task.isCancelled {
+        readerIntent.gestureInFlight = false
+      }
     }
+  }
+}
+
+/// The reader's scroll intent, in one value so the tracker and the jump button
+/// cannot disagree about who owns it. `followLatest` is the reading position the
+/// reader asked for; `gestureInFlight` reports a live swipe.
+struct TimelineReaderIntent: Equatable {
+  var followLatest: Bool
+  var gestureInFlight: Bool
+
+  init(
+    followLatest: Bool = true, gestureInFlight: Bool = false
+  ) {
+    self.followLatest = followLatest
+    self.gestureInFlight = gestureInFlight
   }
 }
 
@@ -1313,19 +1309,19 @@ enum TimelineScrollFollowPolicy {
   }
 
   static func shouldFollowUpdates(
-    isNearBottom: Bool, isUserScrolling: Bool, hasExpandedToolCall: Bool
+    _ intent: TimelineReaderIntent, hasExpandedToolCall: Bool
   ) -> Bool {
-    isNearBottom && !isUserScrolling && !hasExpandedToolCall
+    intent.followLatest && !intent.gestureInFlight && !hasExpandedToolCall
   }
 
   static func updatedFollowIntent(
-    wasFollowing: Bool, isUserScrolling: Bool, contentSizeChanged: Bool,
+    _ intent: TimelineReaderIntent, contentSizeChanged: Bool,
     viewportSizeChanged: Bool = false, isNearBottom: Bool
   ) -> Bool {
     // A pinned viewport can briefly measure above the bottom before the native
     // size-change anchor has applied. Preserve intent for that layout pass.
-    if wasFollowing && !isUserScrolling && (contentSizeChanged || viewportSizeChanged)
-      && !isNearBottom
+    if intent.followLatest && !intent.gestureInFlight
+      && (contentSizeChanged || viewportSizeChanged) && !isNearBottom
     {
       return true
     }

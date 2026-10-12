@@ -216,6 +216,32 @@ final class OesapUITests: XCTestCase {
         .waitForExistence(timeout: 5))
   }
 
+  func testJumpToLatestIsReofferedAfterFastSwipe() {
+    let app = launchDemo(arguments: ["--demo-performance"])
+    connect(app)
+    app.buttons["project-demo-project"].tap()
+    app.buttons["thread-demo-agent-running"].tap()
+
+    let timeline = app.scrollViews["chat-timeline-scroll"]
+    XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+    let earlier = app.descendants(matching: .any)["message-demo-performance-996"]
+    for _ in 0..<8 where !earlier.isHittable {
+      timeline.swipeDown()
+    }
+    XCTAssertTrue(earlier.isHittable)
+
+    // A fast swipe leaves the reader away from the newest content. Once the
+    // gesture clears, the jump must be offered again and reach the latest row.
+    timeline.swipeDown(velocity: .fast)
+    Thread.sleep(forTimeInterval: 0.8)
+    let jump = app.buttons["chat-jump-to-latest"]
+    XCTAssertTrue(jump.waitForExistence(timeout: 5))
+    jump.tap()
+    XCTAssertTrue(
+      app.descendants(matching: .any)["message-demo-performance-stream"]
+        .waitForExistence(timeout: 5))
+  }
+
   func testStopActionReturnsAfterCancelAndBecomesSendWhenTyping() {
     let (app, stop) = openAgentControlChat()
     stop.tap()

@@ -34,41 +34,42 @@ final class MessageMarkdownTests: XCTestCase {
   func testTimelineFollowsUpdatesOnlyWhileIdleAndPinned() {
     XCTAssertTrue(
       TimelineScrollFollowPolicy.shouldFollowUpdates(
-        isNearBottom: true, isUserScrolling: false, hasExpandedToolCall: false),
+        TimelineReaderIntent(followLatest: true), hasExpandedToolCall: false),
       "The native bottom anchor should follow async Markdown, new rows, and status growth")
     XCTAssertFalse(
       TimelineScrollFollowPolicy.shouldFollowUpdates(
-        isNearBottom: false, isUserScrolling: false, hasExpandedToolCall: false),
+        TimelineReaderIntent(followLatest: false), hasExpandedToolCall: false),
       "New output and status must preserve the reader's earlier position")
     XCTAssertFalse(
       TimelineScrollFollowPolicy.shouldFollowUpdates(
-        isNearBottom: true, isUserScrolling: true, hasExpandedToolCall: false),
+        TimelineReaderIntent(followLatest: true, gestureInFlight: true),
+        hasExpandedToolCall: false),
       "Incoming text must not compete with an active drag or deceleration")
     XCTAssertFalse(
       TimelineScrollFollowPolicy.shouldFollowUpdates(
-        isNearBottom: true, isUserScrolling: false, hasExpandedToolCall: true),
+        TimelineReaderIntent(followLatest: true), hasExpandedToolCall: true),
       "Expanding a tool call must not move the timeline")
   }
 
   func testNativeScrollGeometryPreservesGrowthButRecognizesJumpsAndDrags() {
     XCTAssertTrue(
       TimelineScrollFollowPolicy.updatedFollowIntent(
-        wasFollowing: true, isUserScrolling: false, contentSizeChanged: true,
+        TimelineReaderIntent(followLatest: true), contentSizeChanged: true,
         isNearBottom: false),
       "Layout may report the old offset before the bottom anchor applies")
     XCTAssertFalse(
       TimelineScrollFollowPolicy.updatedFollowIntent(
-        wasFollowing: true, isUserScrolling: true, contentSizeChanged: true,
-        isNearBottom: false),
+        TimelineReaderIntent(followLatest: true, gestureInFlight: true),
+        contentSizeChanged: true, isNearBottom: false),
       "A drag away must win even when content grows")
     XCTAssertFalse(
       TimelineScrollFollowPolicy.updatedFollowIntent(
-        wasFollowing: true, isUserScrolling: false, contentSizeChanged: false,
+        TimelineReaderIntent(followLatest: true), contentSizeChanged: false,
         isNearBottom: false),
       "A scroll away without a size change must end follow mode")
     XCTAssertTrue(
       TimelineScrollFollowPolicy.updatedFollowIntent(
-        wasFollowing: false, isUserScrolling: false, contentSizeChanged: false,
+        TimelineReaderIntent(followLatest: false), contentSizeChanged: false,
         isNearBottom: true),
       "A programmatic jump to Latest must restore follow mode")
   }
