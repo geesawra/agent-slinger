@@ -57,6 +57,7 @@ struct OesapApp: App {
   private var workspace: some View {
     WorkspaceRootView(model: model)
       .tint(Color.accentColor)
+      .onOpenURL { url in Task { await model.openNotificationURL(url) } }
       #if DEBUG
         .preferredColorScheme(uiTestDarkMode ? .dark : nil)
       #endif

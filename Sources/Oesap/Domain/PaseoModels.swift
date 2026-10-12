@@ -472,6 +472,7 @@ public struct PaseoThread: Sendable, Equatable, Identifiable {
   public let requiresAttention: Bool
   public let attentionReason: String?
   public let parentAgentID: String?
+  public let workspaceID: String?
   public let projectKey: String
   public let projectName: String
   public let pendingPermissions: [PaseoPermissionRequest]
@@ -495,8 +496,10 @@ public struct PaseoThread: Sendable, Equatable, Identifiable {
     projectName: String,
     pendingPermissions: [PaseoPermissionRequest] = [],
     contextWindowUsedTokens: Double? = nil,
-    contextWindowMaxTokens: Double? = nil
+    contextWindowMaxTokens: Double? = nil,
+    workspaceID: String? = nil
   ) {
+    self.workspaceID = workspaceID
     self.id = id
     self.title = title
     self.provider = provider
@@ -838,6 +841,7 @@ public protocol PaseoService: Sendable {
   func createAgent(_ intent: PaseoAgentCreationIntent) async throws -> PaseoAgentCreationResult
   func archiveAgent(agentID: String) async throws
   func clearAgentAttention(agentID: String) async throws
+  func fetchAgent(agentID: String) async throws -> PaseoThread?
   func listThreads(projectID: String, page: PaseoPageRequest) async throws -> PaseoPage<PaseoThread>
   func history(
     agentID: String, direction: PaseoTimelineDirection, cursor: PaseoTimelineCursor?, limit: Int
@@ -862,6 +866,9 @@ public protocol PaseoService: Sendable {
 }
 
 extension PaseoService {
+  public func fetchAgent(agentID: String) async throws -> PaseoThread? {
+    throw PaseoProtocolError.unsupportedCapability("agent lookup")
+  }
   public func directoryEntries(cwd: String?) async throws -> [PaseoDirectoryEntry] {
     throw PaseoProtocolError.unsupportedCapability("host directory browsing")
   }

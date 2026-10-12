@@ -12,6 +12,19 @@ mac_destination := "platform=macOS,variant=Mac Catalyst"
 
 default: check
 
+# Build the optional Go notification sidecar alongside the app artifacts.
+sidecar-build:
+    mkdir -p .build
+    cd Tools/agent-slinger-notify && go build -o ../../.build/agent-slinger-notify ./cmd/agent-slinger-notify
+
+# Verify the sidecar without connecting to Paseo or sending real notifications.
+sidecar-test:
+    cd Tools/agent-slinger-notify && go test -race ./... && go vet ./...
+
+# Build the container image without starting notification delivery.
+sidecar-docker-build:
+    docker build -t agent-slinger-notify:local Tools/agent-slinger-notify
+
 # Generate the Xcode project from the checked-in XcodeGen specification if missing.
 generate:
     ./Scripts/generate-project
@@ -137,3 +150,10 @@ mac-test: generate
     set -euo pipefail
     resolved_signing_team="$(python3 Scripts/read_development_team.py)"
     xcodebuild test -project "{{project}}" -scheme "{{scheme}}" -destination "{{mac_destination}}" -derivedDataPath "{{mac_derived_data}}" -allowProvisioningUpdates -only-testing:OesapTests -only-testing:OesapUITests/WorkspacePlatformUITests -only-testing:OesapUITests/ChatPerformanceUITests CODE_SIGNING_REQUIRED=YES CODE_SIGNING_ALLOWED=YES "CODE_SIGN_IDENTITY=Apple Development" CODE_SIGN_STYLE=Automatic "DEVELOPMENT_TEAM=${resolved_signing_team}"
+
+# Run shared unit tests without UI automation or taking keyboard focus.
+mac-unit-test: generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    resolved_signing_team="$(python3 Scripts/read_development_team.py)"
+    xcodebuild test -project "{{project}}" -scheme "{{scheme}}" -destination "{{mac_destination}}" -derivedDataPath "{{mac_derived_data}}" -allowProvisioningUpdates -only-testing:OesapTests CODE_SIGNING_REQUIRED=YES CODE_SIGNING_ALLOWED=YES "CODE_SIGN_IDENTITY=Apple Development" CODE_SIGN_STYLE=Automatic "DEVELOPMENT_TEAM=${resolved_signing_team}"

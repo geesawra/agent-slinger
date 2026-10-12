@@ -1,0 +1,42 @@
+services:
+  agent-slinger-notify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agent-slinger-notify:local
+    command: ["run"]
+    # Host mode reaches a local daemon. Bridge mode works for outbound relay WSS.
+    # Docker Desktop requires its host networking feature for host mode.
+    network_mode: ${NOTIFY_DOCKER_NETWORK_MODE:-host}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 10s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.50
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      PASEO_URL: ${PASEO_URL:-}
+      PASEO_PAIRING_LINK: ${PASEO_PAIRING_LINK:-}
+      PASEO_SERVER_ID: ${PASEO_SERVER_ID:-}
+      PASEO_SERVER_NAME: ${PASEO_SERVER_NAME:-}
+      PASEO_PASSWORD: ${PASEO_PASSWORD:-}
+      PUSHOVER_APP_TOKEN: ${PUSHOVER_APP_TOKEN:?Set PUSHOVER_APP_TOKEN in the shell environment}
+      PUSHOVER_USER_KEY: ${PUSHOVER_USER_KEY:?Set PUSHOVER_USER_KEY in the shell environment}
+      PUSHOVER_DEVICE: ${PUSHOVER_DEVICE:-}
+      NOTIFY_DELIVERY_MODE: ${NOTIFY_DELIVERY_MODE:?Set NOTIFY_DELIVERY_MODE to all-attention}
+      NOTIFY_CONTENT: ${NOTIFY_CONTENT:-paseo-preview}
+      NOTIFY_STATE_DIR: /var/lib/agent-slinger-notify
+      NOTIFY_MAX_PENDING: ${NOTIFY_MAX_PENDING:-256}
+      NOTIFY_EVENT_TTL_SECONDS: ${NOTIFY_EVENT_TTL_SECONDS:-86400}
+    volumes:
+      - notify-state:/var/lib/agent-slinger-notify
+
+volumes:
+  notify-state:

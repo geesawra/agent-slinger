@@ -6,6 +6,12 @@ Proposed. A host-run bridge can observe attention events from an unchanged
 Paseo daemon. Native Oesap alerts still require an APNs provider path; its
 operator and privacy model need a product decision before implementation.
 
+The [Go notification sidecar draft](../notification-sidecar.md) develops the
+user-operated Pushover alternative, using Paseo's mobile and web behavior as
+the reference. It also identifies a delivery-policy limitation: a passive
+attention subscription cannot reproduce the daemon's remote-push selection
+from `shouldNotify` alone. Exact selection parity needs a daemon integration.
+
 ## Context and findings
 
 Oesap is an iPhone-only SwiftUI client. It currently has one saved Paseo

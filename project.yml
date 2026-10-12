@@ -60,6 +60,9 @@ targets:
     info:
       path: Oesap-Info.plist
       properties:
+        CFBundleURLTypes:
+          - CFBundleURLName: com.oesap.app.open
+            CFBundleURLSchemes: [agentslinger]
         CFBundleDisplayName: Agent Slinger
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"

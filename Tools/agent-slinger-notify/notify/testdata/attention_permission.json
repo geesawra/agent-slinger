@@ -1,0 +1,1 @@
+{"subscriptionId":"sanitized-subscription","agentId":"agent-fixture","reason":"permission","timestamp":"2026-10-12T08:00:00.000Z","shouldNotify":false,"notification":{"title":"Agent needs permission","body":"Permission requested.","data":{"serverId":"server-fixture","workspaceId":"workspace-fixture","agentId":"agent-fixture","reason":"permission"}}}

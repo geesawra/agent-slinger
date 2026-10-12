@@ -6,6 +6,7 @@ enum OesapRoute: Hashable {
   case usage
   case settings
   case addInstance
+  case notificationConnection
   case addProject
   case project(String)
   case chat(String)
@@ -81,15 +82,21 @@ struct WorkspaceRootView: View {
       NavigationStack {
         destination(route)
           .navigationDestination(for: OesapRoute.self) { destination($0) }
+          .safeAreaInset(edge: .top) { openLinkNotice }
           .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-              Button("Done") { presentedRoute = nil }
+            if route != .notificationConnection {
+              ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { presentedRoute = nil }
+              }
             }
           }
       }
       #if targetEnvironment(macCatalyst)
         .frame(minWidth: 480, idealWidth: 580, minHeight: 480, idealHeight: 650)
       #endif
+    }
+    .safeAreaInset(edge: .top) {
+      if presentedRoute == nil { openLinkNotice }
     }
     .onChange(of: model.activeInstanceID) { _, newValue in
       guard newValue != observedInstanceID else { return }
@@ -119,6 +126,31 @@ struct WorkspaceRootView: View {
       detailRoute = nil
       preferredCompactColumn = .content
     }
+    .onChange(of: model.openLinkNavigation) { _, navigation in
+      guard let navigation else { return }
+      if navigation.route == .notificationConnection {
+        // Keep the current conversation underneath the setup prompt so backing
+        // out returns to where the user was before opening the notification.
+        if usesSplitNavigation || path.last != .notificationConnection {
+          open(.notificationConnection)
+        }
+        return
+      }
+      presentedRoute = nil
+      path.removeAll()
+      resetWorkspaceNavigation()
+      if case .chat(let threadID) = navigation.route, let projectID = model.selectedProjectID {
+        if usesSplitNavigation {
+          splitProjectID = projectID
+          detailRoute = .chat(threadID)
+          preferredCompactColumn = .detail
+        } else {
+          path = [.project(projectID), .chat(threadID)]
+        }
+      } else {
+        open(navigation.route)
+      }
+    }
     .task {
       observedInstanceID = model.activeInstanceID
       await model.start()
@@ -147,6 +179,20 @@ struct WorkspaceRootView: View {
       )
     }
     .tint(.accentColor)
+  }
+
+  @ViewBuilder
+  private var openLinkNotice: some View {
+    if let notice = model.openLinkNotice {
+      HStack {
+        Text(notice).font(.callout)
+        Spacer()
+        Button("Dismiss") { model.dismissOpenLinkNotice() }
+      }
+      .padding()
+      .background(.regularMaterial)
+      .accessibilityIdentifier("notification-link-notice")
+    }
   }
 
   private var compactNavigation: some View {
@@ -290,11 +336,18 @@ struct WorkspaceRootView: View {
           resetWorkspaceNavigation()
         }
       )
+    case .notificationConnection:
+      NotificationConnectionView(hasSavedServers: !model.savedInstances.isEmpty) {
+        model.dismissNotificationConnectionPrompt()
+        if presentedRoute == .notificationConnection { presentedRoute = nil }
+        if path.last == .notificationConnection { path.removeLast() }
+      }
     case .addInstance:
       ConnectionSetupView(
         model: model,
-        title: "Add Paseo instance",
+        title: model.pendingOpenIntent == nil ? "Add Paseo instance" : "Add Server",
         showsReconnectAction: false,
+        opensNotificationConversation: model.pendingOpenIntent != nil,
         onConnected: {
           path.removeAll()
           presentedRoute = nil
@@ -376,6 +429,47 @@ struct WorkspaceRootView: View {
     splitProjectID = nil
     detailRoute = nil
     preferredCompactColumn = .sidebar
+  }
+}
+
+/// A notification can identify a conversation without supplying connection details.
+/// Use the platform's empty-state presentation before asking for those details.
+private struct NotificationConnectionView: View {
+  let hasSavedServers: Bool
+  let onDismiss: () -> Void
+
+  var body: some View {
+    ContentUnavailableView {
+      Label("Connect to This Server", systemImage: "server.rack")
+    } description: {
+      Text(
+        "This conversation is on a server you haven’t added yet. Add its Paseo connection to continue."
+      )
+      .frame(maxWidth: 360)
+    } actions: {
+      VStack(spacing: 12) {
+        NavigationLink(value: OesapRoute.addInstance) {
+          Text("Add Server").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+
+        if hasSavedServers {
+          NavigationLink(value: OesapRoute.settings) {
+            Text("Choose a Saved Server").frame(maxWidth: .infinity)
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.large)
+        }
+
+        Button("Not Now", action: onDismiss)
+          .buttonStyle(.borderless)
+          .padding(.top, 4)
+      }
+      .frame(maxWidth: 280)
+    }
+    .navigationTitle("Open Conversation")
+    .navigationBarTitleDisplayMode(.inline)
   }
 }
 

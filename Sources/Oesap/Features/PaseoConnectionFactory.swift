@@ -36,11 +36,13 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
     let service = PaseoRemoteServiceAdapter(config: record.config)
     do {
       try await service.connect()
+      let serverID = await service.serverID()
       try Task.checkCancellation()
       guard attempt == generation else {
         await service.disconnect()
         throw CancellationError()
       }
+      try store.recordServerID(serverID, for: record.id)
       activeService = service
       return service
     } catch {
@@ -71,12 +73,14 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
     let service = PaseoRemoteServiceAdapter(config: config)
     do {
       try await service.connect()
+      let serverID = await service.serverID()
       try Task.checkCancellation()
       guard attempt == generation else {
         await service.disconnect()
         throw CancellationError()
       }
-      try store.saveAndSelect(config, name: connection.name)
+      let record = try store.saveAndSelect(config, name: connection.name)
+      try store.recordServerID(serverID, for: record.id)
       activeService = service
       return service
     } catch {
@@ -99,10 +103,12 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
     let service = PaseoRemoteServiceAdapter(config: record.config)
     do {
       try await service.connect()
+      let serverID = await service.serverID()
       guard attempt == generation else {
         await service.disconnect()
         throw CancellationError()
       }
+      try store.recordServerID(serverID, for: record.id)
       activeService = service
       return service
     } catch {
@@ -450,6 +456,14 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
     return RemoteProject(
       id: project.id, name: project.name, subtitle: project.rootPath,
       rootPath: project.rootPath)
+  }
+
+  func agentForOpenIntent(agentID: String) async throws -> RemoteThread? {
+    guard let thread = try await client.fetchAgent(agentID: agentID), thread.archivedAt == nil
+    else {
+      return nil
+    }
+    return Self.mapThread(thread)
   }
 
   func threads(projectID: String) async throws -> [RemoteThread] {
@@ -896,7 +910,9 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       contextUsage: mapContextUsage(
         used: thread.contextWindowUsedTokens, max: thread.contextWindowMaxTokens),
       cwd: thread.cwd,
-      parentAgentID: thread.parentAgentID
+      parentAgentID: thread.parentAgentID,
+      workspaceID: thread.workspaceID,
+      projectID: thread.projectKey
     )
   }
 

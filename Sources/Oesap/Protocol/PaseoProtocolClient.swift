@@ -614,6 +614,22 @@ public actor PaseoProtocolClient: PaseoService {
         && (failedStage == "workspace" || failedStage == "agent"))
   }
 
+  public func fetchAgent(agentID: String) async throws -> PaseoThread? {
+    let payload = try await request(
+      type: "fetch_agent_request", fields: ["agentId": .string(agentID)],
+      responseType: "fetch_agent_response", operation: "notification agent lookup")
+    guard let agent = payload["agent"] else {
+      throw PaseoProtocolError.malformedMessage("agent lookup omitted its result")
+    }
+    if case .null = agent { return nil }
+    let thread = try decodeThread(payload)
+    // Upstream accepts title/prefix lookups. Notification IDs must match exactly.
+    guard thread.id == agentID else {
+      throw PaseoProtocolError.malformedMessage("agent lookup returned a different identity")
+    }
+    return thread
+  }
+
   public func listThreads(projectID: String, page: PaseoPageRequest = .first) async throws
     -> PaseoPage<PaseoThread>
   {
@@ -1547,7 +1563,8 @@ public actor PaseoProtocolClient: PaseoService {
       projectName: projectName,
       pendingPermissions: permissions,
       contextWindowUsedTokens: agent["lastUsage"]?["contextWindowUsedTokens"]?.nonNegativeNumber,
-      contextWindowMaxTokens: agent["lastUsage"]?["contextWindowMaxTokens"]?.nonNegativeNumber
+      contextWindowMaxTokens: agent["lastUsage"]?["contextWindowMaxTokens"]?.nonNegativeNumber,
+      workspaceID: agent["workspaceId"]?.stringValue
     )
   }
 

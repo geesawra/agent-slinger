@@ -40,6 +40,15 @@ final class OesapModel {
     }
   }
 
+  private(set) var pendingOpenIntent: AgentOpenIntent?
+  private(set) var openLinkNotice: String?
+  private(set) var openLinkNavigation: AgentOpenNavigation?
+  private(set) var openLinkHighlight: AgentOpenHighlight?
+  @ObservationIgnored private var pendingOpenAnchor: AgentOpenIntent?
+  @ObservationIgnored private var openIntentGeneration = 0
+  @ObservationIgnored private var resolvingOpenIntent = false
+  @ObservationIgnored private var presentedOpenIntentGeneration: Int?
+
   private(set) var connectionState: ConnectionState = .disconnected
   private(set) var hasSavedConnection = false
   private(set) var loadingSavedConnections = true
@@ -517,7 +526,189 @@ final class OesapModel {
   }
 
   var selectedPermission: RemotePermission? {
-    permissions.first { $0.agentID == selectedThreadID }
+    selectedThreadID.flatMap { pendingPermission(for: $0) }
+  }
+
+  func pendingPermission(for threadID: String) -> RemotePermission? {
+    if openLinkHighlight?.agentID == threadID,
+      case .permission(let id) = openLinkHighlight?.target,
+      let permission = permissions.first(where: { $0.id == id && $0.agentID == threadID })
+    {
+      return permission
+    }
+    return permissions.first { $0.agentID == threadID }
+  }
+
+  func openNotificationURL(_ url: URL) async {
+    guard let intent = AgentOpenIntent(url: url) else {
+      openLinkNotice = "This Agent Slinger link is invalid or unsupported."
+      return
+    }
+    openIntentGeneration += 1
+    pendingOpenIntent = intent
+    pendingOpenAnchor = nil
+    openLinkHighlight = nil
+    openLinkNotice = nil
+    if !startupConnectionStarted {
+      await start()
+      return
+    }
+    await resumePendingOpenIntent()
+  }
+
+  func dismissOpenLinkNotice() { openLinkNotice = nil }
+
+  /// Closing the connection prompt keeps the target available for later setup.
+  func dismissNotificationConnectionPrompt() {
+    openLinkNavigation = nil
+    openLinkNotice = nil
+  }
+
+  private func schedulePendingOpenIntent() {
+    guard pendingOpenIntent != nil, !resolvingOpenIntent else { return }
+    Task { await resumePendingOpenIntent() }
+  }
+
+  private func resumePendingOpenIntent() async {
+    guard let intent = pendingOpenIntent, !loadingSavedConnections,
+      !connectionState.isBusy, !resolvingOpenIntent
+    else { return }
+    resolvingOpenIntent = true
+    let intentGeneration = openIntentGeneration
+    defer {
+      resolvingOpenIntent = false
+      if openIntentGeneration != intentGeneration { schedulePendingOpenIntent() }
+    }
+    if connectionState != .connected || connectedServerID != intent.serverID {
+      guard let instance = savedInstances.first(where: { $0.serverID == intent.serverID }) else {
+        // Present once per explicit link. Retrying or dismissing setup must not
+        // interrupt the user with the same prompt while the intent is pending.
+        if presentedOpenIntentGeneration != intentGeneration {
+          presentedOpenIntentGeneration = intentGeneration
+          openLinkNotice = nil
+          openLinkNavigation = AgentOpenNavigation(route: .notificationConnection)
+        }
+        return
+      }
+      guard await selectSavedInstance(instance.id) else {
+        if openIntentGeneration == intentGeneration {
+          openLinkNotice = "Connect to the saved host to finish opening this conversation."
+          openLinkNavigation = AgentOpenNavigation(route: .settings)
+        }
+        return
+      }
+    }
+    guard openIntentGeneration == intentGeneration, let service,
+      connectionState == .connected
+    else { return }
+    guard connectedServerID == intent.serverID else {
+      openLinkNotice =
+        "The connected host identity does not match this link. The conversation was not opened."
+      return
+    }
+    let generation = connectionGeneration
+    let projectGeneration = projectSelectionGeneration
+    let selectionGeneration = threadSelectionGeneration
+    do {
+      let agent = try await service.agentForOpenIntent(agentID: intent.agentID)
+      guard openIntentGeneration == intentGeneration, connectionGeneration == generation,
+        projectSelectionGeneration == projectGeneration,
+        threadSelectionGeneration == selectionGeneration
+      else { return }
+      guard let agent, agent.id == intent.agentID,
+        agent.workspaceID == intent.workspaceID, let projectID = agent.projectID
+      else {
+        pendingOpenIntent = nil
+        openLinkNavigation = AgentOpenNavigation(route: .agentOverview)
+        openLinkNotice =
+          "This conversation or workspace is no longer available at the linked location."
+        return
+      }
+      // A warm link may refer to a project created since the current catalog loaded.
+      // Refresh once, without replacing a newer selection while the request is in flight.
+      if !projects.contains(where: { $0.id == projectID }) {
+        let currentProjects = try await service.projects()
+        guard openIntentGeneration == intentGeneration, connectionGeneration == generation,
+          projectSelectionGeneration == projectGeneration,
+          threadSelectionGeneration == selectionGeneration
+        else { return }
+        projects = currentProjects
+      }
+      guard projects.contains(where: { $0.id == projectID }) else {
+        pendingOpenIntent = nil
+        openLinkNavigation = AgentOpenNavigation(route: .agentOverview)
+        openLinkNotice = "The linked conversation's project is no longer available on this host."
+        return
+      }
+      let changesProject = selectedProjectID != projectID
+      await selectProject(projectID)
+      guard openIntentGeneration == intentGeneration, connectionGeneration == generation,
+        selectedProjectID == projectID,
+        projectSelectionGeneration == projectGeneration + (changesProject ? 1 : 0),
+        threadSelectionGeneration == selectionGeneration + (changesProject ? 1 : 0)
+      else { return }
+      if let index = threads.firstIndex(where: { $0.id == agent.id }) {
+        threads[index] = agent
+      } else {
+        threads.append(agent)
+      }
+      selectThread(agent.id)
+      pendingOpenIntent = nil
+      openLinkNotice = nil
+      pendingOpenAnchor = intent
+      openLinkNavigation = AgentOpenNavigation(route: .chat(agent.id))
+      if timelineObservationThreadID == agent.id, !loadingHistory {
+        await refreshPermissions(using: service, generation: generation)
+        await resolveOpenAnchor(threadID: agent.id)
+      } else {
+        startTimelineObservation(threadID: agent.id)
+      }
+    } catch {
+      guard openIntentGeneration == intentGeneration, connectionGeneration == generation,
+        projectSelectionGeneration == projectGeneration,
+        threadSelectionGeneration == selectionGeneration
+      else { return }
+      openLinkNotice = "The conversation could not be opened. Reconnect and open the link again."
+    }
+  }
+
+  private func resolveOpenAnchor(threadID: String) async {
+    guard let intent = pendingOpenAnchor, intent.agentID == threadID,
+      selectedThreadID == threadID, connectedServerID == intent.serverID
+    else { return }
+    let intentGeneration = openIntentGeneration
+    let generation = connectionGeneration
+    let selectionGeneration = threadSelectionGeneration
+    if let messageID = intent.messageID {
+      // At most five history requests; a repeated cursor or failed page ends lookup.
+      for _ in 0..<5 {
+        if messages.contains(where: { $0.id == messageID }) || !timelineHasOlder { break }
+        let previousCursor = olderTimelineCursor
+        await loadOlderMessages(threadID: threadID)
+        guard openIntentGeneration == intentGeneration,
+          isCurrentTimeline(
+            threadID: threadID, generation: generation,
+            selectionGeneration: selectionGeneration)
+        else { return }
+        if olderTimelineCursor == previousCursor { break }
+      }
+      if messages.contains(where: { $0.id == messageID }) {
+        openLinkHighlight = AgentOpenHighlight(agentID: threadID, target: .message(messageID))
+      } else {
+        openLinkNotice =
+          "The linked message was not found in the loaded history. You can load earlier messages in this conversation."
+      }
+    } else if let permissionID = intent.permissionID {
+      if permissionError != nil {
+        openLinkNotice =
+          "The permission request could not be verified. Reconnect to refresh pending requests."
+      } else if permissions.contains(where: { $0.id == permissionID && $0.agentID == threadID }) {
+        openLinkHighlight = AgentOpenHighlight(agentID: threadID, target: .permission(permissionID))
+      } else {
+        openLinkNotice = "This permission request is no longer pending. The conversation is open."
+      }
+    }
+    pendingOpenAnchor = nil
   }
 
   func refreshSavedConnectionState() async {
@@ -530,6 +721,10 @@ final class OesapModel {
     startupConnectionStarted = true
     await refreshSavedInstances()
     loadingSavedConnections = false
+    if pendingOpenIntent != nil {
+      await resumePendingOpenIntent()
+      return
+    }
     guard !Task.isCancelled, connectionState == .disconnected,
       let instanceID = activeInstanceID ?? savedInstances.first?.id
     else { return }
@@ -630,7 +825,10 @@ final class OesapModel {
 
   func connect(_ connection: RemoteConnection) async {
     guard !connectionState.isBusy else { return }
-    defer { scheduleForegroundReconnectIfNeeded() }
+    defer {
+      scheduleForegroundReconnectIfNeeded()
+      schedulePendingOpenIntent()
+    }
     let previousService = service
     let preserveInitialSelection =
       previousService == nil && activeInstanceID == nil
@@ -709,7 +907,10 @@ final class OesapModel {
 
   @discardableResult
   func selectSavedInstance(_ id: String) async -> Bool {
-    defer { scheduleForegroundReconnectIfNeeded() }
+    defer {
+      scheduleForegroundReconnectIfNeeded()
+      schedulePendingOpenIntent()
+    }
     guard savedInstances.contains(where: { $0.id == id }) else {
       instanceError = "This saved Paseo instance is no longer available. Refresh and try again."
       return false
@@ -828,7 +1029,10 @@ final class OesapModel {
 
   func reconnect() async {
     guard !connectionState.isBusy else { return }
-    defer { scheduleForegroundReconnectIfNeeded() }
+    defer {
+      scheduleForegroundReconnectIfNeeded()
+      schedulePendingOpenIntent()
+    }
     let priorServerID = agentControlServerID ?? connectedServerID
     let observedThreadID = timelineObservationThreadID
     prepareAgentActionsForConnectionChange()
@@ -1088,6 +1292,8 @@ final class OesapModel {
 
   func selectThread(_ id: String) {
     guard selectedThreadID != id else { return }
+    openLinkHighlight = nil
+    pendingOpenAnchor = nil
     stopTimelineObservation()
     clearGitChanges()
     clearSessionDetails()
@@ -2115,6 +2321,12 @@ final class OesapModel {
           threadID: threadID, generation: generation,
           selectionGeneration: selectionGeneration)
       else { return }
+      await resolveOpenAnchor(threadID: threadID)
+      guard
+        isCurrentTimeline(
+          threadID: threadID, generation: generation,
+          selectionGeneration: selectionGeneration)
+      else { return }
       for try await update in updates {
         guard
           isCurrentTimeline(
@@ -2853,6 +3065,7 @@ final class OesapModel {
 
   @discardableResult
   private func invalidateConnection() -> Int {
+    openLinkHighlight = nil
     connectionRetryDetails = nil
     stopTimelineObservation(resetSelection: false)
     workspaceRefreshTask?.cancel()

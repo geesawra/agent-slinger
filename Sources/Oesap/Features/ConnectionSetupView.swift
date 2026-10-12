@@ -5,6 +5,7 @@ struct ConnectionSetupView: View {
   @Bindable var model: OesapModel
   var title = "Agent Slinger"
   var showsReconnectAction = true
+  var opensNotificationConversation = false
   var onOpenSettings: (() -> Void)?
   var onConnected: (() -> Void)?
   @State private var connection = RemoteConnection.empty
@@ -29,8 +30,12 @@ struct ConnectionSetupView: View {
       } header: {
         Text("Connect to Paseo").foregroundStyle(Color.primary.opacity(0.75))
       } footer: {
-        Text("Connect to a Paseo instance to browse its projects and agent threads.")
-          .foregroundStyle(Color.primary.opacity(0.75))
+        Text(
+          opensNotificationConversation
+            ? "Connect to the server from your notification. Your conversation will open automatically."
+            : "Connect to a Paseo instance to browse its projects and agent threads."
+        )
+        .foregroundStyle(Color.primary.opacity(0.75))
       }
 
       if connection.method == .direct {

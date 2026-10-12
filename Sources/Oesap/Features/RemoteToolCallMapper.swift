@@ -43,10 +43,15 @@ enum RemoteToolCallMapper {
     let status = status(item["status"]?.stringValue)
     let detail = item["detail"]?.objectValue ?? [:]
     let kind = detail["type"]?.stringValue
+    let ircTitle = ircTitle(for: name)
+    let parsedIRCSummary =
+      ircTitle.flatMap { _ in ircSummary(name: name, text: detail["text"]?.stringValue) }
     var call = RemoteToolCall(
-      callID: callID, turnID: turnID, name: name,
-      title: title(name: name, kind: kind, detail: detail),
-      summary: summary(name: name, kind: kind, detail: detail, metadata: item["metadata"]),
+      callID: callID, turnID: turnID, name: ircTitle ?? name,
+      title: ircTitle ?? title(name: name, kind: kind, detail: detail),
+      summary: ircTitle != nil
+        ? parsedIRCSummary
+        : summary(name: name, kind: kind, detail: detail, metadata: item["metadata"]),
       status: status,
       command: kind == "shell" ? detail["command"]?.stringValue : nil,
       cwd: kind == "shell" ? detail["cwd"]?.stringValue : nil,
@@ -158,7 +163,8 @@ enum RemoteToolCallMapper {
       }
     case "plain_text":
       add(
-        &call, id: "text", kind: .text, title: detail["label"]?.stringValue ?? "Details",
+        &call, id: "text", kind: .text,
+        title: ircTitle == nil ? detail["label"]?.stringValue ?? "Details" : "Message",
         value: detail["text"])
     case "plan":
       add(&call, id: "plan", kind: .text, title: "Plan", value: detail["text"])
@@ -271,6 +277,31 @@ enum RemoteToolCallMapper {
       metadata?["subAgentActivity"]?.stringValue
     default: nil
     }
+  }
+
+  /// OMP surfaces its IRC context messages as completed tool calls named for
+  /// the custom message type. Give those two stable types a readable label and
+  /// keep the peer visible on the collapsed row.
+  private static func ircTitle(for name: String) -> String? {
+    switch name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "irc:incoming": "Incoming IRC message"
+    case "irc:autoreply": "IRC auto-reply"
+    default: nil
+    }
+  }
+
+  private static func ircSummary(name: String, text: String?) -> String? {
+    guard let text else { return nil }
+    let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let marker = normalizedName == "irc:incoming"
+      ? "Incoming IRC message from agent `"
+      : "[IRC you → `"
+    guard let start = text.range(of: marker),
+      let end = text[start.upperBound...].firstIndex(of: "`")
+    else { return nil }
+    let peer = text[start.upperBound..<end]
+    guard !peer.isEmpty else { return nil }
+    return normalizedName == "irc:incoming" ? "From agent \(peer)" : "To agent \(peer)"
   }
 
   private static func humanize(_ value: String) -> String {

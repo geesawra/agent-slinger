@@ -76,6 +76,16 @@ signing-team helper. Their offline mock tests run with `just test-scripts`.
 
 For connection failures, see the [diagnostic guide](docs/connection-diagnostics.md).
 
+The optional [Go notification sidecar](Tools/agent-slinger-notify/README.md) runs
+alongside Paseo and sends Pushover alerts with links into Agent Slinger. Build it
+with `just sidecar-build` and run its offline checks with `just sidecar-test`.
+It is configured entirely through environment variables; a Paseo password is
+optional. `just sidecar-docker-build` builds its image without starting delivery.
+The initial observer requires explicit `all-attention` mode; it sends completion
+and permission alerts independently of other clients' presence. Exact Paseo
+delivery parity requires an upstream daemon signal, as described in the
+[notification design](docs/notification-sidecar.md).
+
 On iPad and Mac, projects, threads, and the selected conversation use a native
 three-column split view. iPad adapts to narrow windows with system navigation;
 Mac columns resize and the sidebar can be hidden. The Mac app uses one workspace

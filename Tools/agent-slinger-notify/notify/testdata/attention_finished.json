@@ -1,0 +1,1 @@
+{"subscriptionId":"sanitized-subscription","agentId":"agent-fixture","reason":"finished","timestamp":"2026-10-12T08:00:00.000Z","shouldNotify":false,"notification":{"title":"Agent finished","body":"Finished working.","data":{"serverId":"server-fixture","workspaceId":"workspace-fixture","agentId":"agent-fixture","reason":"finished"}}}

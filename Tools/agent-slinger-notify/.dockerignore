@@ -1,0 +1,15 @@
+.git
+.DS_Store
+.env
+.env.*
+*.env
+notify.json
+notify*.json
+*.secret
+*.secrets
+*.pem
+*.key
+notify-state/
+*.log
+*_test.go
+agent-slinger-notify

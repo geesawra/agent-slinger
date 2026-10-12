@@ -55,10 +55,16 @@ private enum ChatTimelineRow: Identifiable {
     }
   }
 
-  static func grouped(_ messages: [RemoteMessage], hiding hiddenIDs: Set<String>) -> [Self] {
+  static func grouped(
+    _ messages: [RemoteMessage], hiding hiddenIDs: Set<String>,
+    revealing revealedID: String? = nil
+  ) -> [Self] {
     var rows: [Self] = []
     var tools: [RemoteMessage] = []
-    for message in messages where !message.isThinkingTrace && !hiddenIDs.contains(message.id) {
+    for message in messages
+    where message.id == revealedID
+      || (!message.isThinkingTrace && !hiddenIDs.contains(message.id))
+    {
       if message.toolCall != nil {
         tools.append(message)
       } else {
@@ -97,20 +103,23 @@ struct ChatView: View {
     model.providerSubagentsByParent[threadID] ?? []
   }
   private var pendingPermission: RemotePermission? {
-    model.permissions.first { $0.agentID == threadID }
+    model.pendingPermission(for: threadID)
   }
   private var hasExpandedToolCall: Bool {
     !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty
   }
   private var timelineRows: [ChatTimelineRow] {
-    ChatTimelineRow.grouped(model.messages, hiding: model.bufferedAgentMessageIDs)
+    ChatTimelineRow.grouped(
+      model.messages, hiding: model.bufferedAgentMessageIDs,
+      revealing: notificationMessageID)
   }
 
   private var latestThinkingTrace: RemoteMessage? {
     let start =
       model.messages.lastIndex(where: { $0.author == .user })
       .map { model.messages.index(after: $0) } ?? model.messages.startIndex
-    return model.messages[start...].last(where: \.isThinkingTrace)
+    let trace = model.messages[start...].last(where: \.isThinkingTrace)
+    return trace?.id == notificationMessageID ? nil : trace
   }
 
   private var agentActivityMessage: String? {
@@ -128,353 +137,7 @@ struct ChatView: View {
   var body: some View {
     GeometryReader { viewport in
       ScrollViewReader { proxy in
-        ScrollView {
-          LazyVStack(alignment: .leading, spacing: 14) {
-            if model.timelineHasOlder {
-              Button {
-                Task { await model.loadOlderMessages(threadID: threadID) }
-              } label: {
-                HStack {
-                  if model.loadingOlderMessages { ProgressView().padding(.trailing, 6) }
-                  Text("Load earlier messages")
-                }
-                .font(.subheadline.weight(.medium))
-                .frame(maxWidth: .infinity)
-              }
-              .buttonStyle(.bordered)
-              .disabled(model.loadingOlderMessages)
-              .accessibilityIdentifier("load-earlier-messages")
-            }
-
-            if model.connectionState != .connected {
-              ConnectionBanner(model: model)
-            }
-
-            if model.connectionState == .connected && !model.agentControlAvailable(for: threadID) {
-              InlineNotice(
-                text:
-                  "This host has no stable identity. Sending messages and stopping agents are unavailable.",
-                symbol: "exclamationmark.triangle.fill", tint: .orange)
-            }
-
-            if let thread,
-              thread.requiresAttention || thread.state == .waiting || thread.state == .failed
-            {
-              InlineNotice(
-                text: thread.attentionReason
-                  ?? (thread.state == .failed
-                    ? "This agent run failed." : "This agent needs your attention."),
-                symbol: thread.state == .failed
-                  ? "exclamationmark.triangle.fill" : "hand.raised.fill",
-                tint: .orange
-              )
-            }
-
-            if let permission = pendingPermission, permission.questions == nil {
-              PermissionCard(
-                permission: permission,
-                isResponding: model.answeringPermissionID == permission.id,
-                onChoose: { allow in
-                  actionConfirmation = .permission(permission, allow: allow)
-                }
-              )
-            }
-
-            if let error = model.permissionError {
-              InlineNotice(text: error, symbol: "exclamationmark.triangle.fill", tint: .orange)
-            }
-
-            if model.historyMayBeIncomplete {
-              InlineNotice(
-                text:
-                  "This timeline may have a gap. Refresh it after reconnecting to load the latest history.",
-                symbol: "arrow.clockwise",
-                tint: .orange
-              )
-            }
-
-            if let error = model.timelineError {
-              VStack(alignment: .leading, spacing: 8) {
-                InlineNotice(text: error, symbol: "wifi.exclamationmark", tint: .red)
-                Button("Reconnect") { Task { await model.reconnect() } }
-                  .buttonStyle(.bordered)
-                  .disabled(model.connectionState.isBusy)
-              }
-            }
-
-            if model.loadingHistory && model.messages.isEmpty {
-              ProgressView("Loading conversation…")
-                .frame(maxWidth: .infinity, minHeight: 150)
-            } else if model.messages.isEmpty && model.timelineError == nil {
-              ContentUnavailableView(
-                "No messages yet",
-                systemImage: "text.bubble",
-                description: Text("Send a message to start this agent thread.")
-              )
-              .frame(maxWidth: .infinity, minHeight: 150)
-            }
-
-            ForEach(timelineRows) { row in
-              timelineRow(row)
-            }
-
-            if model.loadingHistory && !model.messages.isEmpty {
-              ProgressView().frame(maxWidth: .infinity).padding(.vertical, 8)
-            }
-
-            if let feedback = model.agentSendFeedback(for: threadID), feedback.phase != .accepted {
-              AgentActionStatus(
-                feedback: feedback,
-                identifier: "agent-message-status-\(threadID)",
-                canRetry: model.canRetryAgentMessage(for: threadID),
-                requiresReview: model.requiresAgentMessageReview(for: threadID),
-                isConnected: model.connectionState == .connected,
-                onRetry: { Task { _ = await model.retryAgentMessage(threadID: threadID) } },
-                onReview: {
-                  composerFocused = false
-                  actionSheet = .uncertainSend(threadID: threadID)
-                },
-                onRefresh: nil
-              )
-              .id("agent-message-status-\(threadID)")
-            }
-            if let feedback = model.agentStopFeedback(for: threadID) {
-              AgentActionStatus(
-                feedback: feedback,
-                identifier: "agent-action-status-\(threadID)",
-                canRetry: false,
-                requiresReview: false,
-                isConnected: model.connectionState == .connected,
-                onRetry: nil,
-                onReview: nil,
-                onRefresh: feedback.phase == .stopWaiting
-                  ? {
-                    Task {
-                      if let projectID = model.selectedProjectID {
-                        await model.refreshThreads(projectID: projectID)
-                      }
-                    }
-                  } : nil
-              )
-              .id("agent-action-status-\(threadID)")
-            }
-
-            if let trace = latestThinkingTrace {
-              ThinkingTraceView(
-                message: trace,
-                isUpdating: model.connectionState == .connected && thread?.state == .running,
-                threadID: threadID,
-                timelineGeneration: model.timelineGeneration,
-                loadRemoteImage: { source, imageThreadID in
-                  try await model.loadRemoteImage(source: source, threadID: imageThreadID)
-                }
-              )
-              .id(trace.id)
-              .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let activity = agentActivityMessage {
-              AgentActivityIndicator(message: activity)
-                .id("agent-activity-\(threadID)")
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-
-            if let permission = pendingPermission, let questions = permission.questions {
-              AgentQuestionCard(
-                permission: permission,
-                questions: questions,
-                isResponding: model.answeringPermissionID == permission.id,
-                onSubmit: { answers in
-                  Task { await model.answerQuestion(permission, answers: answers) }
-                },
-                onDismiss: {
-                  Task { await model.answerQuestion(permission, answers: nil) }
-                }
-              )
-              .id(permission.id)
-            }
-
-            Color.clear
-              .frame(height: 1)
-              .id("timeline-bottom")
-          }
-          .padding(.horizontal)
-          .padding(.top, 12)
-          .padding(.bottom, 20)
-          // Keep short conversations at the top of the viewport. Otherwise a
-          // bottom scroll anchor can leave space above the first message.
-          .frame(minHeight: viewport.size.height, alignment: .top)
-          .frame(maxWidth: 900)
-          .frame(maxWidth: .infinity)
-          .animation(
-            reduceMotion ? nil : .easeInOut(duration: 0.22),
-            value: model.bufferedAgentMessageIDs
-          )
-          .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: latestThinkingTrace?.id)
-          .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: agentActivityMessage)
-          .background {
-            // The full stack exists even when the lazy bottom row is offscreen.
-            GeometryReader { geometry in
-              Color.clear.preference(
-                key: ScrollContentFrameKey.self,
-                value: geometry.frame(in: .named("timelineScroll")))
-            }
-          }
-        }
-        .accessibilityIdentifier("chat-timeline-scroll")
-        .modifier(TimelinePerformanceProgress(streamBytes: model.performanceFixtureStreamBytes))
-        .coordinateSpace(name: "timelineScroll")
-        .scrollDismissesKeyboard(.interactively)
-        .modifier(
-          TimelineScrollTracking(
-            readerIntent: $readerIntent,
-            viewportHeight: viewport.size.height,
-            hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
-        )
-        .onAppear {
-          // Cached history does not change when this view returns. Reapply the
-          // anchor after layout so lazy rows materialize without a scroll gesture.
-          if !model.messages.isEmpty { followLatestIfNeeded(proxy) }
-        }
-        .onChange(of: model.timelineStructureRevision) { _, _ in
-          let standaloneToolCallIDs = Set(
-            timelineRows.compactMap { row -> String? in
-              if case .tools(let messages) = row, messages.count == 1 {
-                return messages.first?.id
-              }
-              return nil
-            })
-          expandedToolCallIDs.formIntersection(standaloneToolCallIDs)
-          let runningStandaloneIDs = Set(
-            timelineRows.compactMap { row -> String? in
-              if case .tools(let messages) = row, messages.count == 1,
-                let message = messages.first, message.toolCall?.status == .running
-              {
-                return message.id
-              }
-              return nil
-            })
-          collapsedRunningToolCallIDs.formIntersection(runningStandaloneIDs)
-          let liveGroupIDs = Set(
-            timelineRows.compactMap { row -> String? in
-              if case .tools(let messages) = row, messages.count > 1 { return row.id }
-              return nil
-            })
-          expandedToolGroupIDs.formIntersection(liveGroupIDs)
-          followLatestIfNeeded(proxy)
-        }
-        .onChange(of: threadID) { _, _ in
-          expandedToolCallIDs.removeAll()
-          collapsedRunningToolCallIDs.removeAll()
-          expandedToolGroupIDs.removeAll()
-          readerIntent = TimelineReaderIntent()
-        }
-        .onChange(of: thread?.requiresAttention) { _, requiresAttention in
-          guard requiresAttention == true else { return }
-          Task { await model.markThreadRead(threadID, reportsFailure: false) }
-        }
-        .onChange(of: model.selectedThreadID) { _, selectedID in
-          if selectedID != threadID {
-            actionConfirmation = nil
-            actionSheet = nil
-          }
-        }
-        .onChange(of: model.connectionState) { _, state in
-          if state != .connected {
-            actionConfirmation = nil
-            actionSheet = nil
-          }
-        }
-        .onChange(of: model.messages.last) { oldValue, newValue in
-          guard newValue != nil else { return }
-          if oldValue == nil {
-            // Initial history has no prior reading position, including on the
-            // iOS 17 baseline without separate scroll-anchor roles.
-            readerIntent.followLatest = true
-            proxy.scrollTo("timeline-bottom", anchor: .bottom)
-          } else {
-            followLatestIfNeeded(proxy)
-          }
-        }
-        .onChange(of: pendingPermission) { _, _ in followLatestIfNeeded(proxy) }
-        .onChange(of: latestThinkingTrace) { _, _ in followLatestIfNeeded(proxy) }
-        .onChange(of: agentActivityMessage) { _, _ in followLatestIfNeeded(proxy) }
-        .onChange(of: model.bufferedAgentMessageIDs) { _, _ in followLatestIfNeeded(proxy) }
-        .onChange(of: viewport.size.height) { oldHeight, newHeight in
-          if newHeight < oldHeight { followLatestIfNeeded(proxy) }
-        }
-        .modifier(
-          TimelineJumpControls(
-            readerIntent: $readerIntent, proxy: proxy,
-            hasMessages: !model.messages.isEmpty, reduceMotion: reduceMotion)
-        )
-        .navigationTitle(thread?.title ?? "Agent thread")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-          ToolbarItem(placement: .topBarTrailing) {
-            Button {
-              composerFocused = false
-              showsSessionInfo = true
-            } label: {
-              ContextUsageIndicator(
-                usage: model.contextUsage(for: threadID),
-                isLoading: model.loadingContextUsage,
-                showsDisclosureIndicator: false
-              )
-              .frame(width: 32, height: 32)
-            }
-            .accessibilityHint("Shows the session status, details, and usage.")
-            .accessibilityIdentifier("context-usage-button")
-          }
-        }
-        .sheet(isPresented: $showsSessionInfo) {
-          SessionInfoSheet(model: model, threadID: threadID)
-        }
-        .sheet(item: $actionSheet) { action in
-          AgentActionSheetView(
-            action: action,
-            canRetry: model.canRetryAgentMessage(for: threadID),
-            isConnected: model.connectionState == .connected,
-            onRetry: { confirmedThreadID in
-              actionSheet = nil
-              composerFocused = false
-              Task { _ = await model.retryAgentMessage(threadID: confirmedThreadID) }
-            },
-            onClearWarning: { confirmedThreadID in
-              model.discardUncertainAgentMessage(threadID: confirmedThreadID)
-              actionSheet = nil
-              composerFocused = false
-            }
-          )
-          .presentationDetents([.large])
-        }
-        .task(id: "\(threadID)-\(model.timelineGeneration)") {
-          await observeTimeline()
-        }
-        .alert(
-          actionConfirmation?.title ?? "Agent action",
-          isPresented: presentsActionConfirmation,
-          presenting: actionConfirmation
-        ) { action in
-          switch action {
-          case .stop(let confirmedThreadID, let revision):
-            Button("Stop agent", role: .destructive) {
-              actionConfirmation = nil
-              Task {
-                await model.stopAgent(threadID: confirmedThreadID, expectedStateRevision: revision)
-              }
-            }
-            Button("Cancel", role: .cancel) { actionConfirmation = nil }
-          case .permission(let permission, let allow):
-            let label =
-              allow ? (permission.allowLabel ?? "Allow") : (permission.denyLabel ?? "Deny")
-            Button(label, role: allow ? nil : .destructive) {
-              actionConfirmation = nil
-              Task { await model.answerPermission(permission, allow: allow) }
-            }
-            Button("Cancel", role: .cancel) { actionConfirmation = nil }
-          }
-        } message: { action in
-          Text(action.message)
-        }
+        conversationScroll(viewportHeight: viewport.size.height, proxy: proxy)
       }
     }
     .safeAreaInset(edge: .bottom, spacing: 0) { composerBar }
@@ -502,6 +165,196 @@ struct ChatView: View {
         await model.refreshProviderSubagents(parentAgentID: threadID)
       }
     }
+  }
+
+  private func timelineScroll(viewportHeight: CGFloat) -> some View {
+    ScrollView {
+      timelineContent(viewportHeight: viewportHeight)
+    }
+    .accessibilityIdentifier("chat-timeline-scroll")
+    .modifier(TimelinePerformanceProgress(streamBytes: model.performanceFixtureStreamBytes))
+    .coordinateSpace(name: "timelineScroll")
+    .scrollDismissesKeyboard(.interactively)
+    .modifier(
+      TimelineScrollTracking(
+        readerIntent: $readerIntent,
+        viewportHeight: viewportHeight,
+        hasExpandedToolCall: !expandedToolCallIDs.isEmpty || !expandedToolGroupIDs.isEmpty)
+    )
+  }
+
+  private func observedTimelineScroll(viewportHeight: CGFloat, proxy: ScrollViewProxy) -> some View
+  {
+    timelineScroll(viewportHeight: viewportHeight)
+      .task(id: model.openLinkHighlight?.id) {
+        await scrollToNotification(proxy)
+      }
+      .onAppear {
+        // Cached history does not change when this view returns. Reapply the
+        // anchor after layout so lazy rows materialize without a scroll gesture.
+        if !model.messages.isEmpty { followLatestIfNeeded(proxy) }
+      }
+      .onChange(of: model.timelineStructureRevision) { _, _ in
+        let standaloneToolCallIDs = Set(
+          timelineRows.compactMap { row -> String? in
+            if case .tools(let messages) = row, messages.count == 1 {
+              return messages.first?.id
+            }
+            return nil
+          })
+        expandedToolCallIDs.formIntersection(standaloneToolCallIDs)
+        let runningStandaloneIDs = Set(
+          timelineRows.compactMap { row -> String? in
+            if case .tools(let messages) = row, messages.count == 1,
+              let message = messages.first, message.toolCall?.status == .running
+            {
+              return message.id
+            }
+            return nil
+          })
+        collapsedRunningToolCallIDs.formIntersection(runningStandaloneIDs)
+        let liveGroupIDs = Set(
+          timelineRows.compactMap { row -> String? in
+            if case .tools(let messages) = row, messages.count > 1 { return row.id }
+            return nil
+          })
+        expandedToolGroupIDs.formIntersection(liveGroupIDs)
+        followLatestIfNeeded(proxy)
+      }
+      .onChange(of: threadID) { _, _ in
+        expandedToolCallIDs.removeAll()
+        collapsedRunningToolCallIDs.removeAll()
+        expandedToolGroupIDs.removeAll()
+        readerIntent = TimelineReaderIntent()
+      }
+      .onChange(of: thread?.requiresAttention) { _, requiresAttention in
+        guard requiresAttention == true else { return }
+        Task { await model.markThreadRead(threadID, reportsFailure: false) }
+      }
+      .onChange(of: model.selectedThreadID) { _, selectedID in
+        if selectedID != threadID {
+          actionConfirmation = nil
+          actionSheet = nil
+        }
+      }
+      .onChange(of: model.connectionState) { _, state in
+        if state != .connected {
+          actionConfirmation = nil
+          actionSheet = nil
+        }
+      }
+  }
+
+  private func followingTimelineScroll(viewportHeight: CGFloat, proxy: ScrollViewProxy) -> some View
+  {
+    observedTimelineScroll(viewportHeight: viewportHeight, proxy: proxy)
+      .onChange(of: model.messages.last) { oldValue, newValue in
+        guard newValue != nil else { return }
+        if oldValue == nil {
+          // Initial history has no prior reading position, including on the
+          // iOS 17 baseline without separate scroll-anchor roles.
+          readerIntent.followLatest = true
+          proxy.scrollTo("timeline-bottom", anchor: .bottom)
+        } else {
+          followLatestIfNeeded(proxy)
+        }
+      }
+      .onChange(of: pendingPermission) { _, _ in followLatestIfNeeded(proxy) }
+      .onChange(of: latestThinkingTrace) { _, _ in followLatestIfNeeded(proxy) }
+      .onChange(of: agentActivityMessage) { _, _ in followLatestIfNeeded(proxy) }
+      .onChange(of: model.bufferedAgentMessageIDs) { _, _ in followLatestIfNeeded(proxy) }
+      .onChange(of: viewportHeight) { oldHeight, newHeight in
+        if newHeight < oldHeight { followLatestIfNeeded(proxy) }
+      }
+      .modifier(
+        TimelineJumpControls(
+          readerIntent: $readerIntent, proxy: proxy,
+          hasMessages: !model.messages.isEmpty, reduceMotion: reduceMotion)
+      )
+  }
+
+  private func conversationScroll(viewportHeight: CGFloat, proxy: ScrollViewProxy) -> some View {
+    followingTimelineScroll(viewportHeight: viewportHeight, proxy: proxy)
+      .navigationTitle(thread?.title ?? "Agent thread")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button {
+            composerFocused = false
+            showsSessionInfo = true
+          } label: {
+            ContextUsageIndicator(
+              usage: model.contextUsage(for: threadID),
+              isLoading: model.loadingContextUsage,
+              showsDisclosureIndicator: false
+            )
+            .frame(width: 32, height: 32)
+          }
+          .accessibilityHint("Shows the session status, details, and usage.")
+          .accessibilityIdentifier("context-usage-button")
+        }
+      }
+      .sheet(isPresented: $showsSessionInfo) {
+        SessionInfoSheet(model: model, threadID: threadID)
+      }
+      .sheet(item: $actionSheet) { action in
+        AgentActionSheetView(
+          action: action,
+          canRetry: model.canRetryAgentMessage(for: threadID),
+          isConnected: model.connectionState == .connected,
+          onRetry: { confirmedThreadID in
+            actionSheet = nil
+            composerFocused = false
+            Task { _ = await model.retryAgentMessage(threadID: confirmedThreadID) }
+          },
+          onClearWarning: { confirmedThreadID in
+            model.discardUncertainAgentMessage(threadID: confirmedThreadID)
+            actionSheet = nil
+            composerFocused = false
+          }
+        )
+        .presentationDetents([.large])
+      }
+      .task(id: "\(threadID)-\(model.timelineGeneration)") {
+        await observeTimeline()
+      }
+      .alert(
+        actionConfirmation?.title ?? "Agent action",
+        isPresented: presentsActionConfirmation,
+        presenting: actionConfirmation
+      ) { action in
+        switch action {
+        case .stop(let confirmedThreadID, let revision):
+          Button("Stop agent", role: .destructive) {
+            actionConfirmation = nil
+            Task {
+              await model.stopAgent(threadID: confirmedThreadID, expectedStateRevision: revision)
+            }
+          }
+          Button("Cancel", role: .cancel) { actionConfirmation = nil }
+        case .permission(let permission, let allow):
+          let label =
+            allow ? (permission.allowLabel ?? "Allow") : (permission.denyLabel ?? "Deny")
+          Button(label, role: allow ? nil : .destructive) {
+            actionConfirmation = nil
+            Task { await model.answerPermission(permission, allow: allow) }
+          }
+          Button("Cancel", role: .cancel) { actionConfirmation = nil }
+        }
+      } message: { action in
+        Text(action.message)
+      }
+  }
+
+  private func scrollToNotification(_ proxy: ScrollViewProxy) async {
+    guard model.openLinkHighlight?.agentID == threadID else { return }
+    let target =
+      notificationRowID ?? notificationPermissionID.map { "notification-permission-\($0)" }
+    guard let target else { return }
+    readerIntent.followLatest = false
+    await Task.yield()
+    guard !Task.isCancelled else { return }
+    proxy.scrollTo(target, anchor: .center)
   }
 
   private func observeTimeline() async {
@@ -625,6 +478,240 @@ struct ChatView: View {
         .id(message.id)
       }
     }
+  }
+
+  private func timelineContent(viewportHeight: CGFloat) -> some View {
+    LazyVStack(alignment: .leading, spacing: 14) {
+      timelineHeader
+
+      ForEach(timelineRows) { row in
+        timelineRow(row)
+          .background(notificationRowID == row.id ? Color.accentColor.opacity(0.14) : .clear)
+      }
+
+      timelineFooter
+
+      Color.clear
+        .frame(height: 1)
+        .id("timeline-bottom")
+    }
+    .padding(.horizontal)
+    .padding(.top, 12)
+    .padding(.bottom, 20)
+    // Keep short conversations at the top of the viewport. Otherwise a
+    // bottom scroll anchor can leave space above the first message.
+    .frame(minHeight: viewportHeight, alignment: .top)
+    .frame(maxWidth: 900)
+    .frame(maxWidth: .infinity)
+    .animation(
+      reduceMotion ? nil : .easeInOut(duration: 0.22),
+      value: model.bufferedAgentMessageIDs
+    )
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: latestThinkingTrace?.id)
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: agentActivityMessage)
+    .background {
+      // The full stack exists even when the lazy bottom row is offscreen.
+      GeometryReader { geometry in
+        Color.clear.preference(
+          key: ScrollContentFrameKey.self,
+          value: geometry.frame(in: .named("timelineScroll")))
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var timelineHeader: some View {
+    if model.timelineHasOlder {
+      Button {
+        Task { await model.loadOlderMessages(threadID: threadID) }
+      } label: {
+        HStack {
+          if model.loadingOlderMessages { ProgressView().padding(.trailing, 6) }
+          Text("Load earlier messages")
+        }
+        .font(.subheadline.weight(.medium))
+        .frame(maxWidth: .infinity)
+      }
+      .buttonStyle(.bordered)
+      .disabled(model.loadingOlderMessages)
+      .accessibilityIdentifier("load-earlier-messages")
+    }
+
+    if model.connectionState != .connected {
+      ConnectionBanner(model: model)
+    }
+
+    if model.connectionState == .connected && !model.agentControlAvailable(for: threadID) {
+      InlineNotice(
+        text:
+          "This host has no stable identity. Sending messages and stopping agents are unavailable.",
+        symbol: "exclamationmark.triangle.fill", tint: .orange)
+    }
+
+    if let thread,
+      thread.requiresAttention || thread.state == .waiting || thread.state == .failed
+    {
+      InlineNotice(
+        text: thread.attentionReason
+          ?? (thread.state == .failed
+            ? "This agent run failed." : "This agent needs your attention."),
+        symbol: thread.state == .failed
+          ? "exclamationmark.triangle.fill" : "hand.raised.fill",
+        tint: .orange
+      )
+    }
+
+    if let permission = pendingPermission, permission.questions == nil {
+      PermissionCard(
+        permission: permission,
+        isResponding: model.answeringPermissionID == permission.id,
+        onChoose: { allow in
+          actionConfirmation = .permission(permission, allow: allow)
+        }
+      )
+      .id("notification-permission-\(permission.id)")
+      .background(
+        notificationPermissionID == permission.id ? Color.accentColor.opacity(0.14) : .clear
+      )
+    }
+
+    if let error = model.permissionError {
+      InlineNotice(text: error, symbol: "exclamationmark.triangle.fill", tint: .orange)
+    }
+
+    if model.historyMayBeIncomplete {
+      InlineNotice(
+        text:
+          "This timeline may have a gap. Refresh it after reconnecting to load the latest history.",
+        symbol: "arrow.clockwise",
+        tint: .orange
+      )
+    }
+
+    if let error = model.timelineError {
+      VStack(alignment: .leading, spacing: 8) {
+        InlineNotice(text: error, symbol: "wifi.exclamationmark", tint: .red)
+        Button("Reconnect") { Task { await model.reconnect() } }
+          .buttonStyle(.bordered)
+          .disabled(model.connectionState.isBusy)
+      }
+    }
+
+    if model.loadingHistory && model.messages.isEmpty {
+      ProgressView("Loading conversation…")
+        .frame(maxWidth: .infinity, minHeight: 150)
+    } else if model.messages.isEmpty && model.timelineError == nil {
+      ContentUnavailableView(
+        "No messages yet",
+        systemImage: "text.bubble",
+        description: Text("Send a message to start this agent thread.")
+      )
+      .frame(maxWidth: .infinity, minHeight: 150)
+    }
+  }
+
+  @ViewBuilder
+  private var timelineFooter: some View {
+    if model.loadingHistory && !model.messages.isEmpty {
+      ProgressView().frame(maxWidth: .infinity).padding(.vertical, 8)
+    }
+
+    if let feedback = model.agentSendFeedback(for: threadID), feedback.phase != .accepted {
+      AgentActionStatus(
+        feedback: feedback,
+        identifier: "agent-message-status-\(threadID)",
+        canRetry: model.canRetryAgentMessage(for: threadID),
+        requiresReview: model.requiresAgentMessageReview(for: threadID),
+        isConnected: model.connectionState == .connected,
+        onRetry: { Task { _ = await model.retryAgentMessage(threadID: threadID) } },
+        onReview: {
+          composerFocused = false
+          actionSheet = .uncertainSend(threadID: threadID)
+        },
+        onRefresh: nil
+      )
+      .id("agent-message-status-\(threadID)")
+    }
+    if let feedback = model.agentStopFeedback(for: threadID) {
+      AgentActionStatus(
+        feedback: feedback,
+        identifier: "agent-action-status-\(threadID)",
+        canRetry: false,
+        requiresReview: false,
+        isConnected: model.connectionState == .connected,
+        onRetry: nil,
+        onReview: nil,
+        onRefresh: feedback.phase == .stopWaiting
+          ? {
+            Task {
+              if let projectID = model.selectedProjectID {
+                await model.refreshThreads(projectID: projectID)
+              }
+            }
+          } : nil
+      )
+      .id("agent-action-status-\(threadID)")
+    }
+
+    if let trace = latestThinkingTrace {
+      ThinkingTraceView(
+        message: trace,
+        isUpdating: model.connectionState == .connected && thread?.state == .running,
+        threadID: threadID,
+        timelineGeneration: model.timelineGeneration,
+        loadRemoteImage: { source, imageThreadID in
+          try await model.loadRemoteImage(source: source, threadID: imageThreadID)
+        }
+      )
+      .id(trace.id)
+      .transition(.move(edge: .bottom).combined(with: .opacity))
+    } else if let activity = agentActivityMessage {
+      AgentActivityIndicator(message: activity)
+        .id("agent-activity-\(threadID)")
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    if let permission = pendingPermission, let questions = permission.questions {
+      AgentQuestionCard(
+        permission: permission,
+        questions: questions,
+        isResponding: model.answeringPermissionID == permission.id,
+        onSubmit: { answers in
+          Task { await model.answerQuestion(permission, answers: answers) }
+        },
+        onDismiss: {
+          Task { await model.answerQuestion(permission, answers: nil) }
+        }
+      )
+      .id("notification-permission-\(permission.id)")
+      .background(
+        notificationPermissionID == permission.id ? Color.accentColor.opacity(0.14) : .clear
+      )
+    }
+  }
+
+  private var notificationPermissionID: String? {
+    guard model.openLinkHighlight?.agentID == threadID,
+      case .permission(let id) = model.openLinkHighlight?.target
+    else { return nil }
+    return id
+  }
+
+  private var notificationMessageID: String? {
+    guard model.openLinkHighlight?.agentID == threadID,
+      case .message(let id) = model.openLinkHighlight?.target
+    else { return nil }
+    return id
+  }
+
+  private var notificationRowID: String? {
+    guard let id = notificationMessageID else { return nil }
+    return timelineRows.first { row in
+      switch row {
+      case .message(let message): return message.id == id
+      case .tools(let messages): return messages.contains { $0.id == id }
+      }
+    }?.id
   }
 
   private func followLatestIfNeeded(_ proxy: ScrollViewProxy) {

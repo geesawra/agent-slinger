@@ -4,6 +4,20 @@ import XCTest
 @testable import Oesap
 
 final class ConnectionStoreTests: XCTestCase {
+  func testAuthenticatedServerIdentitySurvivesReloadAndCredentialUpdate() throws {
+    let storage = MemoryConnectionStoreStorage()
+    let store = ConnectionStore(storage: storage)
+    let config = try PaseoConnectionConfig.direct(
+      endpoint: "host.example:6767", useTLS: true, password: "secret")
+    let record = try store.saveAndSelect(config, name: "Host")
+    XCTAssertNil(record.summary.serverID)
+    try store.recordServerID("verified-server", for: record.id)
+    XCTAssertEqual(
+      try ConnectionStore(storage: storage).list().first?.summary.serverID, "verified-server")
+    _ = try store.saveAndSelect(config, name: "Renamed")
+    XCTAssertEqual(try store.list().first?.summary.serverID, "verified-server")
+  }
+
   func testMissingKeychainEntitlementReportsActionableSafeStatus() {
     let description = PaseoConnectionError.keychainFailure(-34018).localizedDescription
     XCTAssertTrue(description.contains("Keychain access entitlements"))

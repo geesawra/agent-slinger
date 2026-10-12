@@ -245,6 +245,46 @@ final class ProtocolClientTests: XCTestCase {
     XCTAssertFalse(result.safeToRestart)
     await client.disconnect()
   }
+  func testNotificationLookupUsesAuthoritativeWorkspaceAndRejectsPrefixMatches() async throws {
+    let transport = FixturePaseoTransport()
+    let client = PaseoProtocolClient(transport: transport)
+    try await connect(client, transport: transport)
+    for requestedID in ["agent-1", "agent"] {
+      let lookup = Task { try await client.fetchAgent(agentID: requestedID) }
+      let request = try await nextRequest(transport)
+      XCTAssertEqual(request.message["type"] as? String, "fetch_agent_request")
+      XCTAssertEqual(request.message["agentId"] as? String, requestedID)
+      await transport.push(
+        sessionFrame(
+          type: "fetch_agent_response",
+          payload:
+            #"{"requestId":"\#(request.requestID)","agent":{"id":"agent-1","workspaceId":"workspace-distinct","provider":"codex","title":"Fixture","model":null,"status":"idle","cwd":"/fixture","createdAt":"2026-10-12T00:00:00Z","updatedAt":"2026-10-12T00:00:00Z","pendingPermissions":[],"requiresAttention":false},"project":{"projectKey":"project-distinct","projectName":"Fixture"},"error":null}"#
+        ))
+      if requestedID == "agent-1" {
+        let thread = try await lookup.value
+        XCTAssertEqual(thread?.workspaceID, "workspace-distinct")
+        XCTAssertEqual(thread?.projectKey, "project-distinct")
+      } else {
+        do {
+          _ = try await lookup.value
+          XCTFail("Notification lookup must reject prefix/title matches")
+        } catch let error as PaseoProtocolError {
+          XCTAssertEqual(error, .malformedMessage("agent lookup returned a different identity"))
+        }
+      }
+    }
+    let missing = Task { try await client.fetchAgent(agentID: "deleted") }
+    let request = try await nextRequest(transport)
+    await transport.push(
+      sessionFrame(
+        type: "fetch_agent_response",
+        payload:
+          #"{"requestId":"\#(request.requestID)","agent":null,"project":null,"error":null}"#))
+    let missingThread = try await missing.value
+    XCTAssertNil(missingThread)
+    await client.disconnect()
+  }
+
   func testHelloNegotiatesProviderVisibilityAndCorrelatedProjectThreadRequests() async throws {
     let transport = FixturePaseoTransport()
     let client = PaseoProtocolClient(transport: transport, clientID: "oesap-fixture")

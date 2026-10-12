@@ -29,6 +29,7 @@ struct SavedPaseoInstance: Identifiable, Sendable, Equatable {
   var id: String
   var name: String
   var subtitle: String
+  var serverID: String? = nil
 }
 
 struct RemoteProject: Identifiable, Sendable, Equatable {
@@ -278,6 +279,8 @@ struct RemoteThread: Identifiable, Sendable, Equatable {
   var contextUsage: RemoteContextUsage? = nil
   var cwd: String? = nil
   var parentAgentID: String? = nil
+  var workspaceID: String? = nil
+  var projectID: String? = nil
 }
 
 struct RemoteProviderSubagent: Identifiable, Sendable, Equatable {
@@ -524,6 +527,7 @@ protocol OesapRemoteService: Sendable {
   func directoryEntries(cwd: String?) async throws -> [RemoteDirectoryEntry]
   func gitStatus(cwd: String) async throws -> RemoteGitStatus
   func addProject(path: String) async throws -> RemoteProject
+  func agentForOpenIntent(agentID: String) async throws -> RemoteThread?
   func threads(projectID: String) async throws -> [RemoteThread]
   func archiveThread(agentID: String) async throws
   func markThreadRead(agentID: String) async throws
@@ -547,6 +551,9 @@ protocol OesapRemoteService: Sendable {
 }
 
 extension OesapRemoteService {
+  func agentForOpenIntent(agentID: String) async throws -> RemoteThread? {
+    throw RemoteServiceError.unavailable("This host does not support notification navigation.")
+  }
   func gitStatus(cwd: String) async throws -> RemoteGitStatus {
     throw RemoteServiceError.unavailable("This host does not support repository changes.")
   }
@@ -695,7 +702,12 @@ enum RemoteServiceError: LocalizedError, Sendable {
       if ProcessInfo.processInfo.arguments.contains("--demo-saved-connection") {
         let instanceID = "demo-saved-instance"
         savedInstances = [
-          SavedPaseoInstance(id: instanceID, name: "Demo host", subtitle: "Demo connection")
+          SavedPaseoInstance(
+            id: instanceID, name: "Demo host", subtitle: "Demo connection",
+            serverID: ProcessInfo.processInfo.arguments.first(where: {
+              $0.hasPrefix("--demo-server-id=")
+            })
+            .map { String($0.dropFirst("--demo-server-id=".count)) } ?? "oesap-demo-host")
         ]
         selectedInstanceID = instanceID
       }
@@ -1120,6 +1132,17 @@ enum RemoteServiceError: LocalizedError, Sendable {
         continuation.yield(
           closed ? .disconnected("The demo connection has been closed.") : .connected)
       }
+    }
+
+    func agentForOpenIntent(agentID: String) async throws -> RemoteThread? {
+      for projectID in ["demo-project", "demo-tools-project"] {
+        if var thread = try await threads(projectID: projectID).first(where: { $0.id == agentID }) {
+          thread.projectID = projectID
+          thread.workspaceID = "workspace-" + projectID
+          return thread
+        }
+      }
+      return nil
     }
 
     func threads(projectID: String) async throws -> [RemoteThread] {

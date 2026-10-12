@@ -26,6 +26,228 @@ final class FeatureStateTests: XCTestCase {
       RemoteConnection.empty.usesTLS, "ATS permission must not change the user's TLS choice.")
   }
 
+  private func notificationURL(
+    agent: String = "thread-B", workspace: String = "workspace-B",
+    server: String = "fixture-host", anchor: String = ""
+  ) -> URL {
+    URL(
+      string:
+        "agentslinger://open?v=1&serverId=\(server)&workspaceId=\(workspace)&agentId=\(agent)\(anchor)"
+    )!
+  }
+
+  func testNotificationColdLaunchSelectsSavedHostAndAuthoritativeProject() async {
+    let service = FakeRemoteService()
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "saved", name: "Host", subtitle: "", serverID: "fixture-host")
+        ],
+        instanceServices: ["saved": service]))
+    await model.openNotificationURL(notificationURL())
+    XCTAssertEqual(model.activeInstanceID, "saved")
+    XCTAssertEqual(model.selectedProjectID, "B")
+    XCTAssertEqual(model.selectedThreadID, "thread-B")
+    XCTAssertEqual(model.openLinkNavigation?.route, .chat("thread-B"))
+    XCTAssertNil(model.pendingOpenIntent)
+    await model.disconnect()
+  }
+
+  func testNotificationUnknownHostRetainsIntentUntilManualConnection() async {
+    let service = FakeRemoteService()
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.openNotificationURL(notificationURL())
+    XCTAssertEqual(model.connectionState, .disconnected)
+    XCTAssertNotNil(model.pendingOpenIntent)
+    XCTAssertEqual(model.openLinkNavigation?.route, .notificationConnection)
+    XCTAssertNil(model.openLinkNotice)
+    await model.connect(.empty)
+    for _ in 0..<100 where model.selectedThreadID != "thread-B" { await Task.yield() }
+    XCTAssertEqual(model.selectedThreadID, "thread-B")
+    XCTAssertNil(model.pendingOpenIntent)
+    await model.disconnect()
+  }
+
+  func testDismissedUnknownServerPromptKeepsIntentWithoutPresentingAgain() async {
+    let other = FakeRemoteService(serverIDValue: "other-host")
+    let target = FakeRemoteService()
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(connectServices: [other, target]))
+    await model.openNotificationURL(notificationURL())
+    model.dismissNotificationConnectionPrompt()
+    XCTAssertNotNil(model.pendingOpenIntent)
+    XCTAssertNil(model.openLinkNavigation)
+
+    await model.connect(.empty)
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertNil(model.openLinkNavigation)
+    XCTAssertNil(model.openLinkNotice)
+    XCTAssertNotNil(model.pendingOpenIntent)
+
+    await model.connect(.empty)
+    let opened = await eventually { model.selectedThreadID == "thread-B" }
+    XCTAssertTrue(opened)
+    XCTAssertNil(model.pendingOpenIntent)
+    await model.disconnect()
+  }
+
+  func testOpeningLinkAgainShowsDismissedUnknownServerPrompt() async {
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: []))
+    await model.openNotificationURL(notificationURL())
+    model.dismissNotificationConnectionPrompt()
+    await model.openNotificationURL(notificationURL())
+    XCTAssertEqual(model.openLinkNavigation?.route, .notificationConnection)
+    XCTAssertNotNil(model.pendingOpenIntent)
+  }
+
+  func testNotificationRejectsSavedHostHandshakeMismatch() async {
+    let service = FakeRemoteService(serverIDValue: "impostor")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "saved", name: "Host", subtitle: "", serverID: "fixture-host")
+        ],
+        instanceServices: ["saved": service]))
+    await model.openNotificationURL(notificationURL())
+    XCTAssertNil(model.selectedThreadID)
+    XCTAssertTrue(model.openLinkNotice?.contains("identity") == true)
+    XCTAssertNotNil(model.pendingOpenIntent)
+    await model.disconnect()
+  }
+
+  func testNotificationWorkspaceMismatchDoesNotTreatWorkspaceAsProject() async {
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(connectServices: [FakeRemoteService()]))
+    await model.start()
+    await model.connect(.empty)
+    await model.openNotificationURL(notificationURL(workspace: "B"))
+    XCTAssertNil(model.selectedThreadID)
+    XCTAssertEqual(model.openLinkNavigation?.route, .agentOverview)
+    XCTAssertNotNil(model.openLinkNotice)
+    await model.disconnect()
+  }
+
+  func testNotificationOlderMessageAndResolvedPermissionAnchors() async {
+    let old = RemoteMessage(id: "older", author: .agent, text: "Earlier", timestamp: nil)
+    let service = FakeRemoteService(olderMessages: [old])
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.start()
+    await model.connect(.empty)
+    await model.openNotificationURL(notificationURL(anchor: "&messageId=older"))
+    for _ in 0..<100 where model.openLinkHighlight == nil { await Task.yield() }
+    XCTAssertEqual(model.openLinkHighlight?.target, .message("older"))
+    XCTAssertTrue(model.messages.contains { $0.id == "older" })
+    await model.openNotificationURL(notificationURL(anchor: "&permissionId=resolved"))
+    XCTAssertNil(model.openLinkHighlight)
+    XCTAssertTrue(model.openLinkNotice?.contains("no longer pending") == true)
+    await model.disconnect()
+  }
+
+  func testNewNotificationSupersedesInFlightAgentLookup() async {
+    let gate = TestGate()
+    let service = FakeRemoteService(openAgentGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.start()
+    await model.connect(.empty)
+    let first = Task { await model.openNotificationURL(notificationURL()) }
+    await gate.waitUntilEntered()
+    await model.openNotificationURL(notificationURL(agent: "thread-A", workspace: "workspace-A"))
+    await gate.open()
+    await first.value
+    for _ in 0..<100 where model.selectedThreadID != "thread-A" { await Task.yield() }
+    XCTAssertEqual(model.selectedThreadID, "thread-A")
+    XCTAssertEqual(model.openLinkNavigation?.route, .chat("thread-A"))
+    await model.disconnect()
+  }
+
+  func testNotificationSelectsSecondPendingPermissionWithoutAnsweringIt() async {
+    let permissions = ["first", "second"].map {
+      RemotePermission(
+        id: $0, agentID: "thread-B", title: $0, detail: nil,
+        kind: "permission", supportsSimpleDecision: true, allowActionID: "allow",
+        denyActionID: "deny", allowLabel: nil, denyLabel: nil)
+    }
+    let service = FakeRemoteService(openPermissions: permissions)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.start()
+    await model.connect(.empty)
+    await model.openNotificationURL(notificationURL(anchor: "&permissionId=second"))
+    for _ in 0..<100 where model.openLinkHighlight == nil { await Task.yield() }
+    XCTAssertEqual(model.pendingPermission(for: "thread-B")?.id, "second")
+    XCTAssertEqual(model.selectedPermission?.id, "second")
+    let answers = await service.permissionAnswerCount()
+    XCTAssertEqual(answers, 0)
+    await model.disconnect()
+    XCTAssertNil(model.openLinkHighlight)
+  }
+
+  func testNotificationMissingAnchorStopsAfterFivePages() async {
+    let service = FakeRemoteService(endlessOlderPages: true)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.start()
+    await model.connect(.empty)
+    await model.openNotificationURL(notificationURL(anchor: "&messageId=missing"))
+    for _ in 0..<100 where model.openLinkNotice == nil { await Task.yield() }
+    let pages = await service.olderPageCallCount()
+    XCTAssertEqual(pages, 5)
+    XCTAssertNil(model.openLinkHighlight)
+    XCTAssertEqual(model.selectedThreadID, "thread-B")
+    XCTAssertTrue(model.openLinkNotice?.contains("not found") == true)
+    await model.disconnect()
+  }
+
+  func testManualSelectionSupersedesInFlightNotificationLookup() async {
+    let gate = TestGate()
+    let service = FakeRemoteService(openAgentGate: gate)
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.start()
+    await model.connect(.empty)
+    let opening = Task { await model.openNotificationURL(notificationURL()) }
+    await gate.waitUntilEntered()
+    model.selectThread("thread-A")
+    await gate.open()
+    await opening.value
+    XCTAssertEqual(model.selectedThreadID, "thread-A")
+    XCTAssertNil(model.openLinkNavigation)
+    await model.disconnect()
+  }
+
+  func testWarmNotificationSwitchesToMatchingSavedHost() async {
+    let first = FakeRemoteService(serverIDValue: "other-host")
+    let second = FakeRemoteService()
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "other", name: "Other", subtitle: "", serverID: "other-host"),
+          .init(id: "target", name: "Target", subtitle: "", serverID: "fixture-host"),
+        ], activeInstanceID: "other", instanceServices: ["other": first, "target": second]))
+    await model.start()
+    XCTAssertEqual(model.activeInstanceID, "other")
+    await model.openNotificationURL(notificationURL())
+    XCTAssertEqual(model.activeInstanceID, "target")
+    XCTAssertEqual(model.selectedThreadID, "thread-B")
+    await model.disconnect()
+  }
+
+  func testWarmNotificationRefreshesMissingProjectOnce() async {
+    let first = RemoteProject(id: "A", name: "A", subtitle: nil)
+    let created = RemoteProject(id: "B", name: "B", subtitle: nil)
+    let service = FakeRemoteService(projects: [first], projectsAfterFirstCall: [first, created])
+    let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
+    await model.start()
+    await model.connect(.empty)
+    XCTAssertEqual(model.projects.map(\.id), ["A"])
+    await model.openNotificationURL(notificationURL())
+    XCTAssertEqual(model.selectedProjectID, "B")
+    XCTAssertEqual(model.selectedThreadID, "thread-B")
+    let requests = await service.projectCallCount()
+    XCTAssertEqual(requests, 2)
+    await model.disconnect()
+  }
+
   func testDraftChangeInvalidatesViewObservation() async {
     let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: []))
     let changed = expectation(description: "A view reading the draft is invalidated")
@@ -2004,6 +2226,11 @@ private actor FakeRemoteService: OesapRemoteService {
     let images: [RemoteDraftImage]
   }
 
+  private let openAgentGate: TestGate?
+  private let openPermissions: [RemotePermission]
+  private let endlessOlderPages: Bool
+  private var olderPageCalls = 0
+  private var permissionAnswers = 0
   private let projectsValue: [RemoteProject]
   private let projectsError: Error?
   private let projectsAfterFirstCall: [RemoteProject]?
@@ -2096,8 +2323,12 @@ private actor FakeRemoteService: OesapRemoteService {
     initialSettings: RemoteAgentSettings? = nil,
     settingsGate: TestGate? = nil, settingsGateAtCall: Int = 1,
     settingsApplyGate: TestGate? = nil, settingsApplyError: Error? = nil,
-    normalizedThinkingOptionID: String? = nil
+    normalizedThinkingOptionID: String? = nil, openAgentGate: TestGate? = nil,
+    openPermissions: [RemotePermission] = [], endlessOlderPages: Bool = false
   ) {
+    self.openAgentGate = openAgentGate
+    self.openPermissions = openPermissions
+    self.endlessOlderPages = endlessOlderPages
     self.projectsValue = projects
     self.projectsError = projectsError
     self.projectsAfterFirstCall = projectsAfterFirstCall
@@ -2271,6 +2502,21 @@ private actor FakeRemoteService: OesapRemoteService {
 
   func projectCallCount() -> Int { projectCalls }
 
+  func agentForOpenIntent(agentID: String) async throws -> RemoteThread? {
+    await openAgentGate?.wait()
+    guard
+      let project = (projectsAfterFirstCall ?? projectsValue).first(where: {
+        "thread-" + $0.id == agentID
+      })
+    else {
+      return nil
+    }
+    var thread = try await threads(projectID: project.id)[0]
+    thread.workspaceID = "workspace-" + project.id
+    thread.projectID = project.id
+    return thread
+  }
+
   func threads(projectID: String) async throws -> [RemoteThread] {
     if projectID == "A" {
       threadACalls += 1
@@ -2294,7 +2540,13 @@ private actor FakeRemoteService: OesapRemoteService {
   func history(agentID: String, before cursor: RemoteTimelineCursor?) async throws -> RemoteTimeline
   {
     await historyGate?.wait()
-    if cursor != nil {
+    if let cursor {
+      olderPageCalls += 1
+      if endlessOlderPages {
+        return RemoteTimeline(
+          messages: [], historyMayBeIncomplete: false, hasOlder: true,
+          olderCursor: .init(epoch: cursor.epoch, sequence: cursor.sequence + 1), latestCursor: nil)
+      }
       return RemoteTimeline(
         messages: olderMessages ?? [], historyMayBeIncomplete: false, hasOlder: false,
         olderCursor: nil, latestCursor: nil)
@@ -2303,8 +2555,9 @@ private actor FakeRemoteService: OesapRemoteService {
       messages: historyMessages ?? [
         RemoteMessage(id: "assistant", author: .agent, text: historyText, timestamp: nil)
       ],
-      historyMayBeIncomplete: false, hasOlder: olderMessages != nil,
-      olderCursor: olderMessages == nil ? nil : .init(epoch: "e1", sequence: 4),
+      historyMayBeIncomplete: false, hasOlder: olderMessages != nil || endlessOlderPages,
+      olderCursor: olderMessages == nil && !endlessOlderPages
+        ? nil : .init(epoch: "e1", sequence: 4),
       latestCursor: .init(epoch: "e1", sequence: 5)
     )
   }
@@ -2366,8 +2619,12 @@ private actor FakeRemoteService: OesapRemoteService {
 
   func stopCallCount() -> Int { stopCalls }
 
-  func pendingPermissions() async throws -> [RemotePermission] { [] }
-  func answerPermission(_ permission: RemotePermission, allow: Bool) async throws {}
+  func olderPageCallCount() -> Int { olderPageCalls }
+  func permissionAnswerCount() -> Int { permissionAnswers }
+  func pendingPermissions() async throws -> [RemotePermission] { openPermissions }
+  func answerPermission(_ permission: RemotePermission, allow: Bool) async throws {
+    permissionAnswers += 1
+  }
 
   func disconnect() async {
     closed = true

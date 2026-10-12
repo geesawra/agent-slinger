@@ -7,6 +7,7 @@ struct StoredPaseoConnection: Codable, Equatable, Sendable {
   var id: String
   var name: String
   var config: PaseoConnectionConfig
+  var serverID: String? = nil
 
   var summary: SavedPaseoInstance {
     let subtitle: String
@@ -19,7 +20,8 @@ struct StoredPaseoConnection: Codable, Equatable, Sendable {
     return SavedPaseoInstance(
       id: id,
       name: name,
-      subtitle: subtitle)
+      subtitle: subtitle,
+      serverID: serverID ?? config.serverID)
   }
 }
 
@@ -73,7 +75,7 @@ struct ConnectionStore: Sendable {
         name: trimmedName.isEmpty
           ? state.instances[index].name
           : trimmedName,
-        config: validated)
+        config: validated, serverID: state.instances[index].serverID)
       state.instances[index] = record
     } else {
       record = StoredPaseoConnection(
@@ -91,6 +93,15 @@ struct ConnectionStore: Sendable {
       throw RemoteServiceError.unavailable("That saved Paseo instance is no longer available.")
     }
     state.activeInstanceID = id
+    try writeState(state)
+  }
+
+  /// Remember only identities observed after a successful authenticated handshake.
+  func recordServerID(_ serverID: String?, for id: String) throws {
+    guard let serverID, !serverID.isEmpty else { return }
+    var state = try readState()
+    guard let index = state.instances.firstIndex(where: { $0.id == id }) else { return }
+    state.instances[index].serverID = serverID
     try writeState(state)
   }
 
