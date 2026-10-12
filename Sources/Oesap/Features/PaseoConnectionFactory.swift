@@ -1062,9 +1062,16 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       return RemoteMessage(
         id: id, author: .agent, text: isEncrypted ? "" : rawText, timestamp: date,
         isThinkingTrace: true, thinkingIsEncrypted: isEncrypted)
-    case "error", "notification":
+    case "error":
       let text = object["message"]?.stringValue ?? "Agent activity"
-      return RemoteMessage(id: id, author: .system, text: text, timestamp: date)
+      return RemoteMessage(
+        id: id, author: .system, text: text, timestamp: date,
+        systemNoticeStyle: .error)
+    case "notification":
+      let text = object["message"]?.stringValue ?? "Agent activity"
+      return RemoteMessage(
+        id: id, author: .system, text: text, timestamp: date,
+        systemNoticeStyle: .information)
     case "tool_call":
       guard let toolCall = RemoteToolCallMapper.map(object, turnID: turnID) else { return nil }
       return RemoteMessage(

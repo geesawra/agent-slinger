@@ -346,6 +346,11 @@ struct RemoteMessage: Identifiable, Sendable, Equatable {
     case system
   }
 
+  enum SystemNoticeStyle: Sendable, Equatable {
+    case information
+    case error
+  }
+
   var id: String
   var author: Author
   var text: String
@@ -356,6 +361,7 @@ struct RemoteMessage: Identifiable, Sendable, Equatable {
   var isThinkingTrace = false
   var thinkingIsEncrypted = false
   var compaction: RemoteCompaction? = nil
+  var systemNoticeStyle: SystemNoticeStyle? = nil
 }
 
 struct RemoteAgentTask: Identifiable, Sendable, Equatable {

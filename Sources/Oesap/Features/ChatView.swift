@@ -465,6 +465,9 @@ struct ChatView: View {
       if let compaction = message.compaction {
         CompactionCard(compaction: compaction)
           .id(message.id)
+      } else if let style = message.systemNoticeStyle {
+        SystemNoticeCard(text: message.text, style: style)
+          .id(message.id)
       } else {
         MessageBubble(
           message: message,
@@ -1167,6 +1170,44 @@ private struct CompactionCard: View {
     let trigger = compaction.trigger == "manual" ? "Requested by you" : "Conversation memory"
     guard let preTokens = compaction.preTokens, preTokens > 0 else { return trigger }
     return "\(trigger) · \(preTokens.formatted()) tokens before compaction"
+  }
+}
+
+private struct SystemNoticeCard: View {
+  let text: String
+  let style: RemoteMessage.SystemNoticeStyle
+
+  private var tint: Color {
+    switch style {
+    case .information: .blue
+    case .error: .red
+    }
+  }
+
+  private var symbol: String {
+    switch style {
+    case .information: "info.circle"
+    case .error: "exclamationmark.triangle.fill"
+    }
+  }
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline, spacing: 10) {
+      Image(systemName: symbol)
+        .font(.body)
+        .foregroundStyle(tint)
+        .accessibilityHidden(true)
+      Text(text)
+        .font(.body)
+        .foregroundStyle(.primary)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(14)
+    .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .accessibilityElement(children: .combine)
+    .accessibilityIdentifier("system-notice")
   }
 }
 
