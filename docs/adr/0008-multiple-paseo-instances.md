@@ -3,6 +3,19 @@
 - Status: Accepted
 - Date: 2026-09-27
 
+Amended 2026-10-12: the selected chat workspace remains single-instance, while
+the [Projects and Agents views](../all-host-agent-overview.md) may maintain concurrent
+connections to other saved instances while visible. Both group content into
+server-named sections and restore the originating server when opening a row.
+Settings now manages saved servers without choosing a default or active server.
+Opening a project or agent chooses its workspace; connection errors appear in
+that server's section and pull-to-refresh retries all catalogs independently.
+The selection and Settings retry behavior below records the original decision
+and is superseded by this amendment.
+Drafts and uncertain sends
+are kept in memory per saved instance and restored after matching authenticated
+server identity. Explicit removal or disconnect discards that instance's state.
+
 ## Context
 
 People may use Oesap with more than one Paseo host, such as a home machine and

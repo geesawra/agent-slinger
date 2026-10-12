@@ -102,6 +102,12 @@ struct WorkspaceRootView: View {
       guard newValue != observedInstanceID else { return }
       observedInstanceID = newValue
       resetWorkspaceNavigation()
+      if model.openingOverviewAgent {
+        // Keep the overview and its error presentation mounted while a row
+        // switches servers. The successful callback establishes the chat route.
+        if !usesSplitNavigation { path = [.agentOverview] }
+        return
+      }
       // Keep Settings visible when switching fails, so the connection stays actionable.
       if path.contains(.settings) { path = [.settings] } else { path.removeAll() }
     }
@@ -202,10 +208,12 @@ struct WorkspaceRootView: View {
           ProjectListView(
             model: model,
             onOpenAgentOverview: { open(.agentOverview) },
-            onAddProject: { open(.addProject) }
-          ) { project in
+            onAddProject: { addProject(on: $0) }
+          ) { instanceID, project in
             Task {
-              await model.selectProject(project.id)
+              guard await model.openServerProject(instanceID: instanceID, projectID: project.id)
+              else { return }
+              observedInstanceID = model.activeInstanceID
               path.append(.project(project.id))
             }
           }
@@ -224,10 +232,18 @@ struct WorkspaceRootView: View {
     ) {
       ProjectListView(
         model: model,
-        selection: Binding(get: { splitProjectID }, set: { selectSplitProject($0) }),
+        selection: Binding(
+          get: {
+            splitProjectID.map {
+              ServerProjectID(instanceID: model.activeInstanceID ?? "current-host", projectID: $0)
+            }
+          },
+          set: { selectServerProject($0) }),
         onOpenAgentOverview: { open(.agentOverview) },
-        onAddProject: { open(.addProject) },
-        onOpenProject: { selectSplitProject($0.id) }
+        onAddProject: { addProject(on: $0) },
+        onOpenProject: { instanceID, project in
+          selectServerProject(ServerProjectID(instanceID: instanceID, projectID: project.id))
+        }
       )
       .listStyle(.sidebar)
       .navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 320)
@@ -315,13 +331,14 @@ struct WorkspaceRootView: View {
     switch route {
     case .agentOverview:
       AgentOverviewView(model: model) { threadID in
+        observedInstanceID = model.activeInstanceID
         if usesSplitNavigation {
           splitProjectID = model.selectedProjectID
           presentedRoute = nil
           detailRoute = .chat(threadID)
           preferredCompactColumn = .detail
         } else {
-          path.append(.chat(threadID))
+          path = [.agentOverview, .chat(threadID)]
         }
       }
     case .usage:
@@ -329,12 +346,7 @@ struct WorkspaceRootView: View {
     case .settings:
       SettingsView(
         model: model,
-        onAddInstance: { open(.addInstance) },
-        onSelected: {
-          path.removeAll()
-          presentedRoute = nil
-          resetWorkspaceNavigation()
-        }
+        onAddInstance: { open(.addInstance) }
       )
     case .notificationConnection:
       NotificationConnectionView(hasSavedServers: !model.savedInstances.isEmpty) {
@@ -414,6 +426,35 @@ struct WorkspaceRootView: View {
     detailRoute = nil
     splitProjectID = id
     preferredCompactColumn = id == nil ? .sidebar : .content
+  }
+
+  private func selectServerProject(_ id: ServerProjectID?) {
+    guard let id else {
+      selectSplitProject(nil)
+      return
+    }
+    guard id.instanceID != model.activeInstanceID || id.projectID != splitProjectID else { return }
+    detailRoute = nil
+    Task {
+      guard await model.openServerProject(instanceID: id.instanceID, projectID: id.projectID) else {
+        return
+      }
+      observedInstanceID = model.activeInstanceID
+      selectSplitProject(id.projectID)
+    }
+  }
+
+  private func addProject(on instanceID: String?) {
+    Task {
+      if let instanceID,
+        instanceID != model.activeInstanceID || model.connectionState != .connected
+      {
+        guard await model.selectSavedInstance(instanceID) else { return }
+      }
+      guard model.connectionState == .connected else { return }
+      observedInstanceID = model.activeInstanceID
+      open(.addProject)
+    }
   }
 
   private func showThread(_ id: String) {
@@ -515,10 +556,12 @@ struct WorkspaceCommands: Commands {
 
 private struct ProjectListView: View {
   @Bindable var model: OesapModel
-  var selection: Binding<String?>? = nil
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  var selection: Binding<ServerProjectID?>? = nil
   var onOpenAgentOverview: () -> Void
-  var onAddProject: () -> Void
-  var onOpenProject: (RemoteProject) -> Void
+  var onAddProject: (String?) -> Void
+  var onOpenProject: (String, RemoteProject) -> Void
+  @State private var observesSavedInstances = false
 
   var body: some View {
     List(selection: selection) {
@@ -530,11 +573,7 @@ private struct ProjectListView: View {
           .disabled(model.connectionState.isBusy || model.loadingSavedConnections)
           .accessibilityIdentifier("agents-overview-button")
 
-          Button(action: onAddProject) {
-            Label("Add project", systemImage: "plus")
-          }
-          .disabled(model.connectionState != .connected)
-          .accessibilityIdentifier("add-project-button")
+          addProjectAction
         }
       #endif
 
@@ -545,15 +584,6 @@ private struct ProjectListView: View {
             Text("Checking saved connections…").foregroundStyle(.secondary)
           }
         }
-      } else if model.connectionState == .connecting {
-        Section {
-          HStack(spacing: 12) {
-            ProgressView()
-            Text(model.connectionProgressTitle).foregroundStyle(.secondary)
-          }
-        }
-      } else if model.connectionState != .connected && model.connectionState != .reconnecting {
-        ConnectionStatusRow(model: model)
       }
 
       if let notice = model.workspaceNotice {
@@ -567,67 +597,101 @@ private struct ProjectListView: View {
         .listRowSeparator(.hidden)
       }
 
-      if let error = model.workspaceError, model.connectionState == .connected {
-        Section {
-          ConnectionErrorNotice(message: error, identifier: "workspace-error")
-          Button("Reconnect") { Task { await model.reconnect() } }
-            .disabled(model.connectionState.isBusy)
-        }
+      if let error = model.projectNavigationError ?? model.projectCatalogError {
+        Section { ConnectionErrorNotice(message: error, identifier: "project-catalog-error") }
       }
 
-      if model.loadingSavedConnections || model.connectionState == .connecting {
-        EmptyView()
-      } else if model.loadingProjects && model.projects.isEmpty {
-        Section {
-          HStack(spacing: 12) {
-            ProgressView()
-            Text("Loading projects…").foregroundStyle(.secondary)
-          }
-        }
-      } else if model.projects.isEmpty && model.workspaceError == nil {
-        ContentUnavailableView(
-          "No projects yet",
-          systemImage: "folder",
-          description: Text("Add a folder from this Paseo host to get started.")
-        )
-        .listRowSeparator(.hidden)
-      } else {
-        Section {
-          ForEach(model.projects) { project in
-            if selection != nil {
-              NavigationLink(value: project.id) {
-                ProjectRow(project: project, showsDisclosure: false)
+      if !model.loadingSavedConnections {
+        ForEach(model.projectCatalogHosts) { host in
+          Section {
+            if let error = host.error {
+              ConnectionErrorNotice(
+                message: error, identifier: "project-server-error-\(host.id)",
+                title: host.isConnectionUnavailable ? "Host connection lost" : nil,
+                titleIdentifier: "project-server-disconnected-\(host.id)")
+            }
+            if host.projects.isEmpty && !host.isLoading && !host.isStale && host.error == nil {
+              ContentUnavailableView(
+                "No projects yet", systemImage: "folder",
+                description: Text("Add a folder from this Paseo server to get started.")
+              )
+              .listRowSeparator(.hidden)
+            }
+            ForEach(host.projects) { project in
+              let rowID = ServerProjectID(instanceID: host.id, projectID: project.id)
+              Group {
+                if selection != nil {
+                  NavigationLink(value: rowID) {
+                    ProjectRow(project: project, showsDisclosure: false)
+                  }
+                } else {
+                  Button {
+                    onOpenProject(host.id, project)
+                  } label: {
+                    ProjectRow(project: project, showsDisclosure: true)
+                  }
+                  .buttonStyle(.plain)
+                }
               }
-              .disabled(model.connectionState.isBusy)
-              .accessibilityIdentifier("project-\(project.id)")
-            } else {
-              Button {
-                onOpenProject(project)
-              } label: {
-                ProjectRow(project: project, showsDisclosure: true)
+              .disabled(
+                model.connectionState.isBusy || model.openingServerProject
+                  || model.openingOverviewAgent
+              )
+              .accessibilityIdentifier(
+                model.savedInstances.count > 1
+                  ? "project-\(host.id)-\(project.id)" : "project-\(project.id)"
+              )
+              .transition(.opacity)
+            }
+          } header: {
+            HStack {
+              Text(verbatim: host.instance.name)
+                .textCase(nil)
+                .accessibilityIdentifier("project-server-\(host.id)")
+              Spacer()
+              if host.isLoading && host.error == nil && !host.isConnectionUnavailable {
+                ProgressView()
+                  .controlSize(.small)
+                  .accessibilityLabel("Loading projects from \(host.instance.name)")
+                  .accessibilityIdentifier("project-server-loading-\(host.id)")
               }
-              .buttonStyle(.plain)
-              .disabled(model.connectionState.isBusy)
-              .accessibilityIdentifier("project-\(project.id)")
+            }
+          } footer: {
+            if host.isStale && !host.projects.isEmpty {
+              Text("Showing last-known projects. Pull to refresh.")
             }
           }
-        } header: {
-          Text("Projects").foregroundStyle(Color.primary.opacity(0.75))
         }
       }
     }
-    .overlay(alignment: .top) {
-      if model.connectionState == .reconnecting {
-        ProgressView(model.connectionProgressTitle)
-          .padding(.horizontal, 16)
-          .padding(.vertical, 10)
-          .background(.regularMaterial, in: Capsule())
-          .padding(.top, 8)
-      }
-    }
+    .animation(
+      reduceMotion ? nil : .easeInOut(duration: 0.2),
+      value: model.projectCatalogHosts.map(\.id)
+    )
+    .animation(
+      reduceMotion ? nil : .easeInOut(duration: 0.2),
+      value: model.projectCatalogHosts.map { $0.projects.map(\.id) }
+    )
     .navigationTitle("Projects")
     .navigationBarTitleDisplayMode(.large)
-    .refreshable { await model.refreshWorkspace() }
+    .refreshable {
+      await model.refreshAllHostProjects()
+    }
+    .task {
+      await model.beginProjectCatalog()
+      observesSavedInstances = true
+    }
+    .onDisappear { model.endProjectCatalog() }
+    .onChange(of: model.savedInstances.map(\.id)) { _, _ in
+      guard observesSavedInstances else { return }
+      Task { await model.refreshAllHostProjects(reloadIfRunning: true) }
+    }
+    .onChange(of: model.connectionState) { _, state in
+      guard state == .connected, !model.openingServerProject, !model.openingOverviewAgent else {
+        return
+      }
+      Task { await model.refreshAllHostProjects() }
+    }
     #if !targetEnvironment(macCatalyst)
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
@@ -638,15 +702,36 @@ private struct ProjectListView: View {
           .accessibilityIdentifier("agents-overview-button")
         }
         ToolbarItem(placement: .topBarTrailing) {
-          Button(action: onAddProject) {
-            Image(systemName: "plus")
-          }
-          .disabled(model.connectionState != .connected)
-          .accessibilityLabel("Add project")
-          .accessibilityIdentifier("add-project-button")
+          addProjectAction.labelStyle(.iconOnly)
         }
       }
     #endif
+  }
+
+  private var addProjectAction: some View {
+    Group {
+      if model.savedInstances.count > 1 {
+        Menu {
+          ForEach(model.savedInstances) { instance in
+            Button(instance.name) { onAddProject(instance.id) }
+          }
+        } label: {
+          Label("Add project", systemImage: "plus")
+        }
+      } else {
+        Button {
+          onAddProject(model.activeInstanceID ?? model.savedInstances.first?.id)
+        } label: {
+          Label("Add project", systemImage: "plus")
+        }
+      }
+    }
+    .disabled(
+      model.connectionState.isBusy || model.loadingSavedConnections
+        || (!model.hasSavedConnection && model.connectionState != .connected)
+    )
+    .accessibilityLabel("Add project")
+    .accessibilityIdentifier("add-project-button")
   }
 }
 
@@ -1170,22 +1255,10 @@ private struct ConnectionStatusRow: View {
           .font(.subheadline)
           .foregroundStyle(Color.primary.opacity(0.75))
           if let connectionDetails {
-            HStack(alignment: .top, spacing: 9) {
-              Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-                .padding(.top, 2)
-              VStack(alignment: .leading, spacing: 8) {
-                Text(connectionDetails)
-                  .font(.footnote)
-                  .foregroundStyle(.primary)
-                  .fixedSize(horizontal: false, vertical: true)
-                  .textSelection(.enabled)
-                Button("Copy details", systemImage: "doc.on.doc") {
-                  UIPasteboard.general.string = connectionDetails
-                }
-                .buttonStyle(.borderless)
-              }
-            }
+            ConnectionErrorNotice(
+              message: connectionDetails, identifier: "host-connection-details"
+            )
+            .font(.footnote)
             .padding(.top, 5)
             Divider().padding(.top, 3)
           }

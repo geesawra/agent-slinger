@@ -66,18 +66,35 @@ final class OesapUITests: XCTestCase {
     app.buttons["connection-options"].tap()
     app.buttons["settings-button"].tap()
     XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+    XCTAssertEqual(
+      app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "saved-instance-"))
+        .count,
+      0, "Saved server rows must not select a default server")
+    XCTAssertFalse(app.images["Selected"].exists)
     app.buttons["add-instance-button"].tap()
     XCTAssertTrue(app.navigationBars["Add Paseo instance"].waitForExistence(timeout: 5))
     XCTAssertTrue(app.textFields["connection-name"].exists)
     app.navigationBars.buttons.element(boundBy: 0).tap()
     XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
 
+    let serverRow = app.descendants(matching: .any).matching(
+      NSPredicate(format: "identifier BEGINSWITH %@", "saved-instance-")
+    ).firstMatch
+    XCTAssertTrue(serverRow.waitForExistence(timeout: 5))
+    serverRow.swipeLeft()
     let removeInstance = app.buttons.matching(
       NSPredicate(format: "label BEGINSWITH %@", "Remove ")
     ).firstMatch
     XCTAssertTrue(removeInstance.waitForExistence(timeout: 5))
     removeInstance.tap()
     let confirmRemoval = app.buttons.matching(identifier: "confirm-remove-instance").firstMatch
+    XCTAssertTrue(confirmRemoval.waitForExistence(timeout: 5))
+    XCTAssertTrue(serverRow.exists, "The host must stay listed until removal is confirmed")
+    app.buttons["Cancel"].tap()
+    XCTAssertTrue(serverRow.exists, "Cancelling removal must keep the host")
+    serverRow.swipeLeft()
+    XCTAssertTrue(removeInstance.waitForExistence(timeout: 5))
+    removeInstance.tap()
     XCTAssertTrue(confirmRemoval.waitForExistence(timeout: 5))
     confirmRemoval.tap()
     XCTAssertTrue(app.staticTexts["No saved instances"].waitForExistence(timeout: 5))
@@ -87,7 +104,7 @@ final class OesapUITests: XCTestCase {
     XCTAssertFalse(app.buttons["setup-settings-button"].exists)
   }
 
-  func testCanSwitchBetweenNamedInstancesAndRemoveAnInactiveOne() {
+  func testCanAddNamedInstancesAndRemoveAnInactiveOne() {
     let app = launchDemo()
     connect(app, name: "Studio", endpoint: "studio.paseo.local:6767")
 
@@ -99,31 +116,31 @@ final class OesapUITests: XCTestCase {
 
     app.buttons["connection-options"].tap()
     app.buttons["settings-button"].tap()
-    let studio = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Studio"))
-      .firstMatch
+    let studio = app.descendants(matching: .any).matching(
+      NSPredicate(
+        format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "saved-instance-", "Studio")
+    ).firstMatch
     XCTAssertTrue(studio.waitForExistence(timeout: 5))
-    studio.tap()
-    XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
-
-    app.buttons["connection-options"].tap()
-    app.buttons["settings-button"].tap()
-    let selectedStudio = app.buttons.matching(
-      NSPredicate(format: "label CONTAINS %@", "Studio, Selected")
+    let travel = app.descendants(matching: .any).matching(
+      NSPredicate(
+        format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "saved-instance-", "Travel")
     ).firstMatch
-    XCTAssertTrue(selectedStudio.waitForExistence(timeout: 5))
+    XCTAssertTrue(travel.exists)
 
-    let removeTravel = app.buttons.matching(
-      NSPredicate(format: "label == %@", "Remove Travel")
+    studio.swipeLeft()
+    let removeStudio = app.buttons.matching(
+      NSPredicate(format: "label == %@", "Remove Studio")
     ).firstMatch
-    XCTAssertTrue(removeTravel.waitForExistence(timeout: 5))
-    removeTravel.tap()
+    XCTAssertTrue(removeStudio.waitForExistence(timeout: 5))
+    removeStudio.tap()
     let confirmRemoval = app.buttons.matching(identifier: "confirm-remove-instance").firstMatch
     XCTAssertTrue(confirmRemoval.waitForExistence(timeout: 5))
+    XCTAssertTrue(studio.exists, "Requesting removal must not delete the row")
     confirmRemoval.tap()
-    XCTAssertFalse(
-      app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Travel")).firstMatch
-        .waitForExistence(timeout: 1))
-    XCTAssertTrue(selectedStudio.exists)
+    let removed = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: studio)
+    XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 5), .completed)
+    XCTAssertTrue(travel.exists)
   }
 
   func testConnectBrowseAndSendMessage() {
@@ -358,7 +375,9 @@ final class OesapUITests: XCTestCase {
     ).firstMatch
     XCTAssertTrue(diagnostics.waitForExistence(timeout: 5))
     XCTAssertFalse(diagnostics.label.contains("127.0.0.1"))
-    XCTAssertTrue(app.buttons["connection-error-copy"].exists)
+    XCTAssertFalse(app.buttons["connection-error-copy"].exists)
+    diagnostics.press(forDuration: 1)
+    XCTAssertTrue(app.buttons["connection-error-copy"].waitForExistence(timeout: 5))
     attachScreenshot(named: "Local connection failure diagnostics")
   }
 
@@ -370,7 +389,60 @@ final class OesapUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["No projects yet"].waitForExistence(timeout: 5))
   }
 
-  func testAgentOverviewFiltersGroupsAndOpensTheSelectedProjectThread() {
+  func testAllServerOverviewUsesServerSectionHeadersAndOpensTheOriginatingServer() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "--demo", "--demo-multiple-servers", "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+    ]
+    app.launch()
+    XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
+    let homeProject = app.buttons["project-demo-home-instance-demo-project"]
+    XCTAssertTrue(homeProject.waitForExistence(timeout: 5))
+    let projectHeader = app.staticTexts["project-server-demo-home-instance"]
+    XCTAssertTrue(projectHeader.exists)
+    XCTAssertEqual(projectHeader.label, "Home server")
+    let unavailable = app.staticTexts["project-server-disconnected-demo-offline-instance"]
+    XCTAssertTrue(scrollUntilHittable(unavailable, in: app))
+    XCTAssertEqual(unavailable.label, "Host connection lost")
+    XCTAssertFalse(app.staticTexts["project-server-disconnected-demo-home-instance"].exists)
+    XCTAssertFalse(app.staticTexts["project-server-disconnected-demo-work-instance"].exists)
+    XCTAssertFalse(
+      app.descendants(matching: .any)["project-server-loading-demo-offline-instance"].exists)
+    XCTAssertFalse(app.buttons["project-server-error-demo-offline-instance-copy"].exists)
+    for _ in 0..<10 where !homeProject.isHittable { app.swipeDown() }
+    XCTAssertTrue(homeProject.isHittable)
+    app.swipeDown()
+    XCTAssertTrue(homeProject.waitForExistence(timeout: 5))
+    XCTAssertFalse(app.staticTexts["Refreshing projects…"].exists)
+    XCTAssertFalse(
+      app.descendants(matching: .any)["project-server-loading-demo-offline-instance"].exists)
+    homeProject.tap()
+    XCTAssertTrue(app.buttons["thread-demo-agent-running"].waitForExistence(timeout: 5))
+    app.navigationBars.buttons.firstMatch.tap()
+    let agents = app.buttons["agents-overview-button"]
+    XCTAssertTrue(agents.waitForExistence(timeout: 5))
+    agents.tap()
+    let homeHeader = app.staticTexts["overview-server-demo-home-instance"]
+    XCTAssertTrue(homeHeader.waitForExistence(timeout: 5))
+    XCTAssertEqual(homeHeader.label, "Home server")
+    let homeAttention = app.buttons["overview-agent-demo-home-instance-demo-agent-attention"]
+    XCTAssertTrue(homeAttention.waitForExistence(timeout: 5))
+    XCTAssertTrue(scrollUntilHittable(homeAttention, in: app))
+    homeAttention.tap()
+    XCTAssertTrue(app.navigationBars["Review connection flow"].waitForExistence(timeout: 5))
+    app.navigationBars.buttons.firstMatch.tap()
+    XCTAssertTrue(app.navigationBars["Agents"].waitForExistence(timeout: 5))
+    app.buttons["This server"].tap()
+    XCTAssertTrue(homeHeader.waitForExistence(timeout: 5))
+    XCTAssertFalse(app.staticTexts["overview-server-demo-work-instance"].exists)
+    app.buttons["All servers"].tap()
+    let offlineError = app.staticTexts["overview-server-error-demo-offline-instance"]
+    XCTAssertTrue(scrollUntilHittable(offlineError, in: app))
+    XCTAssertEqual(offlineError.label, "The demo server is unreachable.")
+    attachScreenshot(named: "Agent overview grouped by server with an unavailable server")
+  }
+
+  func testAgentOverviewSortsAcrossProjectsFiltersAndOpensTheSelectedThread() {
     let app = launchDemo()
     connect(app)
     app.buttons["agents-overview-button"].tap()
@@ -390,10 +462,15 @@ final class OesapUITests: XCTestCase {
       app.staticTexts["agent-overview-summary"].label.contains(
         "2 running · 2 need attention · 1 error")
     )
-    attachScreenshot(named: "Active agents grouped by project")
+    XCTAssertLessThan(attention.frame.minY, failed.frame.minY)
+    XCTAssertLessThan(failed.frame.minY, toolsRunning.frame.minY)
+    XCTAssertLessThan(toolsRunning.frame.minY, running.frame.minY)
+    attachScreenshot(named: "Active agents ordered by attention and activity")
 
     app.buttons["All"].tap()
     XCTAssertTrue(idle.waitForExistence(timeout: 5))
+    XCTAssertLessThan(failed.frame.minY, idle.frame.minY)
+    XCTAssertLessThan(idle.frame.minY, toolsRunning.frame.minY)
     attachScreenshot(named: "All agents including idle")
 
     XCTAssertTrue(scrollUntilHittable(failed, in: app))

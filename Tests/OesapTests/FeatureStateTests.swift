@@ -1315,6 +1315,456 @@ final class FeatureStateTests: XCTestCase {
     await model.disconnect()
   }
 
+  func testCrossServerProjectsLoadIndependentlyAndOpenCollidingProjectIDs() async {
+    let gate = TestGate()
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(
+      projectGate: gate, projectGateAtCall: 1, initialThreadState: .waiting,
+      serverIDValue: "server-b")
+    let model = multiServerModel(first: first, second: second)
+    await model.start()
+    model.selectThread("thread-A")
+    model.setDraft("Work draft", for: "thread-A")
+    let refresh = Task { await model.beginProjectCatalog() }
+    await gate.waitUntilEntered()
+    let firstLoaded = await eventually {
+      model.allHostProjectCatalogs.first(where: { $0.id == "one" })?.projects.count == 2
+    }
+    XCTAssertTrue(firstLoaded)
+    XCTAssertEqual(model.activeInstanceID, "one")
+    XCTAssertEqual(model.draft(for: "thread-A"), "Work draft")
+    await gate.open()
+    await refresh.value
+    XCTAssertEqual(model.projectCatalogHosts.map(\.instance.name), ["Home server", "Work server"])
+    let unnecessaryThreads = await second.threadBCallCount()
+    XCTAssertEqual(unnecessaryThreads, 0, "Project catalogs must not fetch agent threads")
+
+    let opened = await model.openServerProject(instanceID: "two", projectID: "A")
+    XCTAssertTrue(opened)
+    XCTAssertEqual(model.activeInstanceID, "two")
+    XCTAssertEqual(model.selectedProjectID, "A")
+    XCTAssertEqual(model.threads.first?.state, .waiting)
+    XCTAssertEqual(model.draft(for: "thread-A"), "")
+    let returned = await model.openServerProject(instanceID: "one", projectID: "A")
+    XCTAssertTrue(returned)
+    XCTAssertEqual(model.draft(for: "thread-A"), "Work draft")
+    model.endProjectCatalog()
+    await model.disconnect()
+  }
+
+  func testCrossServerProjectsRetainFailedCatalogAndShareVisibleOverviewConnections() async {
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(projectErrorCalls: [2], serverIDValue: "server-b")
+    let model = multiServerModel(first: first, second: second)
+    await model.start()
+    await model.beginProjectCatalog()
+    let previous = model.allHostProjectCatalogs.first(where: { $0.id == "two" })
+    await model.refreshAllHostProjects()
+    let failed = model.allHostProjectCatalogs.first(where: { $0.id == "two" })
+    XCTAssertEqual(failed?.projects, previous?.projects)
+    XCTAssertEqual(failed?.updatedAt, previous?.updatedAt)
+    XCTAssertEqual(failed?.isStale, true)
+    XCTAssertEqual(failed?.isLoading, false)
+    XCTAssertEqual(failed?.isConnectionUnavailable, false)
+    XCTAssertNotNil(failed?.error)
+    await model.beginAgentOverview()
+    model.endAgentOverview()
+    let remainsConnected = await second.isClosed()
+    XCTAssertFalse(remainsConnected, "Projects is still using this server's connection")
+    await model.refreshAllHostProjects()
+    XCTAssertEqual(model.allHostProjectCatalogs.first(where: { $0.id == "two" })?.isStale, false)
+    model.endProjectCatalog()
+    let closed = await eventually { await second.isClosed() }
+    XCTAssertTrue(closed)
+    let activeClosed = await first.isClosed()
+    XCTAssertFalse(activeClosed)
+    await model.disconnect()
+  }
+
+  func testFailedServerHidesItsLoadingStateWithoutMarkingHealthyServerDisconnected() async {
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "one", name: "Work server", subtitle: ""),
+          .init(id: "unreachable", name: "Offline server", subtitle: ""),
+        ], activeInstanceID: "one", instanceServices: ["one": first]))
+    await model.start()
+    await model.beginProjectCatalog()
+    let healthy = model.allHostProjectCatalogs.first(where: { $0.id == "one" })
+    let unreachable = model.allHostProjectCatalogs.first(where: { $0.id == "unreachable" })
+    XCTAssertEqual(healthy?.isLoading, false)
+    XCTAssertEqual(healthy?.isConnectionUnavailable, false)
+    XCTAssertNil(healthy?.error)
+    XCTAssertEqual(unreachable?.isLoading, false)
+    XCTAssertEqual(unreachable?.isConnectionUnavailable, true)
+    XCTAssertNotNil(unreachable?.error)
+    model.endProjectCatalog()
+    await model.disconnect()
+  }
+
+  func testOverlappingProjectCatalogRefreshesShareOneBatch() async {
+    let gate = TestGate()
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(
+      projectGate: gate, projectGateAtCall: 1, serverIDValue: "server-b")
+    let model = multiServerModel(first: first, second: second)
+    await model.start()
+    let initial = Task { await model.beginProjectCatalog() }
+    await gate.waitUntilEntered()
+    var joined = false
+    let pullRefresh = Task {
+      joined = true
+      await model.refreshAllHostProjects()
+    }
+    let didJoin = await eventually { joined }
+    XCTAssertTrue(didJoin)
+    await gate.open()
+    await initial.value
+    await pullRefresh.value
+    let firstCalls = await first.projectCallCount()
+    let secondCalls = await second.projectCallCount()
+    XCTAssertEqual(firstCalls, 2, "One startup request and one shared catalog request")
+    XCTAssertEqual(secondCalls, 1, "Overlapping refreshes must not start another batch")
+    XCTAssertFalse(model.loadingAllHostProjects)
+    model.endProjectCatalog()
+    await model.disconnect()
+  }
+
+  func testFailedProjectCatalogRetryKeepsErrorWithoutLoadingIndicator() async {
+    let gate = TestGate()
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(
+      projectErrorCalls: [1], projectGate: gate, projectGateAtCall: 2,
+      serverIDValue: "server-b")
+    let model = multiServerModel(first: first, second: second)
+    await model.start()
+    await model.beginProjectCatalog()
+    let previousError = model.allHostProjectCatalogs.first(where: { $0.id == "two" })?.error
+    XCTAssertNotNil(previousError)
+    let retry = Task { await model.refreshAllHostProjects() }
+    await gate.waitUntilEntered()
+    let retrying = model.allHostProjectCatalogs.first(where: { $0.id == "two" })
+    XCTAssertEqual(retrying?.error, previousError)
+    XCTAssertEqual(retrying?.isLoading, false)
+    await gate.open()
+    await retry.value
+    let recovered = model.allHostProjectCatalogs.first(where: { $0.id == "two" })
+    XCTAssertNil(recovered?.error)
+    XCTAssertEqual(recovered?.projects.count, 2)
+    XCTAssertEqual(recovered?.isStale, false)
+    model.endProjectCatalog()
+    await model.disconnect()
+  }
+
+  func testProjectCatalogRefreshRecoversLostSelectedServerAndKeepsOtherServerUsable() async {
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(serverIDValue: "server-b")
+    let model = multiServerModel(first: first, second: second)
+    await model.start()
+    await model.beginProjectCatalog()
+    await first.setProjectsError(RemoteServiceError.connectionLost("Connection closed"))
+    await model.refreshAllHostProjects()
+    XCTAssertEqual(model.connectionState, .disconnected)
+    XCTAssertEqual(
+      model.projectCatalogHosts.first(where: { $0.id == "one" })?.isConnectionUnavailable, true)
+    XCTAssertNil(model.projectCatalogHosts.first(where: { $0.id == "two" })?.error)
+    await first.setProjectsError(nil)
+    await model.refreshAllHostProjects()
+    let recovered = model.projectCatalogHosts.first(where: { $0.id == "one" })
+    XCTAssertNil(recovered?.error)
+    XCTAssertEqual(recovered?.isConnectionUnavailable, false)
+    XCTAssertEqual(recovered?.isLoading, false)
+    let opened = await model.openServerProject(instanceID: "one", projectID: "A")
+    XCTAssertTrue(opened, "The recovered connection must be promoted when its project opens")
+    model.endProjectCatalog()
+    await model.disconnect()
+  }
+
+  func testRemovingServerDuringProjectCatalogRejectsLateCatalog() async {
+    let gate = TestGate()
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(
+      projectGate: gate, projectGateAtCall: 1, serverIDValue: "server-b")
+    let model = multiServerModel(first: first, second: second)
+    await model.start()
+    let refresh = Task { await model.beginProjectCatalog() }
+    await gate.waitUntilEntered()
+    await model.removeSavedInstance("two")
+    await gate.open()
+    await refresh.value
+    await model.refreshAllHostProjects()
+    XCTAssertEqual(model.allHostProjectCatalogs.map(\.id), ["one"])
+    let removedClosed = await second.isClosed()
+    XCTAssertTrue(removedClosed)
+    model.endProjectCatalog()
+    await model.disconnect()
+  }
+
+  func testSwitchingServersPreservesUncertainSendWithoutResendingToAnotherHost() async {
+    let gate = TestGate()
+    let first = FakeRemoteService(sendGate: gate, serverIDValue: "server-a")
+    let second = FakeRemoteService(serverIDValue: "server-b")
+    let model = multiServerModel(first: first, second: second)
+    await model.start()
+    await model.beginProjectCatalog()
+    model.selectThread("thread-A")
+    model.setDraft("May have been delivered", for: "thread-A")
+    let sending = Task { await model.send(threadID: "thread-A", text: "May have been delivered") }
+    await gate.waitUntilEntered()
+    let opened = await model.openServerProject(instanceID: "two", projectID: "A")
+    XCTAssertTrue(opened)
+    XCTAssertFalse(model.hasUncertainAgentMessage(for: "thread-A"))
+    let returned = await model.openServerProject(instanceID: "one", projectID: "A")
+    XCTAssertTrue(returned)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    await gate.open()
+    let accepted = await sending.value
+    XCTAssertFalse(accepted)
+    XCTAssertTrue(model.hasUncertainAgentMessage(for: "thread-A"))
+    let wrongHostSends = await second.sentMessages()
+    XCTAssertTrue(wrongHostSends.isEmpty)
+    let originalSends = await first.sentMessages()
+    XCTAssertEqual(originalSends.count, 1)
+    model.endProjectCatalog()
+    await model.disconnect()
+  }
+
+  private func multiServerModel(first: FakeRemoteService, second: FakeRemoteService) -> OesapModel {
+    OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "one", name: "Work server", subtitle: ""),
+          .init(id: "two", name: "Home server", subtitle: ""),
+        ], activeInstanceID: "one", instanceServices: ["one": first, "two": second]))
+  }
+
+  func testAllHostOverviewPublishesHealthyHostBeforeSlowHostAndRoutesCollidingIDs() async {
+    let gate = TestGate()
+    let first = FakeRemoteService(initialThreadState: .running, serverIDValue: "server-a")
+    let second = FakeRemoteService(
+      projectGate: gate, projectGateAtCall: 1,
+      initialThreadState: .waiting, serverIDValue: "server-b")
+    let factory = FakeConnectionFactory(
+      connectServices: [],
+      initiallySavedInstances: [
+        .init(id: "one", name: "Work server", subtitle: ""),
+        .init(id: "two", name: "Home server", subtitle: ""),
+      ], activeInstanceID: "one", instanceServices: ["one": first, "two": second])
+    let model = OesapModel(connectionFactory: factory)
+    await model.start()
+    model.selectThread("thread-A")
+    model.setDraft("Work draft", for: "thread-A")
+    let refresh = Task { await model.beginAgentOverview() }
+    await gate.waitUntilEntered()
+    let firstLoaded = await eventually {
+      model.allHostAgentOverviewSnapshots.first(where: { $0.id == "one" })?.groups.count == 2
+    }
+    XCTAssertTrue(firstLoaded)
+    XCTAssertEqual(model.activeInstanceID, "one")
+    XCTAssertEqual(model.selectedThreadID, "thread-A")
+    XCTAssertEqual(model.draft(for: "thread-A"), "Work draft")
+    let activeClosed = await first.isClosed()
+    XCTAssertFalse(activeClosed)
+    await gate.open()
+    await refresh.value
+    XCTAssertEqual(model.agentOverviewHosts.map(\.id), ["two", "one"])
+    XCTAssertEqual(model.agentOverviewHosts.map(\.instance.name), ["Home server", "Work server"])
+    XCTAssertEqual(model.agentOverviewHosts.flatMap(\.entries).count, 4)
+    let calls = await factory.overviewCalls()
+    XCTAssertEqual(calls, ["two"])
+
+    let opened = await model.openOverviewAgent(
+      instanceID: "two", projectID: "A", threadID: "thread-A")
+    XCTAssertTrue(opened)
+    XCTAssertEqual(model.activeInstanceID, "two")
+    XCTAssertEqual(model.selectedThreadID, "thread-A")
+    XCTAssertEqual(model.draft(for: "thread-A"), "")
+    model.setDraft("Home draft", for: "thread-A")
+    let sent = await model.send(threadID: "thread-A", text: "Home message")
+    XCTAssertTrue(sent)
+    let firstSends = await first.sentMessages()
+    let secondSends = await second.sentMessages()
+    XCTAssertTrue(firstSends.isEmpty)
+    XCTAssertEqual(secondSends.map(\.text), ["Home message"])
+
+    let returned = await model.openOverviewAgent(
+      instanceID: "one", projectID: "A", threadID: "thread-A")
+    XCTAssertTrue(returned)
+    XCTAssertEqual(model.draft(for: "thread-A"), "Work draft")
+    model.endAgentOverview()
+    await model.disconnect()
+  }
+
+  func testAllHostOverviewDeduplicatesAuthenticatedServersButNotMatchingNames() async {
+    let first = FakeRemoteService(serverIDValue: "same-server")
+    let second = FakeRemoteService(serverIDValue: "same-server")
+    let third = FakeRemoteService(serverIDValue: "other-server")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "one", name: "Server", subtitle: ""),
+          .init(id: "two", name: "Server", subtitle: ""),
+          .init(id: "three", name: "Server", subtitle: ""),
+        ], activeInstanceID: "one", instanceServices: ["one": first, "two": second, "three": third])
+    )
+    await model.start()
+    await model.beginAgentOverview()
+    XCTAssertEqual(model.allHostAgentOverviewSnapshots.count, 3)
+    XCTAssertEqual(Set(model.agentOverviewHosts.map(\.id)), ["one", "three"])
+    XCTAssertEqual(model.agentOverviewHosts.flatMap(\.entries).count, 4)
+    model.endAgentOverview()
+    await model.disconnect()
+  }
+
+  func testAllHostOverviewFailureRetainsHostSnapshotAndSelectedChat() async {
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(projectErrorCalls: [2], serverIDValue: "server-b")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "one", name: "Work", subtitle: ""),
+          .init(id: "two", name: "Home", subtitle: ""),
+        ], activeInstanceID: "one", instanceServices: ["one": first, "two": second]))
+    await model.start()
+    model.selectThread("thread-A")
+    await model.beginAgentOverview()
+    let previous = model.allHostAgentOverviewSnapshots.first(where: { $0.id == "two" })
+    await model.refreshAllHostAgentOverview()
+    let failed = model.allHostAgentOverviewSnapshots.first(where: { $0.id == "two" })
+    XCTAssertEqual(failed?.groups, previous?.groups)
+    XCTAssertEqual(failed?.updatedAt, previous?.updatedAt)
+    XCTAssertEqual(failed?.isStale, true)
+    XCTAssertNotNil(failed?.error)
+    XCTAssertEqual(model.activeInstanceID, "one")
+    XCTAssertEqual(model.selectedThreadID, "thread-A")
+    let closed = await first.isClosed()
+    XCTAssertFalse(closed)
+    await model.refreshAllHostAgentOverview()
+    XCTAssertEqual(
+      model.allHostAgentOverviewSnapshots.first(where: { $0.id == "two" })?.isStale, false)
+    model.endAgentOverview()
+    let overviewClosed = await eventually { await second.isClosed() }
+    XCTAssertTrue(overviewClosed)
+    let selectedClosed = await first.isClosed()
+    XCTAssertFalse(selectedClosed)
+    await model.disconnect()
+  }
+
+  func testRemovingHostDuringOverviewRefreshRejectsLateRows() async {
+    let gate = TestGate()
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(
+      projectGate: gate, projectGateAtCall: 1, serverIDValue: "server-b")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "one", name: "Work", subtitle: ""),
+          .init(id: "two", name: "Home", subtitle: ""),
+        ], activeInstanceID: "one", instanceServices: ["one": first, "two": second]))
+    await model.start()
+    let refresh = Task { await model.beginAgentOverview() }
+    await gate.waitUntilEntered()
+    await model.removeSavedInstance("two")
+    await gate.open()
+    await refresh.value
+    await model.refreshAllHostAgentOverview()
+    XCTAssertEqual(model.allHostAgentOverviewSnapshots.map(\.id), ["one"])
+    let removedClosed = await second.isClosed()
+    XCTAssertTrue(removedClosed)
+    XCTAssertEqual(model.activeInstanceID, "one")
+    model.endAgentOverview()
+    await model.disconnect()
+  }
+
+  func testBackgroundCancelsOverviewAndForegroundReloadsWithoutClosingSelectedChat() async {
+    let first = FakeRemoteService(serverIDValue: "server-a")
+    let second = FakeRemoteService(serverIDValue: "server-b")
+    let model = OesapModel(
+      connectionFactory: FakeConnectionFactory(
+        connectServices: [],
+        initiallySavedInstances: [
+          .init(id: "one", name: "Work", subtitle: ""),
+          .init(id: "two", name: "Home", subtitle: ""),
+        ], activeInstanceID: "one", instanceServices: ["one": first, "two": second]))
+    await model.start()
+    await model.beginAgentOverview()
+    model.appDidEnterBackground()
+    let overviewClosed = await eventually { await second.isClosed() }
+    XCTAssertTrue(overviewClosed)
+    XCTAssertTrue(model.allHostAgentOverviewSnapshots.allSatisfy(\.isStale))
+    let selectedClosed = await first.isClosed()
+    XCTAssertFalse(selectedClosed)
+    await model.appDidBecomeActive()
+    await model.refreshAllHostAgentOverview()
+    XCTAssertTrue(model.allHostAgentOverviewSnapshots.allSatisfy { !$0.isStale })
+    XCTAssertEqual(model.activeInstanceID, "one")
+    model.endAgentOverview()
+    await model.disconnect()
+  }
+
+  func testOverviewOrdersAttentionBeforeRecencyAcrossProjects() {
+    func thread(_ id: String, state: RemoteThread.State, attention: Bool, activity: Double?)
+      -> RemoteThread
+    {
+      RemoteThread(
+        id: id, title: id, provider: nil, model: nil, state: state,
+        requiresAttention: attention, attentionReason: nil,
+        lastActivityAt: activity.map { Date(timeIntervalSince1970: $0) })
+    }
+    let groups = [
+      RemoteAgentOverviewGroup(
+        project: RemoteProject(id: "A", name: "First project", subtitle: nil),
+        threads: [
+          thread("newest", state: .running, attention: false, activity: 500),
+          thread("waiting", state: .waiting, attention: false, activity: 200),
+          thread("unknown-date", state: .running, attention: false, activity: nil),
+        ], error: nil),
+      RemoteAgentOverviewGroup(
+        project: RemoteProject(id: "B", name: "Second project", subtitle: nil),
+        threads: [
+          thread("failed", state: .failed, attention: true, activity: 100),
+          thread("flagged", state: .running, attention: true, activity: 300),
+          thread("older", state: .idle, attention: false, activity: 400),
+          thread("attention-unknown-date", state: .idle, attention: true, activity: nil),
+        ], error: "Last-known rows"),
+    ]
+
+    let entries = RemoteAgentOverviewEntry.sortedEntries(in: groups)
+    XCTAssertEqual(
+      entries.map(\.thread.id),
+      ["flagged", "waiting", "failed", "attention-unknown-date", "newest", "older", "unknown-date"])
+    XCTAssertEqual(entries.first?.project.id, "B")
+    XCTAssertEqual(entries[1].project.id, "A")
+  }
+
+  func testOverviewRecencyTiesAreStableAndRowIdentityIncludesProject() {
+    let first = RemoteThread(
+      id: "same", title: "Thread", provider: nil, model: nil, state: .running,
+      requiresAttention: false, attentionReason: nil,
+      lastActivityAt: Date(timeIntervalSince1970: 100))
+    var second = first
+    second.id = "second"
+    let groups = [
+      RemoteAgentOverviewGroup(
+        project: RemoteProject(id: "B", name: "Project B", subtitle: nil),
+        threads: [first], error: nil),
+      RemoteAgentOverviewGroup(
+        project: RemoteProject(id: "A", name: "Project A", subtitle: nil),
+        threads: [second, first], error: nil),
+    ]
+    let entries = RemoteAgentOverviewEntry.sortedEntries(in: groups)
+    XCTAssertEqual(entries.map(\.project.id), ["A", "A", "B"])
+    XCTAssertEqual(entries.map(\.thread.id), ["same", "second", "same"])
+    XCTAssertEqual(Set(entries.map(\.id)).count, 3)
+    XCTAssertEqual(RemoteAgentOverviewEntry.sortedEntries(in: groups.reversed()), entries)
+  }
+
   func testAgentOverviewKeepsSelectedChatAndShowsPartialProjectError() async throws {
     let service = FakeRemoteService(threadErrorForB: true)
     let model = OesapModel(connectionFactory: FakeConnectionFactory(connectServices: [service]))
@@ -2110,6 +2560,31 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
   private var generation = 0
   private var connectCount = 0
   private var connectionAttempts = 0
+  private var overviewInstances: Set<String> = []
+  private var overviewConnectionCalls: [String] = []
+
+  func overviewCalls() -> [String] { overviewConnectionCalls }
+
+  func connectForOverview(instanceID: String) async throws -> any OesapRemoteService {
+    overviewConnectionCalls.append(instanceID)
+    guard savedInstances.contains(where: { $0.id == instanceID }),
+      let service = instanceServices[instanceID]
+    else { throw RemoteServiceError.unavailable("Unknown overview instance") }
+    await service.reopen()
+    if instanceID != currentInstanceID { overviewInstances.insert(instanceID) }
+    return service
+  }
+
+  func disconnectOverviewService(instanceID: String) async {
+    guard overviewInstances.remove(instanceID) != nil else { return }
+    if instanceID != currentInstanceID { await instanceServices[instanceID]?.disconnect() }
+  }
+
+  func disconnectOverviewServices() async {
+    let instances = overviewInstances
+    overviewInstances = []
+    for id in instances where id != currentInstanceID { await instanceServices[id]?.disconnect() }
+  }
 
   func connectionAttemptCount() -> Int { connectionAttempts }
 
@@ -2156,6 +2631,7 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
       throw RemoteServiceError.unavailable("The saved instance has no fixture service")
     }
     await service.reopen()
+    overviewInstances.remove(id)
     active = service
     return service
   }
@@ -2163,6 +2639,7 @@ private actor FakeConnectionFactory: OesapConnectionFactory {
   func removeSavedInstance(id: String) async throws {
     generation += 1
     savedInstances.removeAll { $0.id == id }
+    await disconnectOverviewService(instanceID: id)
     instanceServices[id] = nil
     if currentInstanceID == id {
       await active?.disconnect()
@@ -2232,7 +2709,7 @@ private actor FakeRemoteService: OesapRemoteService {
   private var olderPageCalls = 0
   private var permissionAnswers = 0
   private let projectsValue: [RemoteProject]
-  private let projectsError: Error?
+  private var projectsError: Error?
   private let projectsAfterFirstCall: [RemoteProject]?
   private let projectErrorCalls: Set<Int>
   private let projectGate: TestGate?
@@ -2501,6 +2978,8 @@ private actor FakeRemoteService: OesapRemoteService {
   }
 
   func projectCallCount() -> Int { projectCalls }
+
+  func setProjectsError(_ error: Error?) { projectsError = error }
 
   func agentForOpenIntent(agentID: String) async throws -> RemoteThread? {
     await openAgentGate?.wait()

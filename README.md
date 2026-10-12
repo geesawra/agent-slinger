@@ -98,13 +98,18 @@ example, `mac.local:6767`; leave off `ws://` or `wss://`) and password when
 required, or choose **Relay pairing** and paste the link provided by Paseo.
 For a private VPN host without TLS, use the VPN IP address when turning TLS
 off. Give each connection an optional name, then use **Settings** to add and
-switch between saved Paseo instances. Settings is available from both the
+remove saved Paseo instances. Settings is available from both the
 disconnected setup screen and the connected Projects menu. The app stores
-connection credentials and the active instance choice in the system Keychain. On
+connection credentials and the last workspace instance in the system Keychain. On
 upgrade, an existing single saved connection is migrated into the instance
 list automatically.
 After connecting, open a project, select an agent thread, and send a message
-from its timeline. Use **Project Agent** to choose a provider and optional
+from its timeline. Projects lists all saved servers in sections named after
+their saved connections; selecting a project switches to its originating server.
+Each server's catalog loads independently, and unavailable servers retain
+clearly marked last-known projects. When several servers are saved, **Add project**
+offers a server chooser, including servers with no projects yet.
+Use **Project Agent** to choose a provider and optional
 model for future threads on that host and project; those settings are saved on
 this device because Paseo projects do not currently contain an agent binding.
 Choose **New thread** to open a blank composer. The remote thread is created
@@ -120,12 +125,27 @@ Manual retry of that exact message is available only when the connected host
 advertises `agentRequestReceipts`; an unresolved in-flight receipt can still
 leave delivery uncertain.
 
-Choose **Agents** on the Projects screen for an overview grouped by project.
+Choose **Agents** on the Projects screen for an overview of all saved servers.
+Each server has a section named after its saved connection. Threads needing
+attention appear first within each section, then threads are ordered by most
+recent host-reported update within each category. Server sections with attention
+threads appear first, followed by the most recently active sections. Each row
+includes its project name. Use **This server** to limit the overview to the
+selected connection.
+When update time is unavailable, creation time is used; unknown dates sort last
+within their category.
 It opens with active agents (starting, running, waiting for attention, or
 failed); switch to **All** to include idle and closed agents. This is a status
-snapshot rather than a live subscription. Pull down or use Refresh to fetch
+snapshot rather than a live subscription. Pull down to fetch
 current states. Offline and partial project failures keep the last available
 rows visible with an explicit stale/error indication.
+Overview connections run concurrently and leave the selected chat workspace
+intact. Opening an agent switches to its originating server; text and image
+drafts and uncertain sends are kept per saved connection while the app is open,
+and restored only after that server's identity is confirmed. Alternate direct
+and relay connections to the same authenticated server contribute one section.
+See [the all-server overview design](docs/all-host-agent-overview.md) for lifecycle
+and error handling.
 
 The chat status card also shows the last context-window report when the host
 provides both the used token count and context-window size. Tap it for token
@@ -149,6 +169,8 @@ Passing `--demo` to the app enables deterministic local UI data and
 does not connect to a remote host. Pass `--demo-tools` from Xcode's launch
 arguments to inspect realistic shell, read, edit, and failed-tool cards, then
 send a prompt to see a running shell row update in place.
+`--demo --demo-multiple-servers` seeds Work, Home, and Offline servers to inspect
+server sections, colliding thread IDs, scope changes, and partial availability.
 `--demo-performance` opens an offline fixture with 1,000 Markdown messages and
 5,000 stream chunks over 50 seconds in the running demo thread for repeatable
 scrolling and streaming checks. See [the cross-platform ADR](docs/adr/0011-mac-catalyst-ipad-and-chat-performance.md)

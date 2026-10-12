@@ -118,6 +118,75 @@ struct RemoteAgentOverviewGroup: Identifiable, Sendable, Equatable {
   var id: String { project.id }
 }
 
+struct RemoteAgentOverviewEntry: Identifiable, Sendable, Equatable {
+  struct ID: Hashable, Sendable {
+    var projectID: String
+    var threadID: String
+  }
+
+  var project: RemoteProject
+  var thread: RemoteThread
+
+  var id: ID { ID(projectID: project.id, threadID: thread.id) }
+
+  static func sortedEntries(in groups: [RemoteAgentOverviewGroup]) -> [Self] {
+    groups.flatMap { group in
+      group.threads.map { Self(project: group.project, thread: $0) }
+    }.sorted { lhs, rhs in
+      if lhs.thread.needsAttention != rhs.thread.needsAttention {
+        return lhs.thread.needsAttention
+      }
+      if lhs.thread.lastActivityAt != rhs.thread.lastActivityAt {
+        return (lhs.thread.lastActivityAt ?? .distantPast)
+          > (rhs.thread.lastActivityAt ?? .distantPast)
+      }
+      if lhs.project.id != rhs.project.id { return lhs.project.id < rhs.project.id }
+      return lhs.thread.id < rhs.thread.id
+    }
+  }
+}
+
+enum AgentOverviewScope: String, CaseIterable, Identifiable {
+  case allHosts
+  case thisHost
+
+  var id: Self { self }
+  var title: String { self == .allHosts ? "All servers" : "This server" }
+}
+
+struct RemoteAgentOverviewHost: Identifiable, Sendable, Equatable {
+  var instance: SavedPaseoInstance
+  var serverID: String?
+  var groups: [RemoteAgentOverviewGroup] = []
+  var updatedAt: Date?
+  var error: String?
+  var isStale = false
+  var isLoading = false
+
+  var id: String { instance.id }
+  var entries: [RemoteAgentOverviewEntry] {
+    RemoteAgentOverviewEntry.sortedEntries(in: groups)
+  }
+}
+
+struct ServerProjectID: Hashable, Sendable {
+  var instanceID: String
+  var projectID: String
+}
+
+struct RemoteProjectCatalogHost: Identifiable, Sendable, Equatable {
+  var instance: SavedPaseoInstance
+  var serverID: String?
+  var projects: [RemoteProject] = []
+  var updatedAt: Date?
+  var error: String?
+  var isStale = false
+  var isLoading = false
+  var isConnectionUnavailable = false
+
+  var id: String { instance.id }
+}
+
 struct RemoteGitChangedFile: Identifiable, Sendable, Equatable {
   var path: String
   var additions: Int
@@ -281,6 +350,9 @@ struct RemoteThread: Identifiable, Sendable, Equatable {
   var parentAgentID: String? = nil
   var workspaceID: String? = nil
   var projectID: String? = nil
+  var lastActivityAt: Date? = nil
+
+  var needsAttention: Bool { requiresAttention || state == .waiting }
 }
 
 struct RemoteProviderSubagent: Identifiable, Sendable, Equatable {
@@ -653,6 +725,9 @@ protocol OesapConnectionFactory: Sendable {
   func activeInstanceID() async throws -> String?
   func selectSavedInstance(id: String) async throws -> any OesapRemoteService
   func removeSavedInstance(id: String) async throws
+  func connectForOverview(instanceID: String) async throws -> any OesapRemoteService
+  func disconnectOverviewService(instanceID: String) async
+  func disconnectOverviewServices() async
   func connect(_ connection: RemoteConnection) async throws -> any OesapRemoteService
   func reconnect() async throws -> any OesapRemoteService
   func disconnect() async throws
@@ -665,6 +740,11 @@ extension OesapConnectionFactory {
     throw RemoteServiceError.unavailable("Selecting saved Paseo instances is not supported here.")
   }
   func removeSavedInstance(id: String) async throws {}
+  func connectForOverview(instanceID: String) async throws -> any OesapRemoteService {
+    throw RemoteServiceError.unavailable("Concurrent Paseo connections are not supported here.")
+  }
+  func disconnectOverviewService(instanceID: String) async {}
+  func disconnectOverviewServices() async {}
 }
 
 enum RemoteServiceError: LocalizedError, Sendable {
@@ -702,10 +782,20 @@ enum RemoteServiceError: LocalizedError, Sendable {
     private var currentService: DemoRemoteService?
     private var savedInstances: [SavedPaseoInstance] = []
     private var selectedInstanceID: String?
+    private var overviewServices: [String: DemoRemoteService] = [:]
 
     init(mode: Mode = .normal) {
       self.mode = mode
-      if ProcessInfo.processInfo.arguments.contains("--demo-saved-connection") {
+      if ProcessInfo.processInfo.arguments.contains("--demo-multiple-servers") {
+        savedInstances = [
+          .init(
+            id: "demo-work-instance", name: "Work server", subtitle: "Demo", serverID: "demo-work"),
+          .init(
+            id: "demo-home-instance", name: "Home server", subtitle: "Demo", serverID: "demo-home"),
+          .init(id: "demo-offline-instance", name: "Offline server", subtitle: "Demo"),
+        ]
+        selectedInstanceID = "demo-work-instance"
+      } else if ProcessInfo.processInfo.arguments.contains("--demo-saved-connection") {
         let instanceID = "demo-saved-instance"
         savedInstances = [
           SavedPaseoInstance(
@@ -729,11 +819,39 @@ enum RemoteServiceError: LocalizedError, Sendable {
       guard savedInstances.contains(where: { $0.id == id }) else {
         throw RemoteServiceError.unavailable("That saved Paseo instance is no longer available.")
       }
+      if id == "demo-offline-instance" {
+        throw RemoteServiceError.unavailable("The demo server is unreachable.")
+      }
       await currentService?.disconnect()
-      let service = makeService()
+      let service = overviewServices.removeValue(forKey: id) ?? makeService(instanceID: id)
       currentService = service
       selectedInstanceID = id
       return service
+    }
+
+    func connectForOverview(instanceID: String) async throws -> any OesapRemoteService {
+      guard savedInstances.contains(where: { $0.id == instanceID }) else {
+        throw RemoteServiceError.unavailable("That saved Paseo instance is no longer available.")
+      }
+      if instanceID == "demo-offline-instance" {
+        throw RemoteServiceError.unavailable("The demo server is unreachable.")
+      }
+      if instanceID == selectedInstanceID, let currentService { return currentService }
+      if let service = overviewServices[instanceID] { return service }
+      let service = makeService(instanceID: instanceID)
+      overviewServices[instanceID] = service
+      return service
+    }
+
+    func disconnectOverviewService(instanceID: String) async {
+      let service = overviewServices.removeValue(forKey: instanceID)
+      await service?.disconnect()
+    }
+
+    func disconnectOverviewServices() async {
+      let services = Array(overviewServices.values)
+      overviewServices.removeAll()
+      for service in services { await service.disconnect() }
     }
 
     func connect(_ connection: RemoteConnection) async throws -> any OesapRemoteService {
@@ -777,6 +895,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
 
     func removeSavedInstance(id: String) async throws {
       savedInstances.removeAll(where: { $0.id == id })
+      await disconnectOverviewService(instanceID: id)
       guard selectedInstanceID == id else { return }
       selectedInstanceID = nil
       await currentService?.disconnect()
@@ -788,12 +907,14 @@ enum RemoteServiceError: LocalizedError, Sendable {
         savedInstances.removeAll(where: { $0.id == selectedInstanceID })
       }
       selectedInstanceID = nil
+      await disconnectOverviewServices()
       await currentService?.disconnect()
       currentService = nil
     }
 
-    private func makeService() -> DemoRemoteService {
+    private func makeService(instanceID: String? = nil) -> DemoRemoteService {
       DemoRemoteService(
+        serverID: savedInstances.first(where: { $0.id == instanceID })?.serverID,
         isEmpty: mode == .empty, failsSending: mode == .sendFailure,
         creationSupported: mode != .creationUnsupported,
         overviewEmpty: mode == .overviewEmpty,
@@ -807,6 +928,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
   }
 
   actor DemoRemoteService: OesapRemoteService {
+    private let serverIDOverride: String?
     private let isEmpty: Bool
     private let failsSending: Bool
     private let creationSupported: Bool
@@ -836,6 +958,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
     private var closed = false
 
     init(
+      serverID: String? = nil,
       isEmpty: Bool = false, failsSending: Bool = false,
       creationSupported: Bool = true, overviewEmpty: Bool = false,
       overviewFailure: Bool = false, usageSupported: Bool = true,
@@ -843,6 +966,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
       agentControlSupported: Bool = false, imageFixtures: Bool = false,
       performanceFixtures: Bool = false
     ) {
+      self.serverIDOverride = serverID
       self.isEmpty = isEmpty
       self.failsSending = failsSending
       self.creationSupported = creationSupported
@@ -857,6 +981,7 @@ enum RemoteServiceError: LocalizedError, Sendable {
     }
 
     func serverID() async -> String? {
+      if let serverIDOverride { return serverIDOverride }
       let prefix = "--demo-server-id="
       return ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) })
         .map { String($0.dropFirst(prefix.count)) } ?? "oesap-demo-host"
@@ -1163,11 +1288,13 @@ enum RemoteServiceError: LocalizedError, Sendable {
             id: "demo-tools-running", title: "Check tool integrations", provider: "codex",
             model: "gpt-6-sol", state: .running, requiresAttention: false,
             attentionReason: nil,
-            contextUsage: RemoteContextUsage(usedTokens: 64_000, maxTokens: 200_000)),
+            contextUsage: RemoteContextUsage(usedTokens: 64_000, maxTokens: 200_000),
+            lastActivityAt: Date(timeIntervalSince1970: 400)),
           RemoteThread(
             id: "demo-tools-failed", title: "Fix release build", provider: "codex",
             model: "gpt-6-astra", state: .failed, requiresAttention: true,
-            attentionReason: "An agent run failed."),
+            attentionReason: "An agent run failed.",
+            lastActivityAt: Date(timeIntervalSince1970: 100)),
         ])
       }
       guard projectID == "demo-project" else { return [] }
@@ -1182,7 +1309,8 @@ enum RemoteServiceError: LocalizedError, Sendable {
             requiresAttention: false,
             attentionReason: nil,
             contextUsage: RemoteContextUsage(usedTokens: 64_000, maxTokens: 200_000),
-            cwd: "/demo/oesap"
+            cwd: "/demo/oesap",
+            lastActivityAt: Date(timeIntervalSince1970: 300)
           ),
           RemoteThread(
             id: "demo-agent-attention",
@@ -1191,13 +1319,15 @@ enum RemoteServiceError: LocalizedError, Sendable {
             model: nil,
             state: .waiting,
             requiresAttention: true,
-            attentionReason: "The agent is waiting for approval."
+            attentionReason: "The agent is waiting for approval.",
+            lastActivityAt: Date(timeIntervalSince1970: 200)
           ),
           RemoteThread(
             id: "demo-agent-idle", title: "Review older changes", provider: "codex",
             model: "gpt-6-sol", state: .idle, requiresAttention: false,
             attentionReason: nil,
-            contextUsage: RemoteContextUsage(usedTokens: 18_000, maxTokens: nil)),
+            contextUsage: RemoteContextUsage(usedTokens: 18_000, maxTokens: nil),
+            lastActivityAt: Date(timeIntervalSince1970: 500)),
         ])
     }
 

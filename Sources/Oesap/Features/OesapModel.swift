@@ -82,6 +82,89 @@ final class OesapModel {
   private(set) var agentOverviewError: String?
   private(set) var agentOverviewIsStale = false
   private(set) var agentOverviewUpdatedAt: Date?
+  var agentOverviewEntries: [RemoteAgentOverviewEntry] {
+    RemoteAgentOverviewEntry.sortedEntries(in: agentOverviewGroups)
+  }
+  var agentOverviewScope = AgentOverviewScope.allHosts
+  private(set) var allHostAgentOverviewSnapshots: [RemoteAgentOverviewHost] = []
+  private(set) var loadingAllHostAgentOverview = false
+  private(set) var allHostAgentOverviewError: String?
+  private(set) var openingOverviewAgent = false
+  private(set) var overviewNavigationError: String?
+  private(set) var allHostProjectCatalogs: [RemoteProjectCatalogHost] = []
+  private(set) var loadingAllHostProjects = false
+  private(set) var projectCatalogError: String?
+  private(set) var projectNavigationError: String?
+  private(set) var openingServerProject = false
+
+  var projectCatalogHosts: [RemoteProjectCatalogHost] {
+    if allHostProjectCatalogs.isEmpty {
+      let instance =
+        savedInstances.first(where: { $0.id == activeInstanceID })
+        ?? SavedPaseoInstance(id: "current-host", name: "Current server", subtitle: "")
+      return [
+        RemoteProjectCatalogHost(
+          instance: instance, serverID: connectedServerID, projects: projects,
+          error: workspaceError, isStale: connectionState != .connected,
+          isLoading: loadingProjects || loadingAllHostProjects,
+          isConnectionUnavailable: connectionState == .disconnected)
+      ]
+    }
+    var seenServers = Set<String>()
+    return allHostProjectCatalogs.sorted {
+      if $0.isStale != $1.isStale { return !$0.isStale }
+      if ($0.id == activeInstanceID) != ($1.id == activeInstanceID) {
+        return $0.id == activeInstanceID
+      }
+      return $0.id < $1.id
+    }.filter {
+      guard let serverID = $0.serverID, !serverID.isEmpty else { return true }
+      return seenServers.insert(serverID).inserted
+    }.sorted {
+      let order = $0.instance.name.localizedCaseInsensitiveCompare($1.instance.name)
+      return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+    }
+  }
+
+  var agentOverviewHosts: [RemoteAgentOverviewHost] {
+    if agentOverviewScope == .thisHost || allHostAgentOverviewSnapshots.isEmpty {
+      let instance =
+        savedInstances.first(where: { $0.id == activeInstanceID })
+        ?? SavedPaseoInstance(id: "current-host", name: "Current server", subtitle: "")
+      return [
+        RemoteAgentOverviewHost(
+          instance: instance, serverID: connectedServerID, groups: agentOverviewGroups,
+          updatedAt: agentOverviewUpdatedAt, error: agentOverviewError,
+          isStale: agentOverviewIsStale || connectionState != .connected,
+          isLoading: loadingAgentOverview)
+      ]
+    }
+    // Prefer fresh results, then the selected route, when direct and relay
+    // connections authenticate to the same daemon. Never deduplicate by name.
+    var seenServers = Set<String>()
+    let hosts = allHostAgentOverviewSnapshots.sorted {
+      if $0.isStale != $1.isStale { return !$0.isStale }
+      if ($0.id == activeInstanceID) != ($1.id == activeInstanceID) {
+        return $0.id == activeInstanceID
+      }
+      return $0.id < $1.id
+    }.filter { host in
+      guard let serverID = host.serverID, !serverID.isEmpty else { return true }
+      return seenServers.insert(serverID).inserted
+    }
+    return hosts.sorted { lhs, rhs in
+      let left = lhs.entries.first?.thread
+      let right = rhs.entries.first?.thread
+      if (left?.needsAttention == true) != (right?.needsAttention == true) {
+        return left?.needsAttention == true
+      }
+      if left?.lastActivityAt != right?.lastActivityAt {
+        return (left?.lastActivityAt ?? .distantPast) > (right?.lastActivityAt ?? .distantPast)
+      }
+      let nameOrder = lhs.instance.name.localizedCaseInsensitiveCompare(rhs.instance.name)
+      return nameOrder == .orderedSame ? lhs.id < rhs.id : nameOrder == .orderedAscending
+    }
+  }
   private(set) var providerSubagentsByParent: [String: [RemoteProviderSubagent]] = [:]
   private(set) var providerSubagentErrors: [String: String] = [:]
   private(set) var loadingProviderSubagentParents: Set<String> = []
@@ -139,6 +222,19 @@ final class OesapModel {
   private var agentActionFeedback: [String: RemoteAgentActionFeedback] = [:]
   private var agentSendFeedback: [String: RemoteAgentActionFeedback] = [:]
   @ObservationIgnored private var pendingAgentMessages: [String: PendingAgentMessage] = [:]
+  private struct SavedWorkspaceAgentState {
+    var serverID: String
+    var drafts: [String: String]
+    var imageDrafts: [String: [RemoteDraftImage]]
+    var acceptedImages: [String: [String: [RemoteDraftImage]]]
+    var pendingMessages: [String: PendingAgentMessage]
+    var sendFeedback: [String: RemoteAgentActionFeedback]
+    var actionFeedback: [String: RemoteAgentActionFeedback]
+    var newThreadIntents: [String: RemoteNewThreadIntent]
+    var newThreadResults: [String: RemoteNewThreadResult]
+  }
+  @ObservationIgnored private var savedWorkspaceAgentStates: [String: SavedWorkspaceAgentState] =
+    [:]
   @ObservationIgnored private var agentSendTokens: [String: UUID] = [:]
   @ObservationIgnored private var agentStopTokens: [String: UUID] = [:]
   @ObservationIgnored private var threadStateRevisions: [String: Int] = [:]
@@ -170,6 +266,17 @@ final class OesapModel {
   @ObservationIgnored private var agentOverviewRefreshTask: Task<Void, Never>?
   @ObservationIgnored private var agentOverviewRefreshTaskID: UUID?
   @ObservationIgnored private var agentOverviewRefreshQueued = false
+  @ObservationIgnored private var allHostOverviewGeneration = 0
+  @ObservationIgnored private var allHostOverviewTask: Task<Void, Never>?
+  @ObservationIgnored private var allHostOverviewTaskID: UUID?
+  @ObservationIgnored private var allHostOverviewRefreshQueued = false
+  @ObservationIgnored private var overviewIsVisible = false
+  @ObservationIgnored private var overviewCleanupTask: Task<Void, Never>?
+  @ObservationIgnored private var projectCatalogIsVisible = false
+  @ObservationIgnored private var projectCatalogGeneration = 0
+  @ObservationIgnored private var projectCatalogTask: Task<Void, Never>?
+  @ObservationIgnored private var projectCatalogTaskID: UUID?
+  @ObservationIgnored private var projectCatalogRefreshQueued = false
   @ObservationIgnored private var gitRequestGeneration = 0
   @ObservationIgnored private var cachedGitDiffByPath: [String: String] = [:]
   @ObservationIgnored private var providerUsageRefreshTask: Task<Void, Never>?
@@ -734,10 +841,17 @@ final class OesapModel {
   func appDidEnterBackground() {
     appIsInBackground = true
     shouldReconnectAfterBackground = true
+    cancelProjectCatalogRefresh()
+    for index in allHostProjectCatalogs.indices { allHostProjectCatalogs[index].isStale = true }
+    suspendAllHostOverview()
   }
 
   func appDidBecomeActive() async {
     appIsInBackground = false
+    if projectCatalogIsVisible { Task { await self.refreshAllHostProjects() } }
+    if overviewIsVisible {
+      Task { await self.refreshVisibleAgentOverview() }
+    }
     guard shouldReconnectAfterBackground else { return }
 
     if loadingSavedConnections {
@@ -812,6 +926,12 @@ final class OesapModel {
         savedInstancesRefreshGeneration == refreshGeneration
       else { return }
       savedInstances = instances
+      allHostAgentOverviewSnapshots.removeAll { snapshot in
+        !instances.contains(where: { $0.id == snapshot.id })
+      }
+      allHostProjectCatalogs.removeAll { snapshot in
+        !instances.contains(where: { $0.id == snapshot.id })
+      }
       activeInstanceID = activeID
       hasSavedConnection = !instances.isEmpty
       instanceError = nil
@@ -917,6 +1037,7 @@ final class OesapModel {
     }
     if activeInstanceID == id, connectionState == .connected { return true }
 
+    saveWorkspaceAgentState()
     let previousService = service
     let generation = invalidateConnection()
     service = nil
@@ -966,6 +1087,7 @@ final class OesapModel {
       canCreateThreads = supportsNewThreads
       providerUsageSupported = supportsProviderUsage
       agentRequestReceiptsSupported = supportsAgentRequestReceipts
+      restoreWorkspaceAgentState(instanceID: id, serverID: serverID)
       connectionState = .connected
       timelineGeneration += 1
       startObservingConnection(connectedService, generation: generation)
@@ -994,6 +1116,11 @@ final class OesapModel {
   }
 
   func removeSavedInstance(_ id: String) async {
+    // Cancel the batch before removing a record so its late results cannot
+    // recreate a removed section. Other hosts' last snapshots stay visible.
+    cancelAllHostOverviewRefresh()
+    cancelProjectCatalogRefresh()
+    savedWorkspaceAgentStates.removeValue(forKey: id)
     let removesActiveInstance = activeInstanceID == id
     let generation: Int
     let previousService: (any OesapRemoteService)?
@@ -1016,6 +1143,8 @@ final class OesapModel {
       try await connectionFactory.removeSavedInstance(id: id)
       guard connectionGeneration == generation else { return }
       await refreshSavedInstances()
+      if overviewIsVisible { Task { await self.refreshVisibleAgentOverview() } }
+      if projectCatalogIsVisible { Task { await self.refreshAllHostProjects() } }
     } catch {
       guard connectionGeneration == generation else { return }
       await refreshSavedInstances()
@@ -1129,6 +1258,13 @@ final class OesapModel {
   }
 
   func disconnect() async {
+    cancelProjectCatalogRefresh()
+    allHostProjectCatalogs = []
+    projectCatalogError = nil
+    suspendAllHostOverview()
+    allHostAgentOverviewSnapshots = []
+    allHostAgentOverviewError = nil
+    if let activeInstanceID { savedWorkspaceAgentStates.removeValue(forKey: activeInstanceID) }
     let generation = invalidateConnection()
     timelineObservationThreadID = nil
     let previousService = service
@@ -1405,6 +1541,487 @@ final class OesapModel {
     await task.value
   }
 
+  func beginAgentOverview() async {
+    overviewIsVisible = true
+    await refreshVisibleAgentOverview()
+  }
+
+  func endAgentOverview() {
+    overviewIsVisible = false
+    suspendAllHostOverview()
+  }
+
+  private func cancelAllHostOverviewRefresh() {
+    allHostOverviewGeneration += 1
+    allHostOverviewTask?.cancel()
+    allHostOverviewTask = nil
+    allHostOverviewTaskID = nil
+    allHostOverviewRefreshQueued = false
+    loadingAllHostAgentOverview = false
+    for index in allHostAgentOverviewSnapshots.indices {
+      allHostAgentOverviewSnapshots[index].isLoading = false
+    }
+  }
+
+  private func suspendAllHostOverview() {
+    cancelAllHostOverviewRefresh()
+    for index in allHostAgentOverviewSnapshots.indices {
+      allHostAgentOverviewSnapshots[index].isStale = true
+    }
+    guard !projectCatalogIsVisible || appIsInBackground else { return }
+    closeOverviewConnections()
+  }
+
+  private func closeOverviewConnections() {
+    let previousCleanup = overviewCleanupTask
+    let factory = connectionFactory
+    overviewCleanupTask = Task {
+      await previousCleanup?.value
+      await factory.disconnectOverviewServices()
+    }
+  }
+
+  func beginProjectCatalog() async {
+    projectCatalogIsVisible = true
+    await refreshAllHostProjects()
+  }
+
+  func endProjectCatalog() {
+    projectCatalogIsVisible = false
+    cancelProjectCatalogRefresh()
+    if !overviewIsVisible || agentOverviewScope == .thisHost { closeOverviewConnections() }
+  }
+
+  private func cancelProjectCatalogRefresh() {
+    projectCatalogGeneration += 1
+    projectCatalogTask?.cancel()
+    projectCatalogTask = nil
+    projectCatalogTaskID = nil
+    projectCatalogRefreshQueued = false
+    loadingAllHostProjects = false
+    for index in allHostProjectCatalogs.indices { allHostProjectCatalogs[index].isLoading = false }
+  }
+
+  func refreshAllHostProjects(reloadIfRunning: Bool = false) async {
+    guard !appIsInBackground else { return }
+    if let task = projectCatalogTask {
+      if reloadIfRunning { projectCatalogRefreshQueued = true }
+      await task.value
+      return
+    }
+    let taskID = UUID()
+    projectCatalogTaskID = taskID
+    let task = Task { [weak self] in
+      guard let self else { return }
+      await self.overviewCleanupTask?.value
+      while !Task.isCancelled && self.projectCatalogTaskID == taskID {
+        self.projectCatalogRefreshQueued = false
+        await self.performProjectCatalogRefresh()
+        if !self.projectCatalogRefreshQueued { break }
+      }
+      if self.projectCatalogTaskID == taskID {
+        self.projectCatalogTask = nil
+        self.projectCatalogTaskID = nil
+      }
+    }
+    projectCatalogTask = task
+    await task.value
+  }
+
+  private func performProjectCatalogRefresh() async {
+    let generation = projectCatalogGeneration
+    await refreshSavedInstances()
+    guard !Task.isCancelled, generation == projectCatalogGeneration else { return }
+    guard !savedInstances.isEmpty else { return }
+    let instances = savedInstances
+    let previous = Dictionary(uniqueKeysWithValues: allHostProjectCatalogs.map { ($0.id, $0) })
+    allHostProjectCatalogs = instances.map { instance in
+      var host =
+        previous[instance.id] ?? RemoteProjectCatalogHost(instance: instance, serverID: nil)
+      host.instance = instance
+      host.isLoading = host.error == nil && !host.isConnectionUnavailable
+      return host
+    }
+    loadingAllHostProjects = true
+    projectCatalogError = instanceError
+    defer {
+      if generation == projectCatalogGeneration { loadingAllHostProjects = false }
+    }
+    let factory = connectionFactory
+    let selectedID = activeInstanceID
+    let selectedService = connectionState == .connected ? service : nil
+    let selectedGeneration = connectionGeneration
+    await withTaskGroup(of: RemoteProjectCatalogHost.self) { group in
+      var nextIndex = 0
+      func enqueue(_ instance: SavedPaseoInstance) {
+        group.addTask {
+          var host =
+            previous[instance.id]
+            ?? RemoteProjectCatalogHost(instance: instance, serverID: nil)
+          host.instance = instance
+          host.isLoading = false
+          var connected = false
+          do {
+            let remote: any OesapRemoteService
+            if instance.id == selectedID, let selectedService {
+              remote = selectedService
+            } else {
+              remote = try await withConnectionAttemptTimeout(.seconds(30)) {
+                try await factory.connectForOverview(instanceID: instance.id)
+              }
+            }
+            connected = true
+            let serverID = await remote.serverID()
+            if host.serverID != serverID {
+              host.projects = []
+              host.updatedAt = nil
+            }
+            host.serverID = serverID
+            host.projects = try await withConnectionAttemptTimeout(.seconds(15)) {
+              try await remote.projects()
+            }
+            try Task.checkCancellation()
+            host.updatedAt = Date()
+            host.error = nil
+            host.isStale = false
+            host.isConnectionUnavailable = false
+          } catch {
+            host.error = error.localizedDescription
+            host.isStale = true
+            let connectionFailure = await Self.isConnectionFailure(error)
+            host.isConnectionUnavailable = !connected || connectionFailure
+            // Shared services may also be serving the Agents refresh. Let the
+            // next request or lifecycle cleanup release a failed connection.
+          }
+          return host
+        }
+      }
+      for _ in 0..<min(4, instances.count) {
+        enqueue(instances[nextIndex])
+        nextIndex += 1
+      }
+      while let host = await group.next() {
+        guard !Task.isCancelled, generation == projectCatalogGeneration else {
+          group.cancelAll()
+          break
+        }
+        if let index = allHostProjectCatalogs.firstIndex(where: { $0.id == host.id }),
+          savedInstances.contains(where: { $0.id == host.id })
+        {
+          allHostProjectCatalogs[index] = host
+          if host.id == selectedID, selectedService != nil, host.isConnectionUnavailable,
+            connectionGeneration == selectedGeneration, connectionState == .connected
+          {
+            await markConnectionLost(
+              generation: selectedGeneration,
+              reason: host.error ?? "The server is unreachable.")
+          }
+        }
+        if nextIndex < instances.count {
+          enqueue(instances[nextIndex])
+          nextIndex += 1
+        }
+      }
+    }
+  }
+
+  @discardableResult
+  func openServerProject(instanceID: String, projectID: String) async -> Bool {
+    guard !openingServerProject, !openingOverviewAgent, !connectionState.isBusy else {
+      return false
+    }
+    projectNavigationError = nil
+    guard let host = projectCatalogHosts.first(where: { $0.id == instanceID }),
+      host.projects.contains(where: { $0.id == projectID })
+    else {
+      projectNavigationError = "This project is no longer available. Refresh and try again."
+      return false
+    }
+    openingServerProject = true
+    defer { openingServerProject = false }
+    if instanceID != "current-host"
+      && (instanceID != activeInstanceID || connectionState != .connected)
+    {
+      guard await selectSavedInstance(instanceID) else {
+        projectNavigationError = instanceError ?? "Connect to this server and try again."
+        return false
+      }
+    }
+    guard !Task.isCancelled, !appIsInBackground, connectionState == .connected,
+      instanceID == "current-host" || activeInstanceID == instanceID, let service
+    else { return false }
+    guard host.serverID == connectedServerID else {
+      projectNavigationError = "This server's identity changed. Refresh before opening a project."
+      return false
+    }
+    let generation = connectionGeneration
+    do {
+      let currentProjects = try await withConnectionAttemptTimeout(.seconds(15)) {
+        try await service.projects()
+      }
+      guard generation == connectionGeneration, !Task.isCancelled, !appIsInBackground else {
+        return false
+      }
+      guard currentProjects.contains(where: { $0.id == projectID }) else {
+        projectNavigationError = "This project is no longer available. Refresh and try again."
+        return false
+      }
+      projects = currentProjects
+      await selectProject(projectID)
+      updateSelectedProjectCatalog()
+      return generation == connectionGeneration && selectedProjectID == projectID
+        && !Task.isCancelled
+    } catch {
+      if generation == connectionGeneration { projectNavigationError = error.localizedDescription }
+      return false
+    }
+  }
+
+  func refreshVisibleAgentOverview() async {
+    if agentOverviewScope == .thisHost {
+      suspendAllHostOverview()
+      await refreshAgentOverview()
+    } else {
+      await refreshAllHostAgentOverview()
+    }
+  }
+
+  func refreshAllHostAgentOverview() async {
+    guard !appIsInBackground else { return }
+    if let task = allHostOverviewTask {
+      allHostOverviewRefreshQueued = true
+      await task.value
+      return
+    }
+    let taskID = UUID()
+    allHostOverviewTaskID = taskID
+    let task = Task { [weak self] in
+      guard let self else { return }
+      await self.overviewCleanupTask?.value
+      while !Task.isCancelled && self.allHostOverviewTaskID == taskID {
+        self.allHostOverviewRefreshQueued = false
+        await self.performAllHostOverviewRefresh()
+        if !self.allHostOverviewRefreshQueued { break }
+      }
+      if self.allHostOverviewTaskID == taskID {
+        self.allHostOverviewTask = nil
+        self.allHostOverviewTaskID = nil
+      }
+    }
+    allHostOverviewTask = task
+    await task.value
+  }
+
+  private func performAllHostOverviewRefresh() async {
+    let generation = allHostOverviewGeneration
+    await refreshSavedInstances()
+    guard !Task.isCancelled, generation == allHostOverviewGeneration else { return }
+    guard !savedInstances.isEmpty else {
+      await refreshAgentOverview()
+      return
+    }
+    let instances = savedInstances
+    let previous = Dictionary(
+      uniqueKeysWithValues: allHostAgentOverviewSnapshots.map { ($0.id, $0) })
+    allHostAgentOverviewSnapshots = instances.map { instance in
+      var host =
+        previous[instance.id]
+        ?? RemoteAgentOverviewHost(instance: instance, serverID: nil)
+      host.instance = instance
+      host.isLoading = true
+      return host
+    }
+    loadingAllHostAgentOverview = true
+    allHostAgentOverviewError = instanceError.map {
+      "Saved servers could not be refreshed. Showing the last available server list. \($0)"
+    }
+    defer {
+      if generation == allHostOverviewGeneration { loadingAllHostAgentOverview = false }
+    }
+    let factory = connectionFactory
+    let selectedID = activeInstanceID
+    let selectedService = connectionState == .connected ? service : nil
+    await withTaskGroup(of: RemoteAgentOverviewHost.self) { group in
+      var nextIndex = 0
+      func enqueue(_ instance: SavedPaseoInstance) {
+        group.addTask {
+          await Self.loadOverviewHost(
+            instance: instance, previous: previous[instance.id], factory: factory,
+            selectedService: instance.id == selectedID ? selectedService : nil)
+        }
+      }
+      for _ in 0..<min(4, instances.count) {
+        enqueue(instances[nextIndex])
+        nextIndex += 1
+      }
+      while let host = await group.next() {
+        guard !Task.isCancelled, generation == allHostOverviewGeneration else {
+          group.cancelAll()
+          break
+        }
+        if let index = allHostAgentOverviewSnapshots.firstIndex(where: { $0.id == host.id }),
+          savedInstances.contains(where: { $0.id == host.id })
+        {
+          allHostAgentOverviewSnapshots[index] = host
+          if activeInstanceID == host.id, connectionState == .connected,
+            connectedServerID == host.serverID
+          {
+            agentOverviewGroups = host.groups
+            agentOverviewUpdatedAt = host.updatedAt
+            agentOverviewIsStale = host.isStale
+            agentOverviewError = host.error
+          }
+        }
+        if nextIndex < instances.count {
+          enqueue(instances[nextIndex])
+          nextIndex += 1
+        }
+      }
+    }
+  }
+
+  nonisolated private static func loadOverviewHost(
+    instance: SavedPaseoInstance, previous: RemoteAgentOverviewHost?,
+    factory: any OesapConnectionFactory, selectedService: (any OesapRemoteService)?
+  ) async -> RemoteAgentOverviewHost {
+    var host = previous ?? RemoteAgentOverviewHost(instance: instance, serverID: nil)
+    host.instance = instance
+    host.isLoading = false
+    do {
+      let service: any OesapRemoteService
+      if let selectedService {
+        service = selectedService
+      } else {
+        service = try await withConnectionAttemptTimeout(.seconds(30)) {
+          try await factory.connectForOverview(instanceID: instance.id)
+        }
+      }
+      let serverID = await service.serverID()
+      if host.serverID != serverID {
+        host.groups = []
+        host.updatedAt = nil
+      }
+      host.serverID = serverID
+      let projects = try await withConnectionAttemptTimeout(.seconds(15)) {
+        try await service.projects()
+      }
+      let previousGroups = Dictionary(uniqueKeysWithValues: host.groups.map { ($0.id, $0) })
+      let results = await loadOverviewProjects(projects, using: service)
+      try Task.checkCancellation()
+      host.groups = projects.enumerated().map { index, project in
+        let result = results.first(where: { $0.index == index })
+        return RemoteAgentOverviewGroup(
+          project: project, threads: result?.threads ?? previousGroups[project.id]?.threads ?? [],
+          error: result?.error)
+      }
+      host.isStale = host.groups.contains { $0.error != nil }
+      host.error = host.isStale ? "Some project states are unavailable." : nil
+      if projects.isEmpty || results.contains(where: { $0.threads != nil }) {
+        host.updatedAt = Date()
+      }
+    } catch {
+      host.error = error.localizedDescription
+      host.isStale = true
+      if selectedService == nil && !Task.isCancelled {
+        await factory.disconnectOverviewService(instanceID: instance.id)
+      }
+    }
+    return host
+  }
+
+  nonisolated private static func loadOverviewProjects(
+    _ projects: [RemoteProject], using service: any OesapRemoteService
+  ) async -> [AgentOverviewLoadResult] {
+    await withTaskGroup(of: AgentOverviewLoadResult.self) { group in
+      var nextIndex = 0
+      func enqueue(_ index: Int) {
+        let project = projects[index]
+        group.addTask {
+          do {
+            let threads = try await withConnectionAttemptTimeout(.seconds(15)) {
+              try await service.threads(projectID: project.id)
+            }
+            return AgentOverviewLoadResult(index: index, threads: threads, error: nil)
+          } catch {
+            return AgentOverviewLoadResult(
+              index: index, threads: nil, error: error.localizedDescription)
+          }
+        }
+      }
+      for _ in 0..<min(4, projects.count) {
+        enqueue(nextIndex)
+        nextIndex += 1
+      }
+      var results: [AgentOverviewLoadResult] = []
+      while let result = await group.next() {
+        results.append(result)
+        if Task.isCancelled {
+          group.cancelAll()
+          break
+        }
+        if nextIndex < projects.count {
+          enqueue(nextIndex)
+          nextIndex += 1
+        }
+      }
+      return results
+    }
+  }
+
+  @discardableResult
+  func openOverviewAgent(instanceID: String, projectID: String, threadID: String) async -> Bool {
+    guard !openingOverviewAgent, !connectionState.isBusy, !appIsInBackground else { return false }
+    overviewNavigationError = nil
+    let host = agentOverviewHosts.first(where: { $0.id == instanceID })
+    guard let host, let group = host.groups.first(where: { $0.id == projectID }),
+      group.threads.contains(where: { $0.id == threadID })
+    else {
+      overviewNavigationError = "This agent is no longer available. Refresh and try again."
+      return false
+    }
+    openingOverviewAgent = true
+    defer { openingOverviewAgent = false }
+    if instanceID != activeInstanceID || connectionState != .connected {
+      guard await selectSavedInstance(instanceID) else {
+        overviewNavigationError = instanceError ?? "Connect to this server and try again."
+        return false
+      }
+    }
+    guard !Task.isCancelled, activeInstanceID == instanceID, let service,
+      connectionState == .connected, !appIsInBackground
+    else { return false }
+    guard host.serverID == connectedServerID else {
+      overviewNavigationError = "This server's identity changed. Refresh before opening an agent."
+      return false
+    }
+    let generation = connectionGeneration
+    do {
+      let currentThreads = try await withConnectionAttemptTimeout(.seconds(15)) {
+        try await service.threads(projectID: projectID)
+      }
+      guard connectionGeneration == generation, activeInstanceID == instanceID,
+        !Task.isCancelled, !appIsInBackground
+      else { return false }
+      guard
+        currentThreads.contains(where: {
+          $0.id == threadID && ($0.projectID == nil || $0.projectID == projectID)
+        })
+      else {
+        overviewNavigationError = "This agent is no longer available. Refresh and try again."
+        return false
+      }
+      agentOverviewGroups = host.groups.map {
+        $0.id == projectID
+          ? RemoteAgentOverviewGroup(project: group.project, threads: currentThreads, error: nil)
+          : $0
+      }
+      return openAgent(projectID: projectID, threadID: threadID)
+    } catch {
+      if connectionGeneration == generation { overviewNavigationError = error.localizedDescription }
+      return false
+    }
+  }
+
   private func startProviderUsageRefresh() -> Task<Void, Never> {
     if let providerUsageRefreshTask {
       providerUsageRefreshQueued = true
@@ -1514,52 +2131,7 @@ final class OesapModel {
       connectionState == .connected, !Task.isCancelled
     else { return }
 
-    let results: [AgentOverviewLoadResult] = await withTaskGroup(of: AgentOverviewLoadResult.self) {
-      group -> [AgentOverviewLoadResult] in
-      if Task.isCancelled {
-        group.cancelAll()
-        return []
-      }
-      var nextIndex = 0
-      let initialCount = min(4, sourceProjects.count)
-      for _ in 0..<initialCount {
-        let index = nextIndex
-        nextIndex += 1
-        let project = sourceProjects[index]
-        group.addTask {
-          do {
-            return AgentOverviewLoadResult(
-              index: index, threads: try await service.threads(projectID: project.id), error: nil)
-          } catch {
-            return AgentOverviewLoadResult(
-              index: index, threads: nil, error: error.localizedDescription)
-          }
-        }
-      }
-      var loaded: [AgentOverviewLoadResult] = []
-      while let result = await group.next() {
-        if Task.isCancelled {
-          group.cancelAll()
-          break
-        }
-        loaded.append(result)
-        if nextIndex < sourceProjects.count {
-          let index = nextIndex
-          nextIndex += 1
-          let project = sourceProjects[index]
-          group.addTask {
-            do {
-              return AgentOverviewLoadResult(
-                index: index, threads: try await service.threads(projectID: project.id), error: nil)
-            } catch {
-              return AgentOverviewLoadResult(
-                index: index, threads: nil, error: error.localizedDescription)
-            }
-          }
-        }
-      }
-      return loaded
-    }
+    let results = await Self.loadOverviewProjects(sourceProjects, using: service)
     guard connectionGeneration == generation,
       agentOverviewRefreshGeneration == refreshGeneration,
       connectionState == .connected,
@@ -1691,6 +2263,7 @@ final class OesapModel {
       projects.append(project)
     }
     await selectProject(project.id)
+    updateSelectedProjectCatalog()
     return project.id
   }
 
@@ -2546,6 +3119,7 @@ final class OesapModel {
           "The workspace you were viewing is no longer available on this host. It may have been archived."
       }
       projects = loadedProjects
+      updateSelectedProjectCatalog()
       loadingProjects = false
       await refreshPermissions(using: service, generation: generation)
       guard connectionGeneration == generation, !Task.isCancelled else { return }
@@ -2778,6 +3352,32 @@ final class OesapModel {
     threadStateRevisions.removeAll()
     imageDrafts.removeAll()
     acceptedMessageImages.removeAll()
+  }
+
+  private func saveWorkspaceAgentState() {
+    guard let instanceID = activeInstanceID,
+      let serverID = agentControlServerID ?? connectedServerID, !serverID.isEmpty
+    else { return }
+    prepareAgentActionsForConnectionChange()
+    savedWorkspaceAgentStates[instanceID] = SavedWorkspaceAgentState(
+      serverID: serverID, drafts: drafts, imageDrafts: imageDrafts,
+      acceptedImages: acceptedMessageImages, pendingMessages: pendingAgentMessages,
+      sendFeedback: agentSendFeedback, actionFeedback: agentActionFeedback,
+      newThreadIntents: pendingNewThreadIntents, newThreadResults: pendingNewThreadResults)
+  }
+
+  private func restoreWorkspaceAgentState(instanceID: String, serverID: String?) {
+    guard let state = savedWorkspaceAgentStates.removeValue(forKey: instanceID),
+      state.serverID == serverID
+    else { return }
+    drafts = state.drafts
+    imageDrafts = state.imageDrafts
+    acceptedMessageImages = state.acceptedImages
+    pendingAgentMessages = state.pendingMessages
+    agentSendFeedback = state.sendFeedback
+    agentActionFeedback = state.actionFeedback
+    pendingNewThreadIntents = state.newThreadIntents
+    pendingNewThreadResults = state.newThreadResults
   }
 
   private static func isKnownStoppedState(_ state: RemoteThread.State) -> Bool {
@@ -3125,6 +3725,12 @@ final class OesapModel {
     agentOverviewRefreshGeneration += 1
     answeringPermissionID = nil
     connectError = reason
+    if let index = allHostProjectCatalogs.firstIndex(where: { $0.id == activeInstanceID }) {
+      allHostProjectCatalogs[index].error = reason
+      allHostProjectCatalogs[index].isStale = true
+      allHostProjectCatalogs[index].isLoading = false
+      allHostProjectCatalogs[index].isConnectionUnavailable = true
+    }
     if replaceWorkspaceError { workspaceError = reason }
     await oldService?.disconnect()
     await refreshSavedInstances()
@@ -3177,6 +3783,17 @@ final class OesapModel {
     timelineGeneration += 1
     clearErrors()
     workspaceError = nil
+  }
+
+  private func updateSelectedProjectCatalog() {
+    guard let index = allHostProjectCatalogs.firstIndex(where: { $0.id == activeInstanceID }),
+      allHostProjectCatalogs[index].serverID == connectedServerID
+    else { return }
+    allHostProjectCatalogs[index].projects = projects
+    allHostProjectCatalogs[index].updatedAt = Date()
+    allHostProjectCatalogs[index].isStale = false
+    allHostProjectCatalogs[index].error = nil
+    allHostProjectCatalogs[index].isConnectionUnavailable = false
   }
 
   private func clearErrors() {

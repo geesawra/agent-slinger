@@ -225,23 +225,36 @@ struct ConnectionSetupView: View {
 struct ConnectionErrorNotice: View {
   let message: String
   let identifier: String
+  var title: String? = nil
+  var titleIdentifier: String? = nil
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      Label {
+    HStack(alignment: .top, spacing: 12) {
+      Image(systemName: "exclamationmark.triangle.fill")
+        .foregroundStyle(.red)
+        .frame(width: 24)
+        .padding(.top, 2)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 8) {
+        if let title {
+          Text(title)
+            .font(.headline)
+            .accessibilityIdentifier(titleIdentifier ?? "\(identifier)-title")
+        }
         Text(message)
           .foregroundStyle(.primary)
           .fixedSize(horizontal: false, vertical: true)
-          .textSelection(.enabled)
-      } icon: {
-        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+          .accessibilityIdentifier(identifier)
       }
-      .accessibilityIdentifier(identifier)
-
+    }
+    .contentShape(Rectangle())
+    .accessibilityAction(named: Text("Copy details")) {
+      UIPasteboard.general.string = message
+    }
+    .contextMenu {
       Button("Copy details", systemImage: "doc.on.doc") {
         UIPasteboard.general.string = message
       }
-      .buttonStyle(.borderless)
       .accessibilityIdentifier("\(identifier)-copy")
     }
   }

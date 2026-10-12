@@ -3,6 +3,98 @@ import XCTest
 @testable import Oesap
 
 final class PaseoFeatureAdapterTests: XCTestCase {
+  func testOverviewConnectionsCoalesceAndPromoteWithoutChangingSelectionDuringRefresh() async throws
+  {
+    let store = ConnectionStore(storage: MemoryConnectionStoreStorage())
+    let first = try store.saveAndSelect(
+      PaseoConnectionConfig.direct(endpoint: "one.example:6767", useTLS: true, password: ""),
+      name: "Work")
+    let second = try store.saveAndSelect(
+      PaseoConnectionConfig.direct(endpoint: "two.example:6767", useTLS: true, password: ""),
+      name: "Home")
+    try store.select(id: first.id)
+    let gate = AdapterTestGate()
+    let firstClient = AdapterTestClient()
+    let secondClient = AdapterTestClient(connectionGate: gate)
+    let firstAdapter = PaseoRemoteServiceAdapter(client: firstClient)
+    let secondAdapter = PaseoRemoteServiceAdapter(client: secondClient)
+    let factory = PaseoConnectionFactory(store: store) { config in
+      config.endpoint.hasPrefix("one.") ? firstAdapter : secondAdapter
+    }
+    _ = try await factory.selectSavedInstance(id: first.id)
+    let connecting = Task { try await factory.connectForOverview(instanceID: second.id) }
+    await gate.waitUntilEntered()
+    let overlapping = Task { try await factory.connectForOverview(instanceID: second.id) }
+    XCTAssertEqual(try store.activeID(), first.id)
+    await gate.open()
+    _ = try await connecting.value
+    _ = try await overlapping.value
+    let connections = await secondClient.connectionCount()
+    XCTAssertEqual(connections, 1)
+    let firstDisconnects = await firstClient.disconnectCount()
+    XCTAssertEqual(firstDisconnects, 0)
+    XCTAssertEqual(try store.activeID(), first.id)
+
+    _ = try await factory.selectSavedInstance(id: second.id)
+    let promotedConnections = await secondClient.connectionCount()
+    XCTAssertEqual(promotedConnections, 1)
+    await factory.disconnectOverviewServices()
+    let promotedDisconnects = await secondClient.disconnectCount()
+    XCTAssertEqual(promotedDisconnects, 0)
+    XCTAssertEqual(try store.list().count, 2)
+    _ = try await factory.connectForOverview(instanceID: second.id)
+    let activeConnections = await secondClient.connectionCount()
+    XCTAssertEqual(activeConnections, 1)
+    try await factory.disconnect()
+  }
+
+  func testCancellingOverviewCallerCancelsAndClosesItsConnectionAttempt() async throws {
+    let store = ConnectionStore(storage: MemoryConnectionStoreStorage())
+    let record = try store.saveAndSelect(
+      PaseoConnectionConfig.direct(endpoint: "one.example:6767", useTLS: true, password: ""),
+      name: "Work")
+    let gate = AdapterTestGate()
+    let client = AdapterTestClient(connectionGate: gate)
+    let adapter = PaseoRemoteServiceAdapter(client: client)
+    let factory = PaseoConnectionFactory(store: store) { _ in adapter }
+    let connecting = Task { try await factory.connectForOverview(instanceID: record.id) }
+    await gate.waitUntilEntered()
+    connecting.cancel()
+    await gate.open()
+    do {
+      _ = try await connecting.value
+      XCTFail("A cancelled caller must not leave a connected overview service")
+    } catch {}
+    let connected = await adapter.isConnected()
+    XCTAssertFalse(connected)
+    _ = try await factory.connectForOverview(instanceID: record.id)
+    let connections = await client.connectionCount()
+    XCTAssertEqual(connections, 2)
+    await factory.disconnectOverviewServices()
+  }
+
+  func testRemovingHostDuringOverviewConnectionClosesLateHandshake() async throws {
+    let store = ConnectionStore(storage: MemoryConnectionStoreStorage())
+    let record = try store.saveAndSelect(
+      PaseoConnectionConfig.direct(endpoint: "one.example:6767", useTLS: true, password: ""),
+      name: "Work")
+    let gate = AdapterTestGate()
+    let client = AdapterTestClient(connectionGate: gate)
+    let adapter = PaseoRemoteServiceAdapter(client: client)
+    let factory = PaseoConnectionFactory(store: store) { _ in adapter }
+    let connecting = Task { try await factory.connectForOverview(instanceID: record.id) }
+    await gate.waitUntilEntered()
+    try await factory.removeSavedInstance(id: record.id)
+    await gate.open()
+    do {
+      _ = try await connecting.value
+      XCTFail("A removed host must not return a late connected service")
+    } catch {}
+    let connected = await adapter.isConnected()
+    XCTAssertFalse(connected)
+    XCTAssertTrue(try store.list().isEmpty)
+  }
+
   func testGitSnapshotMapsCountsAndRendersFileDiff() async throws {
     let adapter = PaseoRemoteServiceAdapter(client: AdapterTestClient())
     let status = try await adapter.gitStatus(cwd: "/fixture/worktree")
@@ -239,6 +331,33 @@ final class PaseoFeatureAdapterTests: XCTestCase {
     } catch {
       XCTAssertTrue(error.localizedDescription.contains("invalid project thread page cursor"))
     }
+    await adapter.disconnect()
+  }
+
+  func testThreadMappingPreservesActivityAndFallsBackForMissingOrMalformedDates() async throws {
+    let client = AdapterTestClient()
+    let adapter = PaseoRemoteServiceAdapter(client: client)
+    let dates = [
+      "2026-09-25T12:01:00.125Z", "2026-09-25T14:01:00+02:00", "invalid", "",
+    ]
+    let threads = dates.enumerated().map { index, updatedAt in
+      PaseoThread(
+        id: "agent-\(index)", title: "Thread", provider: "codex", model: nil, status: "running",
+        cwd: "/workspace", createdAt: index == 3 ? "invalid" : "2026-09-25T12:00:00Z",
+        updatedAt: updatedAt, archivedAt: nil, requiresAttention: false, attentionReason: nil,
+        projectKey: "project-1", projectName: "Project")
+    }
+    await client.setThreadPages([
+      PaseoPage(items: threads, nextCursor: nil, previousCursor: nil, hasMore: false)
+    ])
+
+    let mapped = try await adapter.threads(projectID: "project-1")
+    let activity = try XCTUnwrap(mapped[0].lastActivityAt)
+    let sameMinute = try XCTUnwrap(mapped[1].lastActivityAt)
+    let created = try XCTUnwrap(mapped[2].lastActivityAt)
+    XCTAssertEqual(activity.timeIntervalSince(sameMinute), 0.125, accuracy: 0.001)
+    XCTAssertEqual(sameMinute.timeIntervalSince(created), 60)
+    XCTAssertNil(mapped[3].lastActivityAt)
     await adapter.disconnect()
   }
 
@@ -579,6 +698,9 @@ private actor AdapterTestClient: PaseoService {
 
   private var sentIntent: SentIntent?
   private let isGit: Bool
+  private let connectionGate: AdapterTestGate?
+  private var connections = 0
+  private var disconnects = 0
   private var checkoutDiffCalls = 0
   private var continuation: AsyncThrowingStream<PaseoTimelineEvent, Error>.Continuation?
   private var threadPages: [PaseoPage<PaseoThread>] = []
@@ -589,12 +711,20 @@ private actor AdapterTestClient: PaseoService {
   private var historyGate: AdapterTestGate?
   private var gatedTailCall = Int.max
 
-  init(isGit: Bool = true) { self.isGit = isGit }
+  init(isGit: Bool = true, connectionGate: AdapterTestGate? = nil) {
+    self.isGit = isGit
+    self.connectionGate = connectionGate
+  }
+
+  func connectionCount() -> Int { connections }
+  func disconnectCount() -> Int { disconnects }
 
   func checkoutDiffCallCount() -> Int { checkoutDiffCalls }
 
   func connect() async throws -> PaseoConnectionInfo {
-    PaseoConnectionInfo(serverID: "test", features: [:])
+    connections += 1
+    await connectionGate?.wait()
+    return PaseoConnectionInfo(serverID: "test", features: [:])
   }
 
   func connectionEvents() async -> AsyncStream<PaseoConnectionState> {
@@ -724,6 +854,7 @@ private actor AdapterTestClient: PaseoService {
   {}
 
   func disconnect() async {
+    disconnects += 1
     continuation?.finish()
     continuation = nil
   }

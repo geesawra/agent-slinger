@@ -2,11 +2,10 @@ import SwiftUI
 
 struct SettingsView: View {
   @Bindable var model: OesapModel
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   var onAddInstance: () -> Void
-  var onSelected: () -> Void
 
   @State private var isRefreshing = false
-  @State private var isSelecting = false
   @State private var pendingRemoval: SavedPaseoInstance?
 
   var body: some View {
@@ -28,53 +27,28 @@ struct SettingsView: View {
         } else {
           ForEach(model.savedInstances) { instance in
             HStack(spacing: 12) {
-              Button {
-                select(instance)
-              } label: {
-                HStack(spacing: 12) {
-                  VStack(alignment: .leading, spacing: 4) {
-                    Text(instance.name)
-                      .font(.body.weight(.medium))
-                      .foregroundStyle(.primary)
-                    if !instance.subtitle.isEmpty {
-                      Text(instance.subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                    }
-                  }
-                  Spacer(minLength: 4)
-                  if isSelecting && model.activeInstanceID == instance.id {
-                    ProgressView()
-                      .accessibilityLabel("Connecting to \(instance.name)")
-                  } else if model.activeInstanceID == instance.id {
-                    Image(systemName: "checkmark.circle.fill")
-                      .foregroundStyle(.tint)
-                      .accessibilityLabel("Selected")
-                  }
+              VStack(alignment: .leading, spacing: 4) {
+                Text(instance.name)
+                  .font(.body.weight(.medium))
+                  .foregroundStyle(.primary)
+                if !instance.subtitle.isEmpty {
+                  Text(instance.subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
                 }
-                .contentShape(Rectangle())
               }
-              .buttonStyle(.plain)
-              .disabled(isSelecting)
-              .accessibilityLabel(
-                model.activeInstanceID == instance.id
-                  ? "\(instance.name), Selected" : instance.name
-              )
-              .accessibilityIdentifier("saved-instance-\(instance.id)")
-              .accessibilityHint("Select this Paseo instance. \(instance.subtitle)")
-
-              Button(role: .destructive) {
-                pendingRemoval = instance
-              } label: {
-                Image(systemName: "trash")
-                  .frame(minWidth: 32, minHeight: 44)
-              }
-              .buttonStyle(.borderless)
-              .disabled(isSelecting)
-              .accessibilityLabel("Remove \(instance.name)")
-              .accessibilityIdentifier("remove-instance-\(instance.id)")
+              Spacer(minLength: 4)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("saved-instance-\(instance.id)")
+            .transition(.opacity)
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+              removeAction(for: instance)
+            }
+            #if targetEnvironment(macCatalyst)
+              .contextMenu { removeAction(for: instance) }
+            #endif
           }
         }
 
@@ -85,46 +59,27 @@ struct SettingsView: View {
       } header: {
         Text("Paseo instances").foregroundStyle(Color.primary.opacity(0.75))
       } footer: {
-        Text("Choose which Paseo host to use. Each instance keeps its own saved connection.")
-          .foregroundStyle(Color.primary.opacity(0.75))
+        Text(
+          "Projects and agents include all saved servers. Open a project or agent to use its server."
+        )
+        .foregroundStyle(Color.primary.opacity(0.75))
       }
 
       if let error = model.instanceError {
         Section {
           ConnectionErrorNotice(message: error, identifier: "instance-error")
-
-          if let activeID = model.activeInstanceID,
-            let activeInstance = model.savedInstances.first(where: { $0.id == activeID })
-          {
-            Button {
-              select(activeInstance)
-            } label: {
-              HStack {
-                Label("Retry \(activeInstance.name)", systemImage: "arrow.clockwise")
-                Spacer()
-                if isSelecting { ProgressView() }
-              }
-            }
-            .disabled(model.connectionState.isBusy || isSelecting)
-            .accessibilityIdentifier("retry-active-instance")
-          } else {
-            Text("Pull down to refresh saved instances.")
-              .font(.footnote)
-              .foregroundStyle(.secondary)
-          }
+        } footer: {
+          Text("Pull down to refresh saved instances.")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
         }
       }
     }
+    .animation(
+      reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.savedInstances.map(\.id)
+    )
     .navigationTitle("Settings")
     .navigationBarTitleDisplayMode(.inline)
-    .toolbar {
-      ToolbarItem(placement: .principal) {
-        if model.connectionState.isBusy {
-          ConnectionProgressIndicator(
-            title: model.connectionProgressTitle)
-        }
-      }
-    }
     .refreshable { await refreshInstances() }
     .task { await refreshInstances() }
     .confirmationDialog(
@@ -150,14 +105,17 @@ struct SettingsView: View {
     }
   }
 
-  private func select(_ instance: SavedPaseoInstance) {
-    guard !isSelecting else { return }
-    isSelecting = true
-    Task {
-      let connected = await model.selectSavedInstance(instance.id)
-      isSelecting = false
-      if connected { onSelected() }
+  private func removeAction(for instance: SavedPaseoInstance) -> some View {
+    // This action only asks for confirmation. A destructive swipe action
+    // optimistically removes the row before the user has confirmed.
+    Button {
+      pendingRemoval = instance
+    } label: {
+      Label("Remove", systemImage: "trash")
     }
+    .tint(.red)
+    .accessibilityLabel("Remove \(instance.name)")
+    .accessibilityIdentifier("remove-instance-\(instance.id)")
   }
 
   private func refreshInstances() async {

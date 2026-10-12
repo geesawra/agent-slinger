@@ -4,6 +4,10 @@
 
 Accepted
 
+The project grouping is superseded by
+[ADR 0012](0012-attention-and-activity-agent-overview.md). The snapshot,
+filtering, freshness, and navigation decisions below still apply.
+
 ## Context
 
 People need a cross-project view of running agents and work that needs

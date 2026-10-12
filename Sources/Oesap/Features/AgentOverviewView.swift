@@ -2,23 +2,24 @@ import SwiftUI
 
 struct AgentOverviewView: View {
   @Bindable var model: OesapModel
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   var onOpenThread: (String) -> Void
 
   @State private var filter = AgentOverviewFilter.active
-  @State private var navigationError: String?
+  @State private var openTask: Task<Void, Never>?
 
-  private var allThreads: [RemoteThread] {
-    model.agentOverviewGroups.flatMap(\.threads)
-  }
-
-  private var visibleThreadCount: Int {
-    model.agentOverviewGroups.reduce(0) { count, group in
-      count + group.threads.filter(filter.includes).count
-    }
-  }
-
+  private var hosts: [RemoteAgentOverviewHost] { model.agentOverviewHosts }
+  private var allThreads: [RemoteThread] { hosts.flatMap { $0.groups.flatMap(\.threads) } }
   private var hasProjectErrors: Bool {
-    model.agentOverviewGroups.contains { $0.error != nil }
+    hosts.contains { $0.groups.contains { $0.error != nil } }
+  }
+  private var hasUnavailableStates: Bool {
+    hosts.contains { $0.isStale || $0.error != nil }
+      || (model.agentOverviewScope == .allHosts && model.allHostAgentOverviewError != nil)
+  }
+  private var isLoading: Bool {
+    model.agentOverviewScope == .allHosts
+      ? model.loadingAllHostAgentOverview || model.loadingAgentOverview : model.loadingAgentOverview
   }
 
   private var counts: (running: Int, attention: Int, errors: Int) {
@@ -28,7 +29,7 @@ struct AgentOverviewView: View {
     for thread in allThreads {
       if thread.state == .running { running += 1 }
       if thread.state == .failed { errors += 1 }
-      if thread.requiresAttention || thread.state == .waiting { attention += 1 }
+      if thread.needsAttention { attention += 1 }
     }
     return (running, attention, errors)
   }
@@ -37,47 +38,54 @@ struct AgentOverviewView: View {
     List {
       overviewSummary
 
-      if model.connectionState != .connected {
-        offlineStatus
-      } else if model.agentOverviewError != nil || model.agentOverviewIsStale || hasProjectErrors {
-        refreshStatus
+      if let error = model.allHostAgentOverviewError, model.agentOverviewScope == .allHosts {
+        Section { Label(error, systemImage: "exclamationmark.triangle.fill") }
+      }
+      if hasUnavailableStates {
+        Section {
+          VStack(alignment: .leading, spacing: 8) {
+            Label(
+              hasProjectErrors
+                ? "Some project states are unavailable" : "Some server states are unavailable",
+              systemImage: "exclamationmark.triangle.fill")
+            Text(
+              "Counts include last-known states. Unavailable servers or projects may be missing. Pull down to refresh."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+          }
+        }
       }
 
-      if model.loadingAgentOverview && model.agentOverviewGroups.isEmpty {
+      if allThreads.filter(filter.includes).isEmpty && !isLoading && !hasUnavailableStates {
         Section {
-          HStack(spacing: 12) {
-            ProgressView()
-            Text("Loading agents…")
-              .foregroundStyle(.secondary)
-          }
+          ContentUnavailableView(
+            filter == .active ? "No active agents" : "No agents in these projects",
+            systemImage: filter == .active ? "checkmark.circle" : "cpu",
+            description: Text(
+              filter == .active
+                ? "Switch to All to include idle agents."
+                : "Agents discovered on your Paseo servers will appear here.")
+          )
+          .listRowSeparator(.hidden)
         }
-      } else if model.agentOverviewGroups.isEmpty {
-        if model.agentOverviewError == nil {
-          Section {
-            ContentUnavailableView(
-              "No agents found",
-              systemImage: "cpu",
-              description: Text("Agents discovered on this Paseo host will appear here.")
-            )
-            .listRowSeparator(.hidden)
-          }
-        }
-      } else {
-        if visibleThreadCount == 0 {
-          Section {
-            ContentUnavailableView(
-              emptyTitle,
-              systemImage: filter == .active ? "checkmark.circle" : "cpu",
-              description: Text(emptyDescription)
-            )
-            .listRowSeparator(.hidden)
-          }
-        }
+      }
 
-        ForEach(model.agentOverviewGroups) { group in
-          let threads = group.threads.filter(filter.includes)
-          if !threads.isEmpty || group.error != nil {
-            Section(group.project.name) {
+      ForEach(hosts) { host in
+        Section {
+          if host.isLoading {
+            HStack(spacing: 12) {
+              ProgressView()
+              Text("Refreshing agents…").foregroundStyle(.secondary)
+            }
+          }
+          if let error = host.error, !host.groups.contains(where: { $0.error != nil }) {
+            Label(error, systemImage: "wifi.exclamationmark")
+              .accessibilityIdentifier("overview-server-error-\(host.id)")
+          }
+          ForEach(host.groups.filter { $0.error != nil }) { group in
+            VStack(alignment: .leading, spacing: 4) {
+              Text(verbatim: group.project.name).font(.subheadline.weight(.semibold))
               if let error = group.error {
                 Label {
                   Text(verbatim: error)
@@ -87,46 +95,81 @@ struct AgentOverviewView: View {
                 }
                 .font(.subheadline)
               }
-              ForEach(threads) { thread in
-                Button {
-                  open(thread, in: group)
-                } label: {
-                  AgentOverviewRow(thread: thread)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("overview-agent-\(thread.id)")
-              }
             }
+          }
+          ForEach(host.entries.filter { filter.includes($0.thread) }) { entry in
+            Button {
+              openTask = Task { await open(entry, on: host) }
+            } label: {
+              AgentOverviewRow(thread: entry.thread, projectName: entry.project.name)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.openingOverviewAgent || model.connectionState.isBusy)
+            .accessibilityIdentifier(
+              model.savedInstances.count > 1
+                ? "overview-agent-\(host.id)-\(entry.thread.id)"
+                : "overview-agent-\(entry.thread.id)"
+            )
+            .transition(.opacity)
+          }
+          if host.entries.filter({ filter.includes($0.thread) }).isEmpty,
+            !host.isLoading, !host.isStale, host.error == nil
+          {
+            Text(filter == .active ? "No active agents on this server" : "No agents on this server")
+              .foregroundStyle(.secondary)
+          }
+        } header: {
+          Text(verbatim: host.instance.name)
+            .textCase(nil)
+            .accessibilityIdentifier("overview-server-\(host.id)")
+        } footer: {
+          if let updatedAt = host.updatedAt {
+            Text(
+              "\(host.isStale ? "Last known snapshot" : "Snapshot updated") \(updatedAt.formatted(date: .omitted, time: .shortened))"
+            )
+          } else if !host.isLoading {
+            Text("No snapshot available")
           }
         }
       }
 
-      if let navigationError {
-        Section {
-          Label {
-            Text(navigationError).foregroundStyle(.primary)
-          } icon: {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-          }
-        }
+      if let error = model.overviewNavigationError {
+        Section { Label(error, systemImage: "exclamationmark.triangle.fill") }
       }
     }
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: hosts.map(\.id))
+    .animation(
+      reduceMotion ? nil : .easeInOut(duration: 0.2),
+      value: hosts.map { $0.entries.filter { filter.includes($0.thread) }.map(\.id) }
+    )
     .navigationTitle("Agents")
     .navigationBarTitleDisplayMode(.inline)
-    .refreshable { await model.refreshAgentOverview() }
-    .onAppear { Task { await model.refreshAgentOverview() } }
+    .refreshable { await model.refreshVisibleAgentOverview() }
+    .task { await model.beginAgentOverview() }
+    .onDisappear {
+      openTask?.cancel()
+      model.endAgentOverview()
+    }
+    .onChange(of: model.agentOverviewScope) { _, _ in
+      Task { await model.refreshVisibleAgentOverview() }
+    }
     .onChange(of: model.timelineGeneration) { _, _ in
-      guard model.connectionState == .connected else { return }
-      Task { await model.refreshAgentOverview() }
+      guard !model.openingOverviewAgent else { return }
+      Task { await model.refreshVisibleAgentOverview() }
     }
   }
 
   private var overviewSummary: some View {
     Section {
-      Picker("Agent filter", selection: $filter) {
-        ForEach(AgentOverviewFilter.allCases) { option in
-          Text(option.title).tag(option)
+      if model.savedInstances.count > 1 {
+        Picker("Server scope", selection: $model.agentOverviewScope) {
+          ForEach(AgentOverviewScope.allCases) { scope in Text(scope.title).tag(scope) }
         }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("agent-overview-scope")
+      }
+      Picker("Agent filter", selection: $filter) {
+        ForEach(AgentOverviewFilter.allCases) { option in Text(option.title).tag(option) }
       }
       .pickerStyle(.segmented)
       .accessibilityIdentifier("agent-overview-filter")
@@ -137,98 +180,26 @@ struct AgentOverviewView: View {
       )
       .font(.subheadline.weight(.medium))
       .accessibilityIdentifier("agent-overview-summary")
-
-      if let updatedAt = model.agentOverviewUpdatedAt {
-        Text("Snapshot updated \(updatedAt.formatted(date: .omitted, time: .shortened))")
-          .font(.footnote)
-          .foregroundStyle(.secondary)
-      } else {
-        Text("Snapshot status · pull to refresh")
-          .font(.footnote)
-          .foregroundStyle(.secondary)
-      }
-
-    }
-  }
-
-  private var refreshStatus: some View {
-    Section {
-      refreshStatusDetails
-    }
-  }
-
-  private var refreshStatusDetails: some View {
-    HStack(alignment: .top, spacing: 10) {
-      Image(systemName: "exclamationmark.triangle.fill")
-        .foregroundStyle(.orange)
-        .padding(.top, 2)
-        .accessibilityHidden(true)
-      VStack(alignment: .leading, spacing: 3) {
-        Text(
-          hasProjectErrors ? "Some project states are unavailable" : "Agent status is unavailable"
-        )
-        .font(.subheadline.weight(.semibold))
-        Text(refreshStatusDescription)
-          .font(.footnote)
-          .foregroundStyle(Color.primary.opacity(0.75))
-      }
-    }
-  }
-
-  private var refreshStatusDescription: String {
-    if hasProjectErrors {
-      return "Showing last-known rows; counts include loaded project results. Pull down to refresh."
-    }
-    if let error = model.agentOverviewError {
-      return "\(error) Pull down to refresh to try again."
-    }
-    return "Pull to refresh to load current agent status."
-  }
-
-  private var offlineStatus: some View {
-    Section {
-      Label {
-        Text("Host disconnected").foregroundStyle(.primary)
-      } icon: {
-        Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
-      }
-      .font(.headline)
       Text(
-        model.agentOverviewGroups.isEmpty
-          ? "Reconnect to load agent status for this host."
-          : "Showing last known agent states. Reconnect to refresh this overview."
+        isLoading ? "Counts include results loaded so far." : "Snapshot status · pull to refresh"
       )
-      .font(.subheadline)
+      .font(.footnote)
       .foregroundStyle(.secondary)
-      Button("Reconnect") { Task { await model.reconnect() } }
-        .disabled(model.connectionState.isBusy || !model.hasSavedConnection)
+      if model.openingOverviewAgent {
+        ProgressView("Opening agent…")
+      }
     }
   }
 
-  private var emptyTitle: String {
-    if model.agentOverviewError != nil || hasProjectErrors { return "Agent status unavailable" }
-    if filter == .active { return "No active agents" }
-    return "No agents in these projects"
-  }
-
-  private var emptyDescription: String {
-    if model.agentOverviewError != nil || hasProjectErrors {
-      return "Some project states could not be loaded. Review the errors above or below."
+  private func open(_ entry: RemoteAgentOverviewEntry, on host: RemoteAgentOverviewHost) async {
+    let opened: Bool
+    if host.id == "current-host" {
+      opened = model.openAgent(projectID: entry.project.id, threadID: entry.thread.id)
+    } else {
+      opened = await model.openOverviewAgent(
+        instanceID: host.id, projectID: entry.project.id, threadID: entry.thread.id)
     }
-    if filter == .active {
-      return "Switch to All to include idle agents."
-    }
-    return "Agents discovered on this Paseo host will appear here."
-  }
-
-  private func open(_ thread: RemoteThread, in group: RemoteAgentOverviewGroup) {
-    guard model.openAgent(projectID: group.project.id, threadID: thread.id) else {
-      navigationError =
-        "This agent is no longer available in the overview. Pull down to refresh and try again."
-      return
-    }
-    navigationError = nil
-    onOpenThread(thread.id)
+    if opened && !Task.isCancelled { onOpenThread(entry.thread.id) }
   }
 }
 
@@ -258,6 +229,7 @@ private enum AgentOverviewFilter: String, CaseIterable, Identifiable {
 
 private struct AgentOverviewRow: View {
   let thread: RemoteThread
+  let projectName: String
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -287,6 +259,7 @@ private struct AgentOverviewRow: View {
           Text(thread.title)
             .font(.headline)
             .foregroundStyle(.primary)
+          projectLabel
           providerMetadata
           stateInformation
         }
@@ -301,6 +274,7 @@ private struct AgentOverviewRow: View {
             Text(thread.title)
               .font(.headline)
               .foregroundStyle(.primary)
+            projectLabel
             providerMetadata
             stateInformation
           }
@@ -337,6 +311,12 @@ private struct AgentOverviewRow: View {
         .font(.subheadline)
         .foregroundStyle(Color.primary.opacity(0.75))
     }
+  }
+
+  private var projectLabel: some View {
+    Text(verbatim: projectName)
+      .font(.subheadline)
+      .foregroundStyle(.secondary)
   }
 
   private var stateInformation: some View {

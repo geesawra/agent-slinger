@@ -1,9 +1,115 @@
 import Foundation
 
 actor PaseoConnectionFactory: OesapConnectionFactory {
-  private let store = ConnectionStore()
+  private let store: ConnectionStore
+  private let makeService: @Sendable (PaseoConnectionConfig) -> PaseoRemoteServiceAdapter
   private var activeService: PaseoRemoteServiceAdapter?
   private var generation = 0
+  private struct OverviewSession {
+    let token: UUID
+    let service: PaseoRemoteServiceAdapter
+    let connection: Task<Void, Error>
+  }
+  private var overviewSessions: [String: OverviewSession] = [:]
+
+  init(
+    store: ConnectionStore = ConnectionStore(),
+    makeService: @escaping @Sendable (PaseoConnectionConfig) -> PaseoRemoteServiceAdapter = {
+      PaseoRemoteServiceAdapter(config: $0)
+    }
+  ) {
+    self.store = store
+    self.makeService = makeService
+  }
+
+  func connectForOverview(instanceID: String) async throws -> any OesapRemoteService {
+    try await connectedOverviewService(instanceID: instanceID)
+  }
+
+  private func connectedOverviewService(instanceID: String) async throws
+    -> PaseoRemoteServiceAdapter
+  {
+    guard let record = try store.list().first(where: { $0.id == instanceID }) else {
+      throw RemoteServiceError.unavailable("That saved Paseo instance is no longer available.")
+    }
+    if try store.activeID() == instanceID, let candidate = activeService {
+      let isConnected = await candidate.isConnected()
+      try Task.checkCancellation()
+      if isConnected, activeService === candidate, try store.activeID() == instanceID {
+        return candidate
+      }
+    }
+    guard try store.list().contains(where: { $0.id == instanceID }) else {
+      throw CancellationError()
+    }
+    let session: OverviewSession
+    if let existing = overviewSessions[instanceID] {
+      session = existing
+    } else {
+      let service = makeService(record.config)
+      session = OverviewSession(
+        token: UUID(), service: service,
+        connection: Task {
+          do {
+            try await service.connect()
+            try Task.checkCancellation()
+          } catch {
+            await service.disconnect()
+            throw error
+          }
+        })
+      overviewSessions[instanceID] = session
+    }
+    do {
+      try await withTaskCancellationHandler {
+        try await session.connection.value
+      } onCancel: {
+        session.connection.cancel()
+      }
+      try Task.checkCancellation()
+      guard
+        overviewSessions[instanceID]?.token == session.token
+          || activeService === session.service
+      else { throw CancellationError() }
+      if !(await session.service.isConnected()) {
+        if overviewSessions[instanceID]?.token == session.token {
+          overviewSessions.removeValue(forKey: instanceID)
+          await session.service.disconnect()
+          try Task.checkCancellation()
+          return try await connectedOverviewService(instanceID: instanceID)
+        }
+        throw CancellationError()
+      }
+      let serverID = await session.service.serverID()
+      try Task.checkCancellation()
+      guard
+        overviewSessions[instanceID]?.token == session.token
+          || activeService === session.service
+      else { throw CancellationError() }
+      try store.recordServerID(serverID, for: instanceID)
+      return session.service
+    } catch {
+      if overviewSessions[instanceID]?.token == session.token {
+        overviewSessions.removeValue(forKey: instanceID)
+        session.connection.cancel()
+      }
+      if activeService !== session.service { await session.service.disconnect() }
+      throw error
+    }
+  }
+
+  func disconnectOverviewService(instanceID: String) async {
+    guard let session = overviewSessions.removeValue(forKey: instanceID) else { return }
+    session.connection.cancel()
+    await session.service.disconnect()
+  }
+
+  func disconnectOverviewServices() async {
+    let sessions = Array(overviewSessions.values)
+    overviewSessions.removeAll()
+    for session in sessions { session.connection.cancel() }
+    for session in sessions { await session.service.disconnect() }
+  }
 
   func savedConnectionExists() async -> Bool {
     do { return try !store.list().isEmpty } catch { return false }
@@ -33,20 +139,22 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
     await previousService?.disconnect()
     guard attempt == generation else { throw CancellationError() }
 
-    let service = PaseoRemoteServiceAdapter(config: record.config)
+    let service = try await connectedOverviewService(instanceID: id)
     do {
-      try await service.connect()
       let serverID = await service.serverID()
       try Task.checkCancellation()
-      guard attempt == generation else {
-        await service.disconnect()
+      guard attempt == generation, overviewSessions[id]?.service === service else {
         throw CancellationError()
       }
       try store.recordServerID(serverID, for: record.id)
+      overviewSessions.removeValue(forKey: id)
       activeService = service
       return service
     } catch {
-      await service.disconnect()
+      if activeService !== service {
+        await disconnectOverviewService(instanceID: id)
+        await service.disconnect()
+      }
       throw error
     }
   }
@@ -70,7 +178,7 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
     case .relay:
       config = try PaseoConnectionConfig.relay(pairingLink: connection.pairingLink)
     }
-    let service = PaseoRemoteServiceAdapter(config: config)
+    let service = makeService(config)
     do {
       try await service.connect()
       let serverID = await service.serverID()
@@ -81,6 +189,8 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
       }
       let record = try store.saveAndSelect(config, name: connection.name)
       try store.recordServerID(serverID, for: record.id)
+      await disconnectOverviewService(instanceID: record.id)
+      guard attempt == generation else { throw CancellationError() }
       activeService = service
       return service
     } catch {
@@ -100,7 +210,9 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
       throw RemoteServiceError.unavailable(
         "There is no selected Paseo connection. Choose a saved host or connect to one first.")
     }
-    let service = PaseoRemoteServiceAdapter(config: record.config)
+    await disconnectOverviewService(instanceID: record.id)
+    guard attempt == generation else { throw CancellationError() }
+    let service = makeService(record.config)
     do {
       try await service.connect()
       let serverID = await service.serverID()
@@ -120,10 +232,15 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
   func removeSavedInstance(id: String) async throws {
     let activeID = try store.activeID()
     try store.remove(id: id)
-    guard activeID == id else { return }
-    generation += 1
-    let previousService = activeService
-    activeService = nil
+    let previousService: PaseoRemoteServiceAdapter?
+    if activeID == id {
+      generation += 1
+      previousService = activeService
+      activeService = nil
+    } else {
+      previousService = nil
+    }
+    await disconnectOverviewService(instanceID: id)
     await previousService?.disconnect()
   }
 
@@ -140,6 +257,7 @@ actor PaseoConnectionFactory: OesapConnectionFactory {
     } catch {
       clearError = error
     }
+    await disconnectOverviewServices()
     await previousService?.disconnect()
     if let clearError { throw clearError }
   }
@@ -182,6 +300,8 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
   }
 
   func serverID() async -> String? { connectedInfo?.serverID }
+
+  func isConnected() -> Bool { connectedInfo != nil }
 
   func supportsNewThreads() async -> Bool {
     connectedInfo?.features["creationLifecycle"] == true
@@ -365,11 +485,28 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
   }
 
   func projects() async throws -> [RemoteProject] {
-    let loadedProjects = try await client.listProjects()
-    return loadedProjects.map { project in
-      RemoteProject(
-        id: project.id, name: project.name, subtitle: project.rootPath,
-        rootPath: project.rootPath)
+    do {
+      let loadedProjects = try await client.listProjects()
+      return loadedProjects.map { project in
+        RemoteProject(
+          id: project.id, name: project.name, subtitle: project.rootPath,
+          rootPath: project.rootPath)
+      }
+    } catch {
+      if let error = error as? PaseoProtocolError {
+        switch error {
+        case .notConnected, .disconnected: connectedInfo = nil
+        default: break
+        }
+      } else if let error = error as? PaseoConnectionError {
+        switch error {
+        case .disconnected, .transportFailure, .authenticationFailed, .encryptionFailed,
+          .malformedFrame:
+          connectedInfo = nil
+        default: break
+        }
+      }
+      throw error
     }
   }
 
@@ -677,6 +814,7 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
   }
 
   func disconnect() async {
+    connectedInfo = nil
     await client.disconnect()
     historyCursors.removeAll()
     snapshotCursors.removeAll()
@@ -912,7 +1050,8 @@ actor PaseoRemoteServiceAdapter: OesapRemoteService {
       cwd: thread.cwd,
       parentAgentID: thread.parentAgentID,
       workspaceID: thread.workspaceID,
-      projectID: thread.projectKey
+      projectID: thread.projectKey,
+      lastActivityAt: parseTimestamp(thread.updatedAt) ?? parseTimestamp(thread.createdAt)
     )
   }
 

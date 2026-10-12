@@ -110,7 +110,7 @@ final class ConnectionStoreTests: XCTestCase {
   }
 }
 
-private final class MemoryConnectionStoreStorage: ConnectionStoreStorage, @unchecked Sendable {
+final class MemoryConnectionStoreStorage: ConnectionStoreStorage, @unchecked Sendable {
   private let lock = NSLock()
   private var values: [String: Data] = [:]
   private var failWrites = false
